@@ -161,17 +161,17 @@ def main():
     """主函数"""
     # 设置路径
     script_dir = Path(__file__).parent
-    example_dir = script_dir / 'example'
+    input_dir = script_dir / 'input'
     output_dir = script_dir / 'output'
     
     # 确保 output 目录存在
     output_dir.mkdir(exist_ok=True)
     
     # 查找所有 .aip 文件
-    aip_files = list(example_dir.glob('*.aip'))
-    
+    aip_files = list(input_dir.glob('*.aip'))
+
     if not aip_files:
-        print(f"在 {example_dir} 目录中未找到 .aip 文件")
+        print(f"在 {input_dir} 目录中未找到 .aip 文件")
         return
     
     print(f"找到 {len(aip_files)} 个 .aip 文件")
