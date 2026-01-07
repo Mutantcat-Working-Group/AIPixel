@@ -119,8 +119,8 @@ def main():
     """主函数"""
     # 设置路径
     script_dir = Path(__file__).parent
-    output_dir = script_dir / 'output'
-    reverse_dir = script_dir / 'reverse'
+    output_dir = script_dir / 'refer_img'
+    reverse_dir = script_dir / 'refer_aip'
     
     # 确保 reverse 目录存在
     reverse_dir.mkdir(exist_ok=True)
