@@ -1,0 +1,713 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AIP 像素画编辑器</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/layui@2.9.8/dist/css/layui.css">
+    <style>
+        body {
+            background-color: #f2f2f2;
+            padding: 20px;
+            font-family: 'Microsoft YaHei', sans-serif;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        .header h1 {
+            color: #1E9FFF;
+            margin: 0;
+            font-size: 28px;
+        }
+        .header p {
+            color: #666;
+            margin-top: 10px;
+        }
+        .editor-container {
+            display: flex;
+            gap: 20px;
+            justify-content: center;
+            align-items: flex-start;
+            flex-wrap: wrap;
+        }
+        .toolbar {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            min-width: 200px;
+        }
+        .canvas-container {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        #pixelCanvas {
+            border: 2px solid #ddd;
+            cursor: crosshair;
+            image-rendering: pixelated;
+            background-image: 
+                linear-gradient(45deg, #ccc 25%, transparent 25%),
+                linear-gradient(-45deg, #ccc 25%, transparent 25%),
+                linear-gradient(45deg, transparent 75%, #ccc 75%),
+                linear-gradient(-45deg, transparent 75%, #ccc 75%);
+            background-size: 20px 20px;
+            background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
+            background-color: #fff;
+        }
+        .color-palette {
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            gap: 8px;
+            margin-top: 15px;
+        }
+        .color-btn {
+            width: 36px;
+            height: 36px;
+            border: 2px solid #ddd;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        .color-btn:hover {
+            transform: scale(1.1);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+        }
+        .color-btn.active {
+            border-color: #1E9FFF;
+            box-shadow: 0 0 0 3px rgba(30, 159, 255, 0.3);
+        }
+        .tool-btn {
+            margin-bottom: 10px;
+        }
+        .tool-btn.active {
+            background-color: #1E9FFF !important;
+            color: white !important;
+        }
+        .info-panel {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            min-width: 200px;
+        }
+        .info-item {
+            margin-bottom: 10px;
+            padding: 8px;
+            background: #f8f8f8;
+            border-radius: 4px;
+        }
+        .info-label {
+            color: #666;
+            font-size: 12px;
+            margin-bottom: 4px;
+        }
+        .info-value {
+            color: #333;
+            font-weight: bold;
+        }
+        .layui-form-item {
+            margin-bottom: 15px;
+        }
+        .preview-container {
+            margin-top: 15px;
+            text-align: center;
+        }
+        #previewCanvas {
+            border: 1px solid #ddd;
+            image-rendering: pixelated;
+            background: #f8f8f8;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🎨 AIP 像素画编辑器</h1>
+        <p>专业的 AIP 格式像素画编辑工具</p>
+    </div>
+
+    <div class="editor-container">
+        <!-- 左侧工具栏 -->
+        <div class="toolbar">
+            <h3 style="margin-top: 0; color: #333;">文件操作</h3>
+            <div class="layui-form-item">
+                <button type="button" class="layui-btn layui-btn-fluid layui-btn-normal" onclick="importAIP()">
+                    <i class="layui-icon layui-icon-upload-drag"></i> 导入 AIP
+                </button>
+                <input type="file" id="fileInput" accept=".aip" style="display: none;" onchange="handleFileSelect(event)">
+            </div>
+            <div class="layui-form-item">
+                <button type="button" class="layui-btn layui-btn-fluid layui-btn-warm" onclick="exportAIP()">
+                    <i class="layui-icon layui-icon-download-circle"></i> 导出 AIP
+                </button>
+            </div>
+            <div class="layui-form-item">
+                <button type="button" class="layui-btn layui-btn-fluid" onclick="clearCanvas()">
+                    <i class="layui-icon layui-icon-delete"></i> 清空画布
+                </button>
+            </div>
+
+            <hr style="margin: 20px 0; border: none; border-top: 1px solid #eee;">
+
+            <h3 style="color: #333;">绘图工具</h3>
+            <div class="layui-form-item">
+                <button type="button" class="layui-btn layui-btn-fluid tool-btn active" id="brushBtn" onclick="setTool('brush')">
+                    <i class="layui-icon layui-icon-edit"></i> 画笔
+                </button>
+            </div>
+            <div class="layui-form-item">
+                <button type="button" class="layui-btn layui-btn-fluid tool-btn layui-btn-primary" id="eraserBtn" onclick="setTool('eraser')">
+                    <i class="layui-icon layui-icon-close"></i> 橡皮擦
+                </button>
+            </div>
+            <div class="layui-form-item">
+                <button type="button" class="layui-btn layui-btn-fluid tool-btn layui-btn-primary" id="fillBtn" onclick="setTool('fill')">
+                    <i class="layui-icon layui-icon-file"></i> 填充
+                </button>
+            </div>
+
+            <hr style="margin: 20px 0; border: none; border-top: 1px solid #eee;">
+
+            <h3 style="color: #333;">画布设置</h3>
+            <div class="layui-form-item">
+                <label class="layui-form-label">宽度</label>
+                <div class="layui-input-block">
+                    <input type="number" id="canvasWidth" value="32" min="1" max="128" class="layui-input" onchange="resizeCanvas()">
+                </div>
+            </div>
+            <div class="layui-form-item">
+                <label class="layui-form-label">高度</label>
+                <div class="layui-input-block">
+                    <input type="number" id="canvasHeight" value="32" min="1" max="128" class="layui-input" onchange="resizeCanvas()">
+                </div>
+            </div>
+        </div>
+
+        <!-- 中间画布区域 -->
+        <div class="canvas-container">
+            <canvas id="pixelCanvas" width="512" height="512"></canvas>
+            <div style="margin-top: 15px; color: #999; font-size: 12px;">
+                左键绘制 | 右键擦除 | 滚轮缩放
+            </div>
+        </div>
+
+        <!-- 右侧信息面板 -->
+        <div class="info-panel">
+            <h3 style="margin-top: 0; color: #333;">画布信息</h3>
+            <div class="info-item">
+                <div class="info-label">画布尺寸</div>
+                <div class="info-value" id="canvasSize">32 × 32</div>
+            </div>
+            <div class="info-item">
+                <div class="info-label">当前工具</div>
+                <div class="info-value" id="currentTool">画笔</div>
+            </div>
+            <div class="info-item">
+                <div class="info-label">颜色数量</div>
+                <div class="info-value" id="colorCount">1</div>
+            </div>
+            <div class="info-item">
+                <div class="info-label">鼠标位置</div>
+                <div class="info-value" id="mousePos">0, 0</div>
+            </div>
+
+            <hr style="margin: 20px 0; border: none; border-top: 1px solid #eee;">
+
+            <h3 style="color: #333;">颜色选择</h3>
+            <div class="layui-form-item">
+                <input type="color" id="colorPicker" value="#FF3B5C" style="width: 100%; height: 40px; cursor: pointer;" onchange="setColor(this.value)">
+            </div>
+            <div class="color-palette" id="colorPalette">
+                <!-- 颜色按钮将通过 JS 动态生成 -->
+            </div>
+
+            <div class="preview-container">
+                <h4 style="color: #333; margin-bottom: 10px;">预览</h4>
+                <canvas id="previewCanvas" width="128" height="128"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/layui@2.9.8/dist/layui.js"></script>
+    <script>
+        // 初始化 layui
+        layui.use(['layer', 'form'], function(){
+            var layer = layui.layer;
+            var form = layui.form;
+        });
+
+        // 全局变量
+        let canvasWidth = 32;
+        let canvasHeight = 32;
+        let pixelData = [];  // 存储像素数据
+        let currentTool = 'brush';
+        let currentColor = '#FF3B5C';
+        let colors = {0: null, 1: '#FF3B5C'};  // 颜色映射
+        let isDrawing = false;
+        let scale = 16;  // 显示缩放比例
+
+        // Canvas 相关
+        const canvas = document.getElementById('pixelCanvas');
+        const ctx = canvas.getContext('2d');
+        const previewCanvas = document.getElementById('previewCanvas');
+        const previewCtx = previewCanvas.getContext('2d');
+
+        // 初始化
+        function init() {
+            initPixelData();
+            initColorPalette();
+            renderCanvas();
+            updatePreview();
+            setupEventListeners();
+        }
+
+        // 初始化像素数据
+        function initPixelData() {
+            pixelData = [];
+            for (let y = 0; y < canvasHeight; y++) {
+                pixelData[y] = [];
+                for (let x = 0; x < canvasWidth; x++) {
+                    pixelData[y][x] = 0;  // 0 表示透明
+                }
+            }
+        }
+
+        // 初始化颜色面板
+        function initColorPalette() {
+            const defaultColors = [
+                '#FF3B5C', '#8E0F1A', '#FFA3B1', '#FFFFFF', '#6C0B14',
+                '#000000', '#FFFFFF', '#FF0000', '#00FF00', '#0000FF',
+                '#FFFF00', '#00FFFF', '#FF00FF', '#808080', '#C0C0C0',
+                '#800000', '#008000', '#000080', '#808000', '#008080'
+            ];
+
+            const palette = document.getElementById('colorPalette');
+            palette.innerHTML = '';
+
+            defaultColors.forEach((color, index) => {
+                const btn = document.createElement('div');
+                btn.className = 'color-btn';
+                btn.style.backgroundColor = color;
+                btn.title = color;
+                if (index === 0) btn.classList.add('active');
+                btn.onclick = () => setColor(color);
+                palette.appendChild(btn);
+            });
+        }
+
+        // 设置颜色
+        function setColor(color) {
+            currentColor = color;
+            document.getElementById('colorPicker').value = color;
+
+            // 更新颜色按钮状态
+            document.querySelectorAll('.color-btn').forEach(btn => {
+                btn.classList.remove('active');
+                if (btn.style.backgroundColor === color || 
+                    btn.style.backgroundColor === hexToRgb(color)) {
+                    btn.classList.add('active');
+                }
+            });
+
+            // 如果颜色不在 colors 中，添加它
+            if (!Object.values(colors).includes(color)) {
+                const newIndex = Math.max(...Object.keys(colors).map(Number)) + 1;
+                colors[newIndex] = color;
+                updateColorCount();
+            }
+
+            // 如果当前是橡皮擦，切换到画笔
+            if (currentTool === 'eraser') {
+                setTool('brush');
+            }
+        }
+
+        // 设置工具
+        function setTool(tool) {
+            currentTool = tool;
+
+            // 更新按钮状态
+            document.querySelectorAll('.tool-btn').forEach(btn => {
+                btn.classList.remove('active');
+                btn.classList.add('layui-btn-primary');
+            });
+
+            const activeBtn = document.getElementById(tool + 'Btn');
+            if (activeBtn) {
+                activeBtn.classList.add('active');
+                activeBtn.classList.remove('layui-btn-primary');
+            }
+
+            document.getElementById('currentTool').textContent = {
+                'brush': '画笔',
+                'eraser': '橡皮擦',
+                'fill': '填充'
+            }[tool];
+        }
+
+        // 渲染画布
+        function renderCanvas() {
+            // 更新 canvas 尺寸
+            canvas.width = canvasWidth * scale;
+            canvas.height = canvasHeight * scale;
+
+            // 清空画布
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // 绘制像素
+            for (let y = 0; y < canvasHeight; y++) {
+                for (let x = 0; x < canvasWidth; x++) {
+                    const colorIndex = pixelData[y][x];
+                    if (colorIndex !== 0 && colors[colorIndex]) {
+                        ctx.fillStyle = colors[colorIndex];
+                        ctx.fillRect(x * scale, y * scale, scale, scale);
+                    }
+                }
+            }
+
+            // 绘制网格线
+            ctx.strokeStyle = 'rgba(0, 0, 0, 0.1)';
+            ctx.lineWidth = 1;
+            for (let x = 0; x <= canvasWidth; x++) {
+                ctx.beginPath();
+                ctx.moveTo(x * scale, 0);
+                ctx.lineTo(x * scale, canvas.height);
+                ctx.stroke();
+            }
+            for (let y = 0; y <= canvasHeight; y++) {
+                ctx.beginPath();
+                ctx.moveTo(0, y * scale);
+                ctx.lineTo(canvas.width, y * scale);
+                ctx.stroke();
+            }
+        }
+
+        // 更新预览
+        function updatePreview() {
+            previewCanvas.width = 128;
+            previewCanvas.height = 128;
+            previewCtx.clearRect(0, 0, 128, 128);
+
+            const previewScale = Math.max(1, Math.floor(128 / Math.max(canvasWidth, canvasHeight)));
+            const offsetX = (128 - canvasWidth * previewScale) / 2;
+            const offsetY = (128 - canvasHeight * previewScale) / 2;
+
+            for (let y = 0; y < canvasHeight; y++) {
+                for (let x = 0; x < canvasWidth; x++) {
+                    const colorIndex = pixelData[y][x];
+                    if (colorIndex !== 0 && colors[colorIndex]) {
+                        previewCtx.fillStyle = colors[colorIndex];
+                        previewCtx.fillRect(
+                            offsetX + x * previewScale,
+                            offsetY + y * previewScale,
+                            previewScale,
+                            previewScale
+                        );
+                    }
+                }
+            }
+        }
+
+        // 设置事件监听器
+        function setupEventListeners() {
+            canvas.addEventListener('mousedown', handleMouseDown);
+            canvas.addEventListener('mousemove', handleMouseMove);
+            canvas.addEventListener('mouseup', handleMouseUp);
+            canvas.addEventListener('mouseleave', handleMouseUp);
+            canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+            canvas.addEventListener('wheel', handleWheel);
+        }
+
+        // 处理鼠标按下
+        function handleMouseDown(e) {
+            isDrawing = true;
+            const rect = canvas.getBoundingClientRect();
+            const x = Math.floor((e.clientX - rect.left) / scale);
+            const y = Math.floor((e.clientY - rect.top) / scale);
+
+            if (e.button === 2) {
+                // 右键擦除
+                setPixel(x, y, 0);
+            } else if (e.button === 0) {
+                // 左键绘制
+                if (currentTool === 'fill') {
+                    floodFill(x, y, currentColor);
+                } else {
+                    setPixel(x, y, currentColor);
+                }
+            }
+
+            renderCanvas();
+            updatePreview();
+        }
+
+        // 处理鼠标移动
+        function handleMouseMove(e) {
+            const rect = canvas.getBoundingClientRect();
+            const x = Math.floor((e.clientX - rect.left) / scale);
+            const y = Math.floor((e.clientY - rect.top) / scale);
+
+            // 更新鼠标位置显示
+            if (x >= 0 && x < canvasWidth && y >= 0 && y < canvasHeight) {
+                document.getElementById('mousePos').textContent = `${x}, ${y}`;
+            }
+
+            if (isDrawing && currentTool !== 'fill') {
+                if (e.buttons === 2) {
+                    // 右键拖动擦除
+                    setPixel(x, y, 0);
+                } else if (e.buttons === 1) {
+                    // 左键拖动绘制
+                    setPixel(x, y, currentColor);
+                }
+                renderCanvas();
+                updatePreview();
+            }
+        }
+
+        // 处理鼠标松开
+        function handleMouseUp() {
+            isDrawing = false;
+        }
+
+        // 处理滚轮缩放
+        function handleWheel(e) {
+            e.preventDefault();
+            const delta = e.deltaY > 0 ? -2 : 2;
+            scale = Math.max(4, Math.min(64, scale + delta));
+            renderCanvas();
+        }
+
+        // 设置像素
+        function setPixel(x, y, color) {
+            if (x >= 0 && x < canvasWidth && y >= 0 && y < canvasHeight) {
+                if (color === 0) {
+                    pixelData[y][x] = 0;
+                } else {
+                    // 确保 color 在 colors 中
+                    if (!Object.values(colors).includes(color)) {
+                        const newIndex = Math.max(...Object.keys(colors).map(Number)) + 1;
+                        colors[newIndex] = color;
+                        updateColorCount();
+                    }
+                    const colorIndex = Object.keys(colors).find(key => colors[key] === color);
+                    pixelData[y][x] = parseInt(colorIndex);
+                }
+            }
+        }
+
+        // 填充工具
+        function floodFill(startX, startY, fillColor) {
+            if (startX < 0 || startX >= canvasWidth || startY < 0 || startY >= canvasHeight) return;
+
+            const startIndex = pixelData[startY][startX];
+            const startIndexColor = colors[startIndex];
+
+            if (startIndexColor === fillColor) return;
+
+            const stack = [[startX, startY]];
+            const visited = new Set();
+
+            while (stack.length > 0) {
+                const [x, y] = stack.pop();
+                const key = `${x},${y}`;
+
+                if (visited.has(key)) continue;
+                if (x < 0 || x >= canvasWidth || y < 0 || y >= canvasHeight) continue;
+                if (pixelData[y][x] !== startIndex) continue;
+
+                visited.add(key);
+                setPixel(x, y, fillColor);
+
+                stack.push([x + 1, y]);
+                stack.push([x - 1, y]);
+                stack.push([x, y + 1]);
+                stack.push([x, y - 1]);
+            }
+        }
+
+        // 调整画布大小
+        function resizeCanvas() {
+            const newWidth = parseInt(document.getElementById('canvasWidth').value);
+            const newHeight = parseInt(document.getElementById('canvasHeight').value);
+
+            if (newWidth < 1 || newHeight < 1 || newWidth > 128 || newHeight > 128) {
+                layui.layer.msg('尺寸必须在 1-128 之间');
+                return;
+            }
+
+            // 保存现有数据
+            const oldData = JSON.parse(JSON.stringify(pixelData));
+            const oldWidth = canvasWidth;
+            const oldHeight = canvasHeight;
+
+            canvasWidth = newWidth;
+            canvasHeight = newHeight;
+
+            // 初始化新数据
+            initPixelData();
+
+            // 复制旧数据
+            for (let y = 0; y < Math.min(oldHeight, canvasHeight); y++) {
+                for (let x = 0; x < Math.min(oldWidth, canvasWidth); x++) {
+                    pixelData[y][x] = oldData[y][x];
+                }
+            }
+
+            document.getElementById('canvasSize').textContent = `${canvasWidth} × ${canvasHeight}`;
+            renderCanvas();
+            updatePreview();
+            layui.layer.msg(`画布已调整为 ${canvasWidth} × ${canvasHeight}`);
+        }
+
+        // 清空画布
+        function clearCanvas() {
+            layui.layer.confirm('确定要清空画布吗？', function(index){
+                initPixelData();
+                colors = {0: null, 1: currentColor};
+                renderCanvas();
+                updatePreview();
+                updateColorCount();
+                layui.layer.close(index);
+                layui.layer.msg('画布已清空');
+            });
+        }
+
+        // 更新颜色数量
+        function updateColorCount() {
+            document.getElementById('colorCount').textContent = Object.keys(colors).length - 1;  // 减去透明色
+        }
+
+        // 导入 AIP 文件
+        function importAIP() {
+            document.getElementById('fileInput').click();
+        }
+
+        function handleFileSelect(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    const content = e.target.result;
+                    parseAIP(content);
+                    layui.layer.msg('导入成功');
+                } catch (error) {
+                    layui.layer.msg('导入失败: ' + error.message);
+                }
+            };
+            reader.readAsText(file);
+            event.target.value = '';  // 重置 input
+        }
+
+        // 解析 AIP 文件
+        function parseAIP(content) {
+            const lines = content.split('\n');
+
+            // 提取 width 和 height
+            let width = 32, height = 32;
+            let imageStart = -1, colorStart = -1;
+
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i].trim();
+                if (line.startsWith('width:')) {
+                    width = parseInt(line.split(':')[1].trim());
+                } else if (line.startsWith('height:')) {
+                    height = parseInt(line.split(':')[1].trim());
+                } else if (line === 'image:') {
+                    imageStart = i + 1;
+                } else if (line === 'color:') {
+                    colorStart = i + 1;
+                    break;
+                }
+            }
+
+            // 更新画布尺寸
+            canvasWidth = width;
+            canvasHeight = height;
+            document.getElementById('canvasWidth').value = width;
+            document.getElementById('canvasHeight').value = height;
+            document.getElementById('canvasSize').textContent = `${width} × ${height}`;
+
+            // 解析颜色
+            colors = {0: null};
+            for (let i = colorStart; i < lines.length; i++) {
+                const line = lines[i].trim();
+                if (line && line.includes(':')) {
+                    const [index, color] = line.split(':').map(s => s.trim());
+                    if (color.toLowerCase() === 'transparent') {
+                        colors[parseInt(index)] = null;
+                    } else {
+                        colors[parseInt(index)] = color;
+                    }
+                }
+            }
+
+            // 解析像素矩阵
+            pixelData = [];
+            let imageEnd = colorStart - 1;
+            for (let i = imageStart; i < imageEnd; i++) {
+                const line = lines[i].trim();
+                if (line) {
+                    const row = line.split(/\s+/).map(x => parseInt(x));
+                    pixelData.push(row);
+                }
+            }
+
+            renderCanvas();
+            updatePreview();
+            updateColorCount();
+        }
+
+        // 导出 AIP 文件
+        function exportAIP() {
+            // 生成 AIP 内容
+            let content = `width: ${canvasWidth}\n`;
+            content += `height: ${canvasHeight}\n\n`;
+            content += 'image:\n';
+
+            for (let y = 0; y < canvasHeight; y++) {
+                content += pixelData[y].join(' ') + '\n';
+            }
+
+            content += '\ncolor:\n';
+            for (const index of Object.keys(colors).sort((a, b) => parseInt(a) - parseInt(b))) {
+                const color = colors[index];
+                if (color === null) {
+                    content += `${index}: transparent\n`;
+                } else {
+                    content += `${index}: ${color}\n`;
+                }
+            }
+
+            // 下载文件
+            const blob = new Blob([content], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'pixel_art.aip';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+
+            layui.layer.msg('导出成功');
+        }
+
+        // 辅助函数：十六进制转 RGB
+        function hexToRgb(hex) {
+            const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+            return result ? `rgb(${parseInt(result[1], 16)}, ${parseInt(result[2], 16)}, ${parseInt(result[3], 16)})` : null;
+        }
+
+        // 页面加载完成后初始化
+        window.onload = init;
+    </script>
+</body>
+</html>
