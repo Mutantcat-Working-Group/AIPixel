@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install package and dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install .
+      - name: Byte-compile sources
+        run: python -m compileall -q aip_converter.py img2aip_converter.py img2x_converter.py process_attack.py process_knight.py
+      - name: Smoke test AIP conversion
+        run: python - <<'PY'
+          import pathlib
+          import tempfile
+          from aip_converter import create_pixel_image, parse_aip_file
+
+          out_dir = tempfile.mkdtemp()
+          aip_data = parse_aip_file("input/heart.aip")
+          output = create_pixel_image(aip_data, out_dir)
+          assert pathlib.Path(output).exists()
+          print("converted:", output)
+          PY
