@@ -20,7 +20,8 @@ jobs:
       - name: Byte-compile sources
         run: python -m compileall -q aip_converter.py img2aip_converter.py img2x_converter.py process_attack.py process_knight.py
       - name: Smoke test AIP conversion
-        run: python - <<'PY'
+        run: |
+          python - <<'PY'
           import pathlib
           import tempfile
           from aip_converter import create_pixel_image, parse_aip_file
