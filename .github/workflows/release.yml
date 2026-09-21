@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+      - '[0-9]*.[0-9]*.[0-9]*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build Python packages
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      - name: Build source tar
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p release
+          cp dist/*.whl dist/*.tar.gz release/
+          tar -czf "release/aipixel-${VERSION}-source.tar.gz" \
+            --exclude='./.git' \
+            --exclude='./.venv' \
+            --exclude='./__pycache__' \
+            --exclude='./build' \
+            --exclude='./aipixel.egg-info' \
+            --exclude='./dist' \
+            -C . .
+          cd release
+          sha256sum * > ../checksums.txt
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aipixel
+          path: |
+            release/*
+            checksums.txt
+
+  publish:
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" release-assets/* --repo "${GITHUB_REPOSITORY}" --clobber
+          else
+            gh release create "${TAG}" release-assets/* --repo "${GITHUB_REPOSITORY}" --title "${TAG}" --generate-notes
+          fi
