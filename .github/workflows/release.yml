@@ -41,6 +41,8 @@ jobs:
             -C . .
           cd release
           sha256sum * > ../checksums.txt
+          md5sum * > ../checksums-md5.txt
+          sha1sum * > ../checksums-sha1.txt
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -49,6 +51,8 @@ jobs:
           path: |
             release/*
             checksums.txt
+            checksums-md5.txt
+            checksums-sha1.txt
 
   publish:
     needs: build
