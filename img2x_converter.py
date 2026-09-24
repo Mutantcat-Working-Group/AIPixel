@@ -2,6 +2,8 @@
 """
 图片缩放转换器
 将图片转换到指定大小，使用高质量重采样算法保持辨识度
+
+由异猫工作群（mutantcat.org）发行 · GitHub: https://github.com/Mutantcat-Working-Group
 """
 
 import os

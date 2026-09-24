@@ -2,6 +2,8 @@
 """
 AIP 像素画反向转换器
 将 PNG 位图转换为 .aip 格式的像素画文件
+
+由异猫工作群（mutantcat.org）发行 · GitHub: https://github.com/Mutantcat-Working-Group
 """
 
 import os

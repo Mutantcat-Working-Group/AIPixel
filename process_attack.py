@@ -1,3 +1,5 @@
+# 由异猫工作群（mutantcat.org）发行 · GitHub: https://github.com/Mutantcat-Working-Group
+
 from PIL import Image
 
 def process_attack_to_32x32(input_path, output_path):
