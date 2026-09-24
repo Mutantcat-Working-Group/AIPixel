@@ -2,6 +2,8 @@
 """
 AIP 像素画转换器
 将 .aip 格式的像素画文件转换为 PNG 位图
+
+由异猫工作群（mutantcat.org）发行 · GitHub: https://github.com/Mutantcat-Working-Group
 """
 
 import os
