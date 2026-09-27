@@ -180,6 +180,14 @@ export interface StoreActions {
   duplicateFrame: () => Promise<void>;
   deleteFrame: () => Promise<void>;
   moveFrame: (delta: number) => Promise<void>;
+  /** 改当前帧的停留时长。逐帧动画的节拍全在帧时长上。 */
+  setFrameDuration: (durationMs: number) => Promise<void>;
+  /** 切图层显隐。隐藏只为看清底下，内容不丢，也不改选中。 */
+  setLayerVisible: (layerId: string, visible: boolean) => Promise<void>;
+  /** 图层不透明度 0..255，与 Rust Layer::opacity 同一量纲。 */
+  setLayerOpacity: (layerId: string, opacity: number) => Promise<void>;
+  /** 沿绘制顺序挪一格：delta +1 = 后绘制，盖在更多图层之上。 */
+  moveLayer: (delta: number) => Promise<void>;
   /** 回退一步编辑器改动：撤销栈见底就什么都不做。 */
   undoEdit: () => Promise<void>;
 }
@@ -1108,6 +1116,39 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       const target = getState().frameIndex + delta;
       if (target < 0 || target >= document.frames.length) return;
       await getState().runEditorOps([{ op: "move_frame", id: current.id, to_index: target }], target);
+    },
+
+    setFrameDuration: async (durationMs) => {
+      const state = getState();
+      const current = state.document?.frames[state.frameIndex];
+      if (!current) return;
+      // 与 Rust MAX_FRAME_DURATION_MS 对齐：下限 1ms（GIF 那边自己会抬到 20ms）。
+      const next = Math.max(1, Math.min(60000, Math.round(durationMs)));
+      if (next === current.duration_ms) return;
+      await getState().runEditorOps([
+        { op: "set_frame_duration", id: current.id, duration_ms: next },
+      ]);
+    },
+
+    setLayerVisible: async (layerId, visible) => {
+      await getState().runEditorOps([{ op: "set_layer_properties", id: layerId, visible }]);
+    },
+
+    setLayerOpacity: async (layerId, opacity) => {
+      const next = Math.max(0, Math.min(255, Math.round(opacity)));
+      await getState().runEditorOps([{ op: "set_layer_properties", id: layerId, opacity: next }]);
+    },
+
+    moveLayer: async (delta) => {
+      const state = getState();
+      const document = state.document;
+      const layerId = state.active.layer;
+      if (!document || !layerId) return;
+      const index = document.layers.findIndex((layer) => layer.id === layerId);
+      if (index < 0) return;
+      const target = index + delta;
+      if (target < 0 || target >= document.layers.length) return;
+      await getState().runEditorOps([{ op: "move_layer", id: layerId, to_index: target }]);
     },
 
     undoEdit: async () => {
