@@ -15,7 +15,7 @@
 - 面向做 RPG / 独立游戏的美术与程序，也面向想研究「agent 怎么安全地驱动一个文档模型」的人
 
 核心价值：让模型碰像素画，最怕它一口气「手写」一屏 4096 个色号，改一个像素要重画整张图，一跑偏就整张作废。
-AIPixel 把生图路径收窄成三条类型化工具，模型的自由度放到该放的地方（结构、构图、脚本生成），每一笔像素都落在受预算约束的沙箱里。
+AIPixel 把生图路径收窄成六条类型化工具（结构 ops、脚本、读回、补帧、图片转像素、直连生图），模型的自由度放到该放的地方（结构、构图、脚本、垫图），每一笔像素都落在受预算约束的沙箱里。
 
 ### 二、界面
 
@@ -49,11 +49,14 @@ agent-core 不依赖 Tauri，是纯 Rust。它通过一个 `tokio::sync::mpsc` �
 ### 四、Agent 怎么工作
 
 一次发送的流程：`prompt admission -> provider 流式输出 -> tool_use -> 工具执行 -> 结果回填 -> 续轮`。
-每轮都重新组装系统提示词，因为上一轮的工具可能已经改过 canvas。模型能用的工具只有三个：
+每轮都重新组装系统提示词，因为上一轮的工具可能已经改过 canvas。模型能用的工具有六个：
 
 - `pixel_apply_operations`：一次事务里做一坨类型化操作。图层 / 帧 / 调色板的结构改动走这里（建、复制、挪、删、改名、设时长），也可以用 `set_pixels`、`stamp_grid`、`draw_shape`、`bucket_fill`、`clear_region` 打小补丁。任一操作非法则整事务回滚，错误信息会指出失败的操作下标
 - `pixel_run_shader`：一段 Lua 脚本，配一次事务的绘制与动画。带 Loops 与 palette helpers，`animate=true` 时按 `phase`（0..1）驱动每一帧
 - `pixel_read_canvas`：读回当前网格，`overview=true` 时给降采样地图，最多读 128x128 的精确窗口
+- `pixel_tween_frames`：在两个已存在的帧之间插中间帧。要补间、过渡、或者「从 A 姿态长到 B 姿态」时用。`migrate` 按序翻差异像素（像素画该有的变形）、`blend` 插值颜色、`copy` 是占位，`ease` 会给迁移进度上 smoothstep
+- `pixel_pixelize_image`：把一张位图（通常是生图模型的产出，base64 PNG/JPEG）量化成索引像素落到目标 cel，往画布调色板上吸附、尽量复用接近色而不撑爆调色板。用来把生成结果落到网格，而不是一个像素一个像素地描述
+- `pixel_generate_image`：让生图模型直接画一张位图、再量化上画布。画刷、细密过渡、偏写实这类 Lua 脚本和类型化 ops 表达不来的走这条。默认覆盖激活 cel；要「改这一帧」就把当前帧 id 透传进 `reference_frame` 当垫图，`spot="new_frame"` 则落到新建帧而不是覆盖
 
 「模型不许手写矩阵」的契约在 `crates/agent-core/src/tools.rs` 收口：绘制和动画统一走 Lua 沙箱，结构改动统一走 ops，读回统一走 RLE。
 
@@ -71,7 +74,7 @@ RLE 编码约定；动态部分由 `pixel_core::context` 按当前激活图层 /
 
 #### MCP 工具服务器
 
-主循环的能力不止三个内置工具。顶栏的插头图标打开「MCP tool servers」面板，可以挂用户自己的 MCP 服务器：stdio（拉起子进程、
+主循环的能力不止六个内置工具。顶栏的插头图标打开「MCP tool servers」面板，可以挂用户自己的 MCP 服务器：stdio（拉起子进程、
 换行分隔 JSON-RPC）和 HTTP（JSON-RPC POST，兼容 SSE 响应）两种传输都支持，协议版本按 2025-06-18 / 2025-03-26 / 2024-11-05
 依次协商。配置落盘在 app config 目录的 `mcp.json`；勾了 Auto 的服务器在启动时自动连接，失败的只记错误、不阻塞启动。
 
@@ -126,7 +129,7 @@ python3 img2aip_converter.py refer_img/banana_shadow.png
 
 ### 八、路线图
 
-- Agent 会话（已落地）：会话、对话流、三个工具、`.aip` 读写、BYOM 配置
+- Agent 会话（已落地）：会话、对话流、六个工具、`.aip` 读写、BYOM 配置
 - 工作台（已落地）：Auto / Chat / Ask 三档审批、画笔与油漆桶（调色板选透明格即擦）、帧的新建 / 复制 / 删除 / 挪位、仅限直接编辑的撤销栈
 - 下一步：图层行的直接操作（显隐 / 透明度 / 排序）、批量与脚本化流程
 
@@ -136,7 +139,6 @@ python3 img2aip_converter.py refer_img/banana_shadow.png
 - `Fantety/PixTXT`：`.aip` 相邻文本像素格式的图层 / 帧文档模型设计
 - 一份逆向得到的平台实现：prompt admission 与工具契约的边界（无源码，只取约定）
 
-三份都是参照而非照抄：格式、主循环与工具名都按我们自己的约束重做，`.aip` 与 `pixel_apply_operations` / `pixel_run_shader` /
-`pixel_read_canvas` 的边界来自这份仓库自己的取舍。
+三份都是参照而非照抄：格式、主循环与工具名都按我们自己的约束重做，`.aip` 与六个内置工具的边界来自这份仓库自己的取舍。
 
 License: MIT

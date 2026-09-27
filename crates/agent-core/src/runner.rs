@@ -18,14 +18,16 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
+use super::imagegen::{self, ImageGenParams, LandSpot};
+use super::mcp::{self, McpRegistry};
 use super::models::{
     ActiveContext, AgentEvent, ApprovalDecision, Attachment, ChatRequest, ContentBlock, LlmEvent,
     Message, ModelConfig, PermissionMode, Role, RunnerConfig, ToolSpec,
 };
-use super::mcp::{self, McpRegistry};
 use super::prompt;
 use super::providers::{self, LlmProvider};
-use super::tools::{self, ToolOutcome};
+use super::tools::{self, ToolOutcome, IMAGE_GEN_TOOL};
+use pixel_core::decode;
 use pixel_core::document::Document;
 
 /// 一次待执行的工具调用（JSON 解析失败的也排进来，让模型收到可修复的错误）。
@@ -184,6 +186,13 @@ impl AgentSession {
 
     pub fn document(&self) -> Document {
         self.document.lock().unwrap().clone()
+    }
+
+    /// 借出文档做只读的一次性计算（渲染垫图、导出预览）。
+    /// 和 `with_document_mut` 用同一把锁，但不会 bump revision，也不会让外界改到文档。
+    pub fn with_document<T>(&self, f: impl FnOnce(&Document) -> T) -> T {
+        let doc = self.document.lock().unwrap();
+        f(&doc)
     }
 
     /// 借出文档做一次性原地修改（插帧、量化、编辑器操作），完成后返回新 revision。
@@ -569,10 +578,13 @@ impl AgentSession {
                                     is_error: true,
                                 },
                             }
+                        } else if call.name == tools::IMAGE_GEN_TOOL {
+                            // 生图要等模型回图，异步跑；await 期间绝不持有文档锁。
+                            self.run_image_gen(&call.input).await
                         } else {
-                        let mut doc = self.document.lock().unwrap();
-                        let active = self.active.lock().unwrap();
-                        tools::execute(&mut doc, &active, &call.name, &call.input)
+                            let mut doc = self.document.lock().unwrap();
+                            let active = self.active.lock().unwrap();
+                            tools::execute(&mut doc, &active, &call.name, &call.input)
                         }
                     }
                 };
@@ -623,7 +635,8 @@ impl AgentSession {
 
                 // 读操作不改文档，不推 DocumentUpdated。
                 // MCP 工具在文档之外跑（不回推文档事件）；读操作本来也不推。
-                if call.name != "pixel_read_canvas" && !call.name.starts_with(mcp::MCP_TOOL_PREFIX) {
+                if call.name != "pixel_read_canvas" && !call.name.starts_with(mcp::MCP_TOOL_PREFIX)
+                {
                     let (revision, document) = {
                         let doc = self.document.lock().unwrap();
                         (
@@ -634,6 +647,101 @@ impl AgentSession {
                     emit(&tx, AgentEvent::DocumentUpdated { revision, document });
                 }
             }
+        }
+    }
+    /// agent 生图工具：让模型直接产出位图，再量化落到画布。与同步工具分开跑，
+    /// 因为它要等模型回图，期间绝不能占着文档锁。锁顺序仍是 document -> active。
+    async fn run_image_gen(&self, input: &Value) -> ToolOutcome {
+        let params = match tools::ImageGenToolParams::parse(input) {
+            Ok(p) => p,
+            Err(e) => {
+                return ToolOutcome {
+                    content: e,
+                    is_error: true,
+                }
+            }
+        };
+        let config = self.model_config();
+        if !config.capabilities.image_gen {
+            return ToolOutcome {
+                content: "this model is not able to generate images; enable image generation in model settings and point it at an OpenAI-compatible image model".into(),
+                is_error: true,
+            };
+        }
+        // 垫图先在读锁里渲染；await 之前必须放掉文档锁。
+        let reference = match params.reference_frame.as_deref() {
+            Some(frame) => match self.with_document(|doc| imagegen::frame_reference(doc, frame)) {
+                Ok(att) => Some(att),
+                Err(e) => {
+                    return ToolOutcome {
+                        content: format!("{IMAGE_GEN_TOOL}: {e}"),
+                        is_error: true,
+                    }
+                }
+            },
+            None => None,
+        };
+        let generator = imagegen::build_image_generator(&config);
+        let request = ImageGenParams {
+            prompt: params.prompt.clone(),
+            size: params.size.clone(),
+            reference,
+        };
+        let image = match generator.generate(&request).await {
+            Ok(img) => img,
+            Err(e) => {
+                return ToolOutcome {
+                    content: format!("{IMAGE_GEN_TOOL}: image generation failed: {e}"),
+                    is_error: true,
+                }
+            }
+        };
+        let (rgba, width, height) = match decode::decode_image(&image.bytes, &image.media_type) {
+            Ok(v) => v,
+            Err(e) => {
+                return ToolOutcome {
+                    content: format!("{IMAGE_GEN_TOOL}: could not decode the model's image: {e}"),
+                    is_error: true,
+                }
+            }
+        };
+        let active = self.active();
+        let landed = self.with_document_mut(|doc| {
+            tools::land_generated(doc, &active, &params, &rgba, width, height)
+        });
+        let landed = match landed {
+            Ok(l) => l,
+            Err(e) => {
+                return ToolOutcome {
+                    content: format!("{IMAGE_GEN_TOOL}: could not land the image: {e}"),
+                    is_error: true,
+                }
+            }
+        };
+        // 新建帧时把激活帧挪过去：下一轮工具该接着这一帧画，用户看到的也对得上。
+        if params.spot == LandSpot::NewFrame {
+            let mut next = active;
+            next.frame = landed.frame.clone();
+            self.set_active(next);
+        }
+        let mut content = format!(
+            "generated a {w}x{h} image ({transport}) and landed it on layer {layer} frame {frame}: {colors} color(s) used, +{added} palette color(s).\n",
+            w = width,
+            h = height,
+            transport = image.transport,
+            layer = landed.layer,
+            frame = landed.frame,
+            colors = landed.report.colors_used,
+            added = landed.report.palette_added,
+        );
+        if !image.note.trim().is_empty() {
+            content.push_str(&format!("model note: {}\n", image.note.trim()));
+        }
+        let grid = self.with_document(|doc| tools::active_grid(doc, &landed.layer, &landed.frame));
+        content.push_str(&grid);
+        ToolOutcome {
+            content,
+            is_error: false,
         }
     }
 }
@@ -681,30 +789,43 @@ mod tests {
     use pixel_core::document::Document;
 
     fn session() -> AgentSession {
-        AgentSession::new("s1", ModelConfig {
-            id: "m1".into(),
-            label: "m1".into(),
-            protocol: super::super::models::Protocol::Anthropic,
-            base_url: "https://example.invalid".into(),
-            api_key: String::new(),
-            model: "test".into(),
-            max_tokens: None,
-            temperature: None,
-            capabilities: Default::default(),
-        }, Document::new("t", 8, 8).unwrap())
+        AgentSession::new(
+            "s1",
+            ModelConfig {
+                id: "m1".into(),
+                label: "m1".into(),
+                protocol: super::super::models::Protocol::Anthropic,
+                base_url: "https://example.invalid".into(),
+                api_key: String::new(),
+                model: "test".into(),
+                max_tokens: None,
+                temperature: None,
+                capabilities: Default::default(),
+            },
+            Document::new("t", 8, 8).unwrap(),
+        )
     }
 
     #[test]
     fn auto_lets_everything_through_ask_gates_everything() {
-        assert!(!needs_approval(PermissionMode::Auto, "pixel_apply_operations"));
+        assert!(!needs_approval(
+            PermissionMode::Auto,
+            "pixel_apply_operations"
+        ));
         assert!(!needs_approval(PermissionMode::Auto, "pixel_run_shader"));
-        assert!(needs_approval(PermissionMode::Ask, "pixel_apply_operations"));
+        assert!(needs_approval(
+            PermissionMode::Ask,
+            "pixel_apply_operations"
+        ));
         assert!(needs_approval(PermissionMode::Ask, "pixel_read_canvas"));
     }
 
     #[test]
     fn chat_gates_writes_and_lets_reads_pass() {
-        assert!(needs_approval(PermissionMode::Chat, "pixel_apply_operations"));
+        assert!(needs_approval(
+            PermissionMode::Chat,
+            "pixel_apply_operations"
+        ));
         assert!(needs_approval(PermissionMode::Chat, "pixel_run_shader"));
         assert!(!needs_approval(PermissionMode::Chat, "pixel_read_canvas"));
     }
@@ -712,7 +833,9 @@ mod tests {
     #[tokio::test]
     async fn resolving_without_a_pending_request_is_an_error() {
         let s = session();
-        assert!(s.resolve_approval("nope", ApprovalDecision::Approve).is_err());
+        assert!(s
+            .resolve_approval("nope", ApprovalDecision::Approve)
+            .is_err());
     }
 
     #[tokio::test]
@@ -727,7 +850,9 @@ mod tests {
         // 发送端被 take 掉，等待端收到的是「通道关闭」，也就是取消，不是放行。
         assert!(rx.try_recv().is_err());
         assert!(s.is_cancelled());
-        assert!(s.resolve_approval("call-1", ApprovalDecision::Approve).is_err());
+        assert!(s
+            .resolve_approval("call-1", ApprovalDecision::Approve)
+            .is_err());
     }
 
     #[tokio::test]
@@ -738,9 +863,13 @@ mod tests {
             call_id: "call-1".into(),
             tx,
         });
-        assert!(s.resolve_approval("call-1", ApprovalDecision::ApproveAll).is_ok());
+        assert!(s
+            .resolve_approval("call-1", ApprovalDecision::ApproveAll)
+            .is_ok());
         assert_eq!(rx.await.unwrap(), ApprovalDecision::ApproveAll);
         // 槽已空，同一笔再解决一次就是「没有挂起的审批」。
-        assert!(s.resolve_approval("call-1", ApprovalDecision::Approve).is_err());
+        assert!(s
+            .resolve_approval("call-1", ApprovalDecision::Approve)
+            .is_err());
     }
 }

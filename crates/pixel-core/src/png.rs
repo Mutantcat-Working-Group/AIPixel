@@ -1,6 +1,6 @@
 //! PNG 导出：文档拼接后的 RGBA 位图（帧顺序横向铺开多帧时纵向堆叠）。
 
-use super::document::{Cel, Document};
+use super::document::Document;
 use image::{ImageBuffer, Rgba};
 
 /// 拼接后位图：所有帧沿横向排列，每个帧是该帧全部可见图层的合成。
@@ -119,17 +119,4 @@ pub fn base64_encode(data: &[u8]) -> String {
         });
     }
     out
-}
-
-/// 单帧 cels 的 PNG（测试/调试用）。
-pub fn cel_to_png(cel: &Cel, width: u32, height: u32) -> Vec<u8> {
-    let mut img = ImageBuffer::new(width, height);
-    for y in 0..height {
-        for x in 0..width {
-            let v = cel.get(width, x, y).unwrap_or(0);
-            let _ = v;
-            img.put_pixel(x, y, Rgba([0, 0, 0, 0]));
-        }
-    }
-    encode_png(&img).unwrap_or_default()
 }

@@ -28,6 +28,7 @@ import { useStore } from "../lib/store";
 import { useT, type T } from "../lib/t";
 import type {
   DockKind,
+  DockDraft,
   FitMode,
   LandSpot,
   MigrateOrder,
@@ -501,9 +502,17 @@ function RefinePanel({ gated }: { gated: boolean }) {
 function ImageGenPanel({ gated }: { gated: boolean }) {
   const t = useT();
   const draft = useStore((s) => s.dockDraft);
+  const document = useStore((s) => s.document);
+  const active = useStore((s) => s.active);
   const busy = useStore((s) => s.workflowBusy);
   const patchDraft = useStore((s) => s.patchDraft);
   const runWorkflow = useStore((s) => s.runWorkflow);
+
+  // 帧 id 属于文档，换会话后旧选择会失效：直接推导合法值，不做同步 effect。
+  const frameIds = (document?.frames ?? []).map((frame) => frame.id);
+  const referenceFrame = frameIds.includes(draft.genFrame)
+    ? draft.genFrame
+    : active.frame || frameIds[0] || "";
 
   return (
     <>
@@ -524,14 +533,41 @@ function ImageGenPanel({ gated }: { gated: boolean }) {
           onChange={(next) => patchDraft({ size: next })}
         />
       </Field>
-      <PathField
-        label={t("dock.reference")}
-        buttonLabel={t("dock.pick_reference")}
-        extensions={IMAGE_EXTENSIONS}
-        value={draft.genPath}
-        onPick={(path) => patchDraft({ genPath: path })}
-        onClear={() => patchDraft({ genPath: null })}
-      />
+      <Field label={t("dock.reference_source")}>
+        <Segmented
+          size="small"
+          block
+          value={draft.genSource}
+          options={[
+            { label: t("ref.canvas_frame"), value: "frame" },
+            { label: t("ref.file"), value: "file" },
+            { label: t("ref.none"), value: "none" },
+          ]}
+          onChange={(next) =>
+            patchDraft({ genSource: next as DockDraft["genSource"] })
+          }
+        />
+      </Field>
+      {draft.genSource === "frame" ? (
+        <Field label={t("dock.reference_frame")}>
+          <Select
+            size="small"
+            value={referenceFrame}
+            options={frameIds.map((id) => ({ label: id, value: id }))}
+            onChange={(next) => patchDraft({ genFrame: next })}
+          />
+        </Field>
+      ) : null}
+      {draft.genSource === "file" ? (
+        <PathField
+          label={t("dock.reference")}
+          buttonLabel={t("dock.pick_reference")}
+          extensions={IMAGE_EXTENSIONS}
+          value={draft.genPath}
+          onPick={(path) => patchDraft({ genPath: path })}
+          onClear={() => patchDraft({ genPath: null })}
+        />
+      ) : null}
       <Field label={t("dock.landing")}>
         <Segmented
           size="small"
@@ -570,7 +606,9 @@ function ImageGenPanel({ gated }: { gated: boolean }) {
           void runWorkflow("image_gen", {
             prompt: draft.prompt,
             size: draft.size,
-            reference_path: draft.genPath,
+            // 只把选中的那一源发出去：两个都给会让 Rust 报歧义，那是调用方的错。
+            reference_frame: draft.genSource === "frame" ? referenceFrame : null,
+            reference_path: draft.genSource === "file" ? draft.genPath : null,
             spot: draft.spot,
             duration_ms: draft.durationMs,
             options: draft.options,

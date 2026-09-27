@@ -87,7 +87,8 @@ impl McpServerConfig {
     pub fn validate(&self) -> Result<(), String> {
         let name_ok = !self.name.is_empty()
             && self.name.len() <= 24
-            && self.name
+            && self
+                .name
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
         if !name_ok {
@@ -668,7 +669,9 @@ impl McpRegistry {
                     } else {
                         format!("[MCP server '{name}'] {}", tool.description).into()
                     },
-                    schema: tool.input_schema.unwrap_or_else(|| json!({"type": "object"})),
+                    schema: tool
+                        .input_schema
+                        .unwrap_or_else(|| json!({"type": "object"})),
                 });
             }
         }
@@ -709,7 +712,10 @@ impl McpRegistry {
                 continue;
             };
             for tool in client.tools() {
-                routes.insert(namespaced_tool(server, &tool.name), (server.clone(), tool.name));
+                routes.insert(
+                    namespaced_tool(server, &tool.name),
+                    (server.clone(), tool.name),
+                );
             }
         }
         *self.routes.write().unwrap() = routes;
@@ -998,12 +1004,7 @@ mod tests {
     impl FakeTransport {
         fn scripted(log: Arc<Mutex<Vec<String>>>, steps: Vec<(&str, Value)>) -> Arc<Self> {
             Arc::new(Self {
-                responses: Mutex::new(
-                    steps
-                        .into_iter()
-                        .map(|(m, v)| (m.to_string(), v))
-                        .collect(),
-                ),
+                responses: Mutex::new(steps.into_iter().map(|(m, v)| (m.to_string(), v)).collect()),
                 log,
             })
         }
@@ -1405,10 +1406,7 @@ mod tests {
             unsupported_request(r#"{"jsonrpc":"2.0","id":9,"method":"sampling/createMessage"}"#)
                 .expect("reply");
         assert!(reply.contains("-32601"), "{reply}");
-        assert!(
-            reply.contains("sampling/createMessage"),
-            "{reply}"
-        );
+        assert!(reply.contains("sampling/createMessage"), "{reply}");
         // 纯通知不回话。
         assert!(unsupported_request(r#"{"jsonrpc":"2.0","method":"note"}"#).is_none());
     }
