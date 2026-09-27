@@ -104,9 +104,13 @@ pub fn apply_fill(
     let (w, h) = (doc.width, doc.height);
     {
         // 先只读校验：坐标与 cel 都站得住才动文档。
-        let cel = doc.cel(layer, frame).ok_or_else(|| format!("unknown cel {layer}/{frame}"))?;
+        let cel = doc
+            .cel(layer, frame)
+            .ok_or_else(|| format!("unknown cel {layer}/{frame}"))?;
         if cel.get(w, x, y).is_none() {
-            return Err(format!("fill origin ({x},{y}) is outside the {w}x{h} canvas"));
+            return Err(format!(
+                "fill origin ({x},{y}) is outside the {w}x{h} canvas"
+            ));
         }
     }
     // 校验过了才 intern：错坐标不会把新颜色提前塞进调色板。
@@ -115,7 +119,9 @@ pub fn apply_fill(
         .cel_mut(layer, frame)
         .ok_or_else(|| format!("unknown cel {layer}/{frame}"))?;
     let Some(target) = cel.get(w, x, y) else {
-        return Err(format!("fill origin ({x},{y}) is outside the {w}x{h} canvas"));
+        return Err(format!(
+            "fill origin ({x},{y}) is outside the {w}x{h} canvas"
+        ));
     };
     // 起点已经是目标色就别浸了：白跑一趟 flood fill 没有意义。
     if target != idx {

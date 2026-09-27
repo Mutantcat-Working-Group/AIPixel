@@ -291,12 +291,10 @@ impl AppState {
         *counter += 1;
         let id = format!("s{}", *counter);
         drop(counter);
-        let session = Arc::new(AgentSession::new(
-            id.clone(),
-            self.active_config(),
-            document,
-        )
-        .with_mcp_registry(self.mcp.clone()));
+        let session = Arc::new(
+            AgentSession::new(id.clone(), self.active_config(), document)
+                .with_mcp_registry(self.mcp.clone()),
+        );
         self.sessions
             .lock()
             .unwrap()

@@ -2,9 +2,9 @@
 //! 全部可序列化，方便跨 Tauri 命令边界与未来的持久化层。
 
 use super::workflows::WorkflowKind;
+use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::BTreeMap;
-use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -209,6 +209,8 @@ const INITIAL_DOCK_DRAFT: DockDraft = {
   prompt: "",
   size: "1024x1024",
   genPath: null,
+  genSource: "none",
+  genFrame: "",
   spot: "new_frame",
   durationMs: 83,
   options: DEFAULT_OPTIONS,

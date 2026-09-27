@@ -152,7 +152,11 @@ pub async fn mcp_upsert(
 ) -> Result<McpServersView, String> {
     config.validate()?;
     let registry = state.mcp_registry();
-    if let Some(existing) = registry.configs().into_iter().find(|c| c.name == config.name) {
+    if let Some(existing) = registry
+        .configs()
+        .into_iter()
+        .find(|c| c.name == config.name)
+    {
         merge_blank_values(&existing.transport, &mut config.transport);
     }
     registry.register(config).await?;
@@ -162,7 +166,10 @@ pub async fn mcp_upsert(
 
 /// 删除服务器并断开连接。
 #[tauri::command]
-pub async fn mcp_remove(state: State<'_, AppState>, name: String) -> Result<McpServersView, String> {
+pub async fn mcp_remove(
+    state: State<'_, AppState>,
+    name: String,
+) -> Result<McpServersView, String> {
     let registry = state.mcp_registry();
     registry.unregister(&name).await?;
     state.save_mcp_file();

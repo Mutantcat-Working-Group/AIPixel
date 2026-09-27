@@ -1,6 +1,7 @@
 //! 三个落地工具的封装，把模型入参翻译成 pixel-core 的类型化操作。
 //! 「不让模型手写矩阵」的契约就在这一层收口。
 
+use super::imagegen::LandSpot;
 use super::models::{ActiveContext, ToolSpec};
 use pixel_core::context;
 use pixel_core::document::Document;
@@ -15,6 +16,10 @@ use pixel_core::tween::{self, MigrateOrder, TweenMode, TweenOptions};
 
 /// 工具回填给模型的 RLE 网格字符预算。
 const TOOL_GRID_CHARS: usize = 3000;
+
+/// agent 生图工具名。同步工具走 `tools::execute`；这一个要等模型回图，
+/// 由 runner 分流到异步路径，所以名字单独抽出来给规格、execute 兜底、runner 共用。
+pub const IMAGE_GEN_TOOL: &str = "pixel_generate_image";
 
 #[derive(Debug, Clone)]
 pub struct ToolOutcome {
@@ -152,6 +157,29 @@ pub fn specs() -> Vec<ToolSpec> {
                 "required": ["image_base64"]
             }),
         },
+        ToolSpec {
+            name: IMAGE_GEN_TOOL.into(),
+            description: "Ask the image-generation model to paint a bitmap, then quantize it onto the canvas grid. Use it for painterly, richly shaded, or photorealistic results that a Lua shader or typed ops cannot express. By default it overwrites the active cel. To MODIFY the current artwork (eg 'make the headdress bigger'), pass the current frame id in reference_frame so the model sees it as a reference image. Set spot='new_frame' to land the result on a freshly created frame instead. The model must have image generation enabled.".into(),
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "description": "what to draw: subject, proportions, palette, pose"},
+                    "reference_frame": {"type": "string", "description": "frame id to send as a reference image; pass the current frame id to edit it in place"},
+                    "size": {"type": "string", "description": "optional size hint like 1024x1024; only honored by chat-modalities image models"},
+                    "spot": {"type": "string", "enum": ["active_cel","new_frame"], "description": "overwrite the active cel (default) or land on a new_frame"},
+                    "layer": {"type": "string"},
+                    "frame": {"type": "string", "description": "target cel for active_cel, or the anchor a new_frame is inserted after"},
+                    "duration_ms": {"type": "integer", "description": "duration stamped on a new_frame"},
+                    "max_colors": {"type": "integer", "minimum": 2, "maximum": 256},
+                    "dither": {"type": "boolean"},
+                    "expand_palette": {"type": "boolean"},
+                    "alpha_threshold": {"type": "integer", "minimum": 0, "maximum": 255},
+                    "snap_tolerance": {"type": "integer", "minimum": 0, "maximum": 128},
+                    "fit": {"type": "string", "enum": ["contain","stretch"]}
+                },
+                "required": ["prompt"]
+            }),
+        },
     ]
 }
 
@@ -168,6 +196,11 @@ pub fn execute(
         "pixel_run_shader" => tool_run_shader(doc, active, input),
         "pixel_tween_frames" => tool_tween_frames(doc, active, input),
         "pixel_pixelize_image" => tool_pixelize_image(doc, active, input),
+        // 生图要等模型回图，正常由 runner 直接分流、不会进这里；万一有人直接调
+        // execute，也回一句能听懂的话，而不是「unknown tool」。
+        IMAGE_GEN_TOOL => err(format!(
+            "{IMAGE_GEN_TOOL} runs asynchronously in the agent loop and cannot run inside tools::execute"
+        )),
         other => err(format!("unknown tool: {other}")),
     }
 }
@@ -404,8 +437,135 @@ fn tool_pixelize_image(doc: &mut Document, active: &ActiveContext, input: &Value
     }
 }
 
+/// agent 生图工具的入参。和 pixel_pixelize_image 的分工：位图由工具自己向模型要，
+/// 模型只描述「画什么」，不手传 base64；落点与量化选项在这里一次性收口。
+#[derive(Debug, Clone)]
+pub struct ImageGenToolParams {
+    pub prompt: String,
+    pub size: Option<String>,
+    /// 垫图帧：把文档里这一帧合成一张图交给模型，是「改这一帧」的关键。
+    pub reference_frame: Option<String>,
+    pub layer: Option<String>,
+    pub frame: Option<String>,
+    pub spot: LandSpot,
+    pub duration_ms: u32,
+    pub opts: PixelizeOptions,
+}
+
+impl ImageGenToolParams {
+    /// 从工具入参解析。空串一律当成没给，避免模型用 "" 占位。
+    pub fn parse(input: &Value) -> Result<Self, String> {
+        let field = |key: &str| -> Option<String> {
+            input
+                .get(key)
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+        };
+        let Some(prompt) = field("prompt") else {
+            return Err(format!(
+                "{IMAGE_GEN_TOOL}: needs a non-empty 'prompt' describing what to draw"
+            ));
+        };
+        let mut opts = PixelizeOptions::default();
+        if let Some(v) = input.get("max_colors").and_then(|v| v.as_u64()) {
+            opts.max_colors = (v as usize).clamp(2, 256);
+        }
+        if let Some(v) = input.get("dither").and_then(|v| v.as_bool()) {
+            opts.dither = v;
+        }
+        if let Some(v) = input.get("snap_tolerance").and_then(|v| v.as_u64()) {
+            opts.snap_tolerance = (v as u32).clamp(0, 128);
+        }
+        if let Some(v) = input.get("expand_palette").and_then(|v| v.as_bool()) {
+            opts.expand_palette = v;
+        }
+        if let Some(v) = input.get("alpha_threshold").and_then(|v| v.as_u64()) {
+            opts.alpha_threshold = v as u8;
+        }
+        if input.get("fit").and_then(|s| s.as_str()) == Some("stretch") {
+            opts.fit = FitMode::Stretch;
+        }
+        Ok(ImageGenToolParams {
+            prompt,
+            size: field("size"),
+            reference_frame: field("reference_frame"),
+            layer: field("layer"),
+            frame: field("frame"),
+            spot: match input.get("spot").and_then(|s| s.as_str()) {
+                Some("new_frame") => LandSpot::NewFrame,
+                _ => LandSpot::ActiveCel,
+            },
+            duration_ms: input
+                .get("duration_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(83) as u32,
+            opts,
+        })
+    }
+}
+
+/// 生成图落点与量化统计，回给主循环拼摘要、刷新画布。
+#[derive(Debug, Clone)]
+pub struct GeneratedLand {
+    pub layer: String,
+    pub frame: String,
+    pub report: pixelize::PixelizeReport,
+}
+
+/// 把一张生成的位图落到文档上。ActiveCel 直接覆盖目标 cel；
+/// NewFrame 先插一帧再落。返回落点与新帧 id，供上层挪激活帧。
+pub fn land_generated(
+    doc: &mut Document,
+    active: &ActiveContext,
+    params: &ImageGenToolParams,
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<GeneratedLand, String> {
+    let layer = params.layer.clone().unwrap_or_else(|| active.layer.clone());
+    let frame = match params.spot {
+        LandSpot::ActiveCel => params.frame.clone().unwrap_or_else(|| active.frame.clone()),
+        LandSpot::NewFrame => {
+            let anchor = params.frame.clone().unwrap_or_else(|| active.frame.clone());
+            let position = doc
+                .frames
+                .iter()
+                .position(|f| f.id == anchor)
+                .ok_or_else(|| format!("unknown frame: {anchor}"))?;
+            ops::apply_batch(
+                doc,
+                &[PixelOperation::CreateFrame {
+                    after: Some(anchor),
+                    duration_ms: params.duration_ms.clamp(1, 60_000),
+                    id: None,
+                }],
+            )
+            .map_err(|e| e.to_string())?;
+            // CreateFrame 把新帧插在锚点之后，所以落点就是 position + 1。
+            doc.frames
+                .get(position + 1)
+                .ok_or("the new frame did not land after the anchor")?
+                .id
+                .clone()
+        }
+    };
+    // ActiveCel 覆盖前先确认 cel 存在，错误里直接点名，让模型改对帧 id。
+    if params.spot == LandSpot::ActiveCel && doc.cel(&layer, &frame).is_none() {
+        return Err(format!("unknown cel: {layer}/{frame}"));
+    }
+    let report =
+        pixelize::pixelize_into_cel(doc, &layer, &frame, rgba, width, height, &params.opts)?;
+    Ok(GeneratedLand {
+        layer,
+        frame,
+        report,
+    })
+}
+
 /// 激活 cel 的 RLE 网格（附到工具结果里，让模型「读一次」验证）。
-fn active_grid(doc: &Document, layer: &str, frame: &str) -> String {
+pub fn active_grid(doc: &Document, layer: &str, frame: &str) -> String {
     match context::cel_context(doc, layer, frame, TOOL_GRID_CHARS) {
         Ok(s) => s,
         Err(e) => format!("(could not render active grid: {e})"),
@@ -723,9 +883,87 @@ mod tests {
                     | "pixel_run_shader"
                     | "pixel_tween_frames"
                     | "pixel_pixelize_image"
+                    // 生图由 runner 异步分流，execute 里只有兜底分支，规格仍归这里发。
+                    | IMAGE_GEN_TOOL
             );
             assert!(handled, "{} is described but not dispatched", spec.name);
         }
-        assert_eq!(specs().len(), 5);
+        assert_eq!(specs().len(), 6);
+    }
+
+    #[test]
+    fn generated_image_params_demand_a_prompt_and_read_options() {
+        assert!(ImageGenToolParams::parse(&json!({})).is_err());
+        assert!(ImageGenToolParams::parse(&json!({"prompt": "   "})).is_err());
+        let p = ImageGenToolParams::parse(&json!({
+            "prompt": "a green slime",
+            "reference_frame": "F1",
+            "spot": "new_frame",
+            "max_colors": 16,
+            "dither": true,
+            "duration_ms": 120,
+        }))
+        .expect("parses");
+        assert_eq!(p.prompt, "a green slime");
+        assert_eq!(p.reference_frame.as_deref(), Some("F1"));
+        assert_eq!(p.spot, LandSpot::NewFrame);
+        assert_eq!(p.opts.max_colors, 16);
+        assert!(p.opts.dither);
+        assert_eq!(p.duration_ms, 120);
+        // 空串一律当成没给，不让模型用 "" 占位。
+        let blank = ImageGenToolParams::parse(
+            &json!({"prompt": "x", "reference_frame": "", "layer": "  "}),
+        )
+        .expect("parses");
+        assert!(blank.reference_frame.is_none());
+        assert!(blank.layer.is_none());
+    }
+
+    /// 一张 2x2 四色 RGBA，直接喂 land_generated（绕开 base64）。
+    fn quad_rgba() -> Vec<u8> {
+        vec![
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+        ]
+    }
+
+    #[test]
+    fn generated_image_lands_on_the_active_cel_without_adding_a_frame() {
+        let mut doc = Document::new("test", 16, 16).expect("16x16");
+        let params = ImageGenToolParams::parse(&json!({"prompt": "a red slime"})).expect("parses");
+        let land = land_generated(&mut doc, &active(), &params, &quad_rgba(), 2, 2).expect("lands");
+        assert_eq!(land.layer, "L0");
+        assert_eq!(land.frame, "F0");
+        assert_eq!(doc.frames.len(), 1, "active_cel must not spawn a frame");
+        let cel = doc.cel("L0", "F0").expect("cel exists");
+        assert!(cel.indices.iter().any(|&i| i != 0), "some pixels painted");
+    }
+
+    #[test]
+    fn generated_image_can_grow_a_new_frame_after_the_anchor() {
+        let mut doc = Document::new("test", 16, 16).expect("16x16");
+        let params = ImageGenToolParams::parse(&json!({
+            "prompt": "one more pose",
+            "spot": "new_frame",
+            "duration_ms": 120,
+        }))
+        .expect("parses");
+        let land = land_generated(&mut doc, &active(), &params, &quad_rgba(), 2, 2).expect("lands");
+        assert_eq!(land.frame, "F1");
+        assert_eq!(doc.frames.len(), 2);
+        assert_eq!(doc.frames[1].id, "F1");
+        assert_eq!(
+            doc.frames[1].duration_ms, 120,
+            "duration stamped on the new frame"
+        );
+    }
+
+    #[test]
+    fn land_generated_names_a_cel_it_cannot_find() {
+        let mut doc = Document::new("test", 16, 16).expect("16x16");
+        let params =
+            ImageGenToolParams::parse(&json!({"prompt": "x", "frame": "F9"})).expect("parses");
+        let e = land_generated(&mut doc, &active(), &params, &quad_rgba(), 1, 1)
+            .expect_err("F9 does not exist");
+        assert!(e.contains("F9"), "{}", e);
     }
 }

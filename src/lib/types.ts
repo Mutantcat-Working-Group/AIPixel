@@ -211,7 +211,13 @@ export type TranscriptEntry =
     }
   | { key: string; kind: "notice"; text: string; isError: boolean };
 
-export type ToolName = "pixel_apply_operations" | "pixel_read_canvas" | "pixel_run_shader";
+export type ToolName =
+  | "pixel_apply_operations"
+  | "pixel_read_canvas"
+  | "pixel_run_shader"
+  | "pixel_tween_frames"
+  | "pixel_pixelize_image"
+  | "pixel_generate_image";
 
 // ---------- 工作台 ----------
 
@@ -397,6 +403,8 @@ export interface ImageGenParams {
   size?: string | null;
   /** 垫图路径：拿一张图让模型照着改。 */
   reference_path?: string | null;
+  /** 垫图帧：把文档里这一帧合成交给模型，与 reference_path 互斥。 */
+  reference_frame?: string | null;
   options?: PixelizeOptions | null;
   spot?: LandSpot;
   duration_ms?: number;
@@ -425,6 +433,10 @@ export interface DockDraft {
   /** 形如 "1024x1024"，只有 chat modalities 传输认这个。 */
   size: string;
   genPath: string | null;
+  /** 垫图从哪来。画布帧才是「改这一帧」：磁盘那张可能是旧导出。 */
+  genSource: "none" | "file" | "frame";
+  /** genSource 为 frame 时的帧 id。 */
+  genFrame: string;
   spot: LandSpot;
   durationMs: number;
   options: PixelizeOptions;

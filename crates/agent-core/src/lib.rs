@@ -11,26 +11,27 @@
 //! `AgentEvent`，由上层（src-tauri）转成 Tauri 事件广播。
 
 pub mod imagegen;
+pub mod mcp;
 pub mod models;
 pub mod one_shot;
 pub mod prompt;
 pub mod providers;
 pub mod refine;
-pub mod mcp;
 pub mod runner;
 pub mod tools;
 pub mod video;
 pub mod vision;
 pub mod workflows;
 
+pub use imagegen::LandSpot;
+pub use mcp::{
+    namespaced_tool, McpClient, McpRegistry, McpServerConfig, McpTool, McpTransportConfig,
+    MCP_TOOL_PREFIX,
+};
 pub use models::{
     ActiveContext, AgentEvent, ApprovalDecision, Attachment, AttachmentRole, Capabilities,
     ChatRequest, ContentBlock, LlmEvent, Message, ModelConfig, PermissionMode, Protocol, Role,
     RunnerConfig, ToolSpec, UiText,
-};
-pub use mcp::{
-    namespaced_tool, McpClient, McpRegistry, McpServerConfig, McpTool, McpTransportConfig,
-    MCP_TOOL_PREFIX,
 };
 pub use providers::{build_provider, EventStream, LlmProvider, ProviderError};
 pub use refine::{refine, RefineRequest, RefineTarget, RefinedPrompt};

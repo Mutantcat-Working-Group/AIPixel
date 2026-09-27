@@ -9,7 +9,7 @@
 
 use agent_core::{
     imagegen, refine as refine_flow, video as video_flow, vision, ActiveContext, AgentEvent,
-    AgentSession, Attachment, AttachmentRole, RefineRequest, RefineTarget, UiText,
+    AgentSession, Attachment, AttachmentRole, LandSpot, RefineRequest, RefineTarget, UiText,
 };
 use pixel_core::decode;
 use pixel_core::document::Document;
@@ -48,18 +48,6 @@ pub struct WorkflowEntry {
 pub struct VideoProbeResult {
     pub probe: agent_core::VideoProbe,
     pub source: agent_core::ProbeSource,
-}
-
-/// 位图落到文档的哪个位置。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LandSpot {
-    /// 默认落在激活 cel：单张参考图的量化不该顺手多出一帧来。
-    #[default]
-    /// 覆盖当前激活的 cel。
-    ActiveCel,
-    /// 新建一帧再落进去（逐帧生图 / 视频抽帧都走这条）。
-    NewFrame,
 }
 
 /// 一次落图的结果：落在哪儿 + 量化的统计。
@@ -114,6 +102,11 @@ pub struct ImageGenParams {
     /// 垫图路径：用户拿一张图让模型照着改。
     #[serde(default)]
     pub reference_path: Option<String>,
+    /// 垫图帧：把文档里这一帧合成一张图交给模型。
+    /// 「改这一帧」和「照这一帧再长一帧」都走这里，画布才是活着的真值。
+    /// 与 reference_path 互斥，都填属于调用方的歧义，直接报错而不是猜一个。
+    #[serde(default)]
+    pub reference_frame: Option<String>,
     #[serde(default)]
     pub options: Option<PixelizeOptions>,
     #[serde(default)]
@@ -253,10 +246,16 @@ pub async fn workflow_image_gen(
     if params.prompt.trim().is_empty() {
         return Err("image generation needs a prompt".into());
     }
-    let reference = match &params.reference_path {
-        Some(path) => Some(read_reference(path)?),
-        None => None,
-    };
+    // 垫图二选一。画布上的帧优先于磁盘文件：用户要改的是眼前这一帧，
+    // 而磁盘上那张可能是好几轮之前的导出。两个都填是调用方的歧义，
+    // 报错让它说清楚，不替它猜一个。
+    let reference = session.with_document(|doc| {
+        resolve_reference(
+            doc,
+            params.reference_frame.as_deref(),
+            params.reference_path.as_deref(),
+        )
+    })?;
     let generator = imagegen::build_image_generator(&config);
     let request = imagegen::ImageGenParams {
         prompt: params.prompt,
@@ -309,16 +308,15 @@ pub async fn workflow_image_gen(
     let revision = emit_document(&app, &session);
     Ok(WorkflowOutcome {
         revision,
-        summary:
-            UiText::new(
-                "outcome.bitmap_landed",
-                "{transport} landed on layer {layer} frame {frame} ({colors} colors, {added} new)",
-            )
-            .with("transport", image.transport)
-            .with("layer", landed.layer.clone())
-            .with("colors", landed.report.colors_used as u64)
-            .with("frame", landed.frame.clone())
-            .with("added", landed.report.palette_added as u64),
+        summary: UiText::new(
+            "outcome.bitmap_landed",
+            "{transport} landed on layer {layer} frame {frame} ({colors} colors, {added} new)",
+        )
+        .with("transport", image.transport)
+        .with("layer", landed.layer.clone())
+        .with("colors", landed.report.colors_used as u64)
+        .with("frame", landed.frame.clone())
+        .with("added", landed.report.palette_added as u64),
         detail: Some(landed_detail(&landed)),
     })
 }
@@ -573,12 +571,7 @@ pub(crate) fn emit_document(app: &AppHandle, session: &AgentSession) -> u64 {
 }
 
 fn emit_status(app: &AppHandle, message: UiText) {
-    let _ = app.emit(
-        "agent-event",
-        AgentEvent::Status {
-            message,
-        },
-    );
+    let _ = app.emit("agent-event", AgentEvent::Status { message });
 }
 
 fn landed_detail(landed: &LandedImage) -> Value {
@@ -644,6 +637,21 @@ fn read_reference(path: &str) -> Result<Attachment, String> {
         media_type: media_type_for(PathBuf::from(path).as_path()),
         data_base64: pixel_core::png::base64_encode(&bytes),
     })
+}
+
+/// 定下这次生图的垫图。画布帧与磁盘文件二选一，
+/// 两个都给说明调用方自己没想清楚，报错比猜一个更负责。
+fn resolve_reference(
+    doc: &Document,
+    frame: Option<&str>,
+    path: Option<&str>,
+) -> Result<Option<Attachment>, String> {
+    match (frame, path) {
+        (Some(frame), None) => Ok(Some(imagegen::frame_reference(doc, frame)?)),
+        (None, Some(path)) => Ok(Some(read_reference(path)?)),
+        (None, None) => Ok(None),
+        (Some(_), Some(_)) => Err("pick one reference: a canvas frame or a file, not both".into()),
+    }
 }
 
 /// 按扩展名猜 media type；认不出来就交给 decode 做内容嗅探。
@@ -852,6 +860,48 @@ mod tests {
         assert_eq!(media_type_for(std::path::Path::new("a.jpeg")), "image/jpeg");
         assert_eq!(media_type_for(std::path::Path::new("a.xyz")), "image/png");
         assert_eq!(media_type_for(std::path::Path::new("a")), "image/png");
+    }
+
+    #[test]
+    fn a_frame_reference_beats_a_stale_file_and_rejects_getting_both() {
+        let d = doc();
+        // 帧优先：文档里只有 F0，所以这条走得通。
+        let chosen = resolve_reference(&d, Some("F0"), None).unwrap();
+        assert_eq!(
+            chosen.expect("frame reference").role,
+            AttachmentRole::Reference
+        );
+
+        // 两个都给 = 调用方没想清楚。宁可报错也不猜。
+        let both = resolve_reference(&d, Some("F0"), Some("/tmp/never-read.png")).unwrap_err();
+        assert!(both.contains("not both"), "{both}");
+
+        // 帧 id 写错时，错话说的是帧，不是文件。
+        let missing = resolve_reference(&d, Some("F7"), None).unwrap_err();
+        assert!(missing.contains("F7"), "{missing}");
+    }
+
+    #[test]
+    fn a_reference_file_is_read_as_png_bytes() {
+        use std::io::Write;
+
+        let dir = std::env::temp_dir().join("aipixel/reference-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ref.png");
+        let bytes = decode_base64_bare(&red_png_b64());
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(&bytes)
+            .unwrap();
+
+        let attachment = resolve_reference(&doc(), None, Some(path.to_str().unwrap())).unwrap();
+        let got = attachment.expect("file reference");
+        assert_eq!(got.media_type, "image/png");
+        assert_eq!(got.role, AttachmentRole::Reference);
+        assert_eq!(
+            pixel_core::decode::decode_base64(&got.data_base64).unwrap(),
+            bytes
+        );
     }
 
     fn decode_base64_bare(text: &str) -> Vec<u8> {

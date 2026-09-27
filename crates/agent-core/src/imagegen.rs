@@ -11,9 +11,11 @@
 //! 同一个 base_url 下两种都可能存在，所以这里按顺序试，只在「端点不存在」时降级；
 //! 其余错误（鉴权、参数、内容策略）必须原样抛出去，否则用户看到的会是莫名其妙的二次失败。
 
-use super::models::{Attachment, ModelConfig, Protocol};
+use super::models::{Attachment, AttachmentRole, ModelConfig, Protocol};
 use super::providers::ProviderError;
 use async_trait::async_trait;
+use pixel_core::document::Document;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -39,6 +41,18 @@ pub struct ImageGenParams {
     pub size: Option<String>,
     /// 参考图（垫图）。只有 chat_modalities 传输支持。
     pub reference: Option<Attachment>,
+}
+
+/// 一张位图落到文档的哪个位置。供工作流坞与 agent 工具共用：
+/// 两边问的是同一个问题，答案也该是同一个枚举。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LandSpot {
+    /// 默认落在激活 cel。单张参考图的量化不该顺手多出一帧来。
+    #[default]
+    ActiveCel,
+    /// 新建一帧再落进去（逐帧生图 / 视频抽帧 / 「照这一帧再长一帧」都走这条）。
+    NewFrame,
 }
 
 #[async_trait]
@@ -284,6 +298,29 @@ pub fn build_image_generator(config: &ModelConfig) -> Arc<dyn ImageGenerator> {
     }
 }
 
+/// 把文档里某一帧合成成一张 PNG，当作垫图真值交给生图模型。
+///
+/// 这是「改这一帧」和「照这一帧再长一帧」的共同底座：用户要改的是画布上活着的东西，
+/// 不是磁盘上一张可能已经过期的导出图。合成按图层顺序走，所以隐藏层不进去，
+/// 模型看到的和用户看到的一致。
+///
+/// 角色恒为 Reference：这是要模型照着改的真值，不是供参考的截图，
+/// 一旦混成 Snapshot，模型会以为「只是给你看看」，导致它不敢动笔。
+pub fn frame_reference(doc: &Document, frame_id: &str) -> Result<Attachment, String> {
+    let index = doc
+        .frames
+        .iter()
+        .position(|frame| frame.id == frame_id)
+        .ok_or_else(|| format!("unknown frame: {frame_id}"))?;
+    let image = pixel_core::png::composite_frame(doc, index as u32);
+    let bytes = pixel_core::png::encode_png(&image)?;
+    Ok(Attachment {
+        role: AttachmentRole::Reference,
+        media_type: "image/png".into(),
+        data_base64: pixel_core::png::base64_encode(&bytes),
+    })
+}
+
 /// 把 "1024x1024" 这类尺寸折成 aspect ratio；解析不了就不发 image_config。
 fn aspect_from_size(size: &str) -> Option<String> {
     let (w, h) = size.split_once('x')?;
@@ -383,5 +420,101 @@ mod tests {
         };
         assert_eq!(img.transport, "images");
         assert_eq!(img.bytes.len(), 3);
+    }
+
+    /// 2x2 文档，左下角一块红。小尺寸是 image crate 无条件支持的。
+    fn red_corner_doc() -> Document {
+        let mut doc = Document::new("t", 2, 2).unwrap();
+        let red = pixel_core::Rgba::rgb(255, 0, 0);
+        let index = doc.intern_color(red).unwrap();
+        let width = doc.width;
+        if let Some(cel) = doc.cel_mut("L0", "F0") {
+            cel.set(width, 1, 1, index);
+        }
+        doc
+    }
+
+    /// 把附件里的 base64 PNG 解回像素，取 (x,y) 的 RGBA。
+    fn pixel_of(attachment: &Attachment, x: u32, y: u32) -> [u8; 4] {
+        let bytes = pixel_core::decode::decode_base64(&attachment.data_base64).unwrap();
+        let (rgba, width, _) =
+            pixel_core::decode::decode_image(&bytes, &attachment.media_type).unwrap();
+        let at = ((y * width + x) * 4) as usize;
+        [rgba[at], rgba[at + 1], rgba[at + 2], rgba[at + 3]]
+    }
+
+    #[test]
+    fn frame_reference_paints_only_the_asked_frame() {
+        use pixel_core::ops::{self, PixelOperation};
+
+        let mut doc = red_corner_doc();
+        let green = pixel_core::Rgba::rgb(0, 255, 0);
+        let index = doc.intern_color(green).unwrap();
+        ops::apply_batch(
+            &mut doc,
+            &[PixelOperation::CreateFrame {
+                after: Some("F0".into()),
+                duration_ms: 100,
+                id: None,
+            }],
+        )
+        .expect("setup applies");
+        // 新帧 F1：左上角一块绿。F0 保持只有右下角红。
+        let width = doc.width;
+        if let Some(cel) = doc.cel_mut("L0", "F1") {
+            cel.set(width, 0, 0, index);
+        }
+
+        let first = super::frame_reference(&doc, "F0").unwrap();
+        assert_eq!(first.media_type, "image/png");
+        assert_eq!(first.role, AttachmentRole::Reference);
+        // F0：右下是红的，左上是透明。
+        assert_eq!(pixel_of(&first, 1, 1), [255, 0, 0, 255]);
+        assert_eq!(pixel_of(&first, 0, 0)[3], 0);
+
+        let second = super::frame_reference(&doc, "F1").unwrap();
+        // F1：左上是绿的，右下回到透明——证明渲染的是这一帧而不是整份文档。
+        assert_eq!(pixel_of(&second, 0, 0), [0, 255, 0, 255]);
+        assert_eq!(pixel_of(&second, 1, 1)[3], 0);
+    }
+
+    #[test]
+    fn frame_reference_names_the_frame_it_could_not_find() {
+        let doc = red_corner_doc();
+        let err = super::frame_reference(&doc, "F9").unwrap_err();
+        assert!(err.contains("F9"), "{err}");
+    }
+
+    #[test]
+    fn frame_reference_honors_layer_visibility() {
+        use pixel_core::ops::{self, PixelOperation};
+
+        let mut doc = red_corner_doc();
+        ops::apply_batch(
+            &mut doc,
+            &[PixelOperation::CreateLayer {
+                after: None,
+                name: None,
+                id: None,
+            }],
+        )
+        .expect("setup applies");
+        let green = pixel_core::Rgba::rgb(0, 255, 0);
+        let index = doc.intern_color(green).unwrap();
+        // L1 整帧铺绿，然后藏起来：模型该看见的只有 L0 那块红。
+        let width = doc.width;
+        let height = doc.height;
+        if let Some(cel) = doc.cel_mut("L1", "F0") {
+            for y in 0..height {
+                for x in 0..width {
+                    cel.set(width, x, y, index);
+                }
+            }
+        }
+        doc.layers[1].visible = false;
+
+        let attachment = super::frame_reference(&doc, "F0").unwrap();
+        assert_eq!(pixel_of(&attachment, 0, 0)[3], 0);
+        assert_eq!(pixel_of(&attachment, 1, 1), [255, 0, 0, 255]);
     }
 }
