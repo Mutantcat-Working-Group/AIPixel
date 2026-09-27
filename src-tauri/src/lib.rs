@@ -3,6 +3,7 @@
 
 mod commands;
 mod editor;
+mod mcp;
 mod state;
 mod workflow;
 
@@ -37,6 +38,11 @@ pub fn run() {
             commands::model_set_active,
             commands::model_upsert,
             commands::read_image_context,
+            mcp::mcp_connect,
+            mcp::mcp_disconnect,
+            mcp::mcp_list,
+            mcp::mcp_remove,
+            mcp::mcp_upsert,
             commands::session_bind_model,
             commands::session_create,
             commands::session_drop,

@@ -8,7 +8,7 @@ license.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["process", "io-util"] }
 futures-util = "0.3"
 bytes = "1"
 reqwest = { version = "0.12", default-features = false, features = ["stream", "json", "rustls-tls"] }

@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
 import { Button, Segmented, Select, Spin, Tooltip } from "antd";
-import { FolderOpen, ImagePlus, Save, Settings2, X } from "lucide-react";
+import { FolderOpen, ImagePlus, Plug, Save, Settings2, X } from "lucide-react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 
 import ChatPanel from "./ui/ChatPanel";
 import DocumentPanel from "./ui/DocumentPanel";
 import ModelSettingsModal from "./ui/ModelSettingsModal";
+import McpPanel from "./ui/McpPanel";
 import SessionSidebar from "./ui/SessionSidebar";
 import StarterGate from "./ui/StarterGate";
 import WorkflowDock from "./ui/WorkflowDock";
@@ -147,6 +148,14 @@ export default function App() {
               onClick={store.openSettings}
             />
           </Tooltip>
+          <Tooltip title="MCP tool servers">
+            <Button
+              size="small"
+              type="text"
+              icon={<Plug size={14} />}
+              onClick={store.openMcp}
+            />
+          </Tooltip>
         </div>
       </header>
 
@@ -174,6 +183,7 @@ export default function App() {
       </div>
 
       <ModelSettingsModal />
+      <McpPanel />
     </div>
   );
 }

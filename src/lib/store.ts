@@ -20,9 +20,11 @@ import type {
   EditorOperation,
   DockKind,
   DockDraft,
-  ImageGenParams,
-  ModelConfig,
-  ModelsView,
+ ImageGenParams,
+  McpServerConfig,
+  McpServersView,
+ ModelConfig,
+ ModelsView,
   PixelizeParams,
   PendingAttachment,
   PendingApproval,
@@ -80,6 +82,8 @@ export type WorkflowParams = TweenParams | PixelizeParams | ImageGenParams | Vid
 interface StoreState extends DocumentSnapshot, WorkflowState {
   booted: boolean;
   models: ModelsView;
+  /** 用户自配的 MCP 服务器；连上的才带工具清单。 */
+  mcpServers: McpServersView;
   sessions: SessionInfo[];
   activeId: string | null;
   entries: TranscriptEntry[];
@@ -97,6 +101,9 @@ interface StoreState extends DocumentSnapshot, WorkflowState {
   undoStack: PixelDocument[];
   notice: { text: string; isError: boolean } | null;
   settingsOpen: boolean;
+  mcpOpen: boolean;
+  /** 连接/保存进行中：期间按钮全灭，防止连点把服务器打爆。 */
+  mcpBusy: boolean;
 }
 
 export interface StoreActions {
@@ -111,6 +118,13 @@ export interface StoreActions {
   upsertModel: (config: ModelConfig) => Promise<void>;
   removeModel: (id: string) => Promise<void>;
   activateModel: (id: string) => Promise<void>;
+  refreshMcp: () => Promise<void>;
+  openMcp: () => void;
+  closeMcp: () => void;
+  upsertMcpServer: (config: McpServerConfig) => Promise<void>;
+  removeMcpServer: (name: string) => Promise<void>;
+  connectMcpServer: (name: string) => Promise<void>;
+  disconnectMcpServer: (name: string) => Promise<void>;
   attachReferenceImages: (paths: string[]) => Promise<void>;
   attachSnapshot: () => Promise<void>;
   removeAttachment: (key: string) => void;
@@ -163,6 +177,7 @@ export interface StoreActions {
 }
 
 const EMPTY_MODELS: ModelsView = { active_id: "", entries: [] };
+const EMPTY_MCP: McpServersView = { entries: [] };
 
 /** 与 Rust `PixelizeOptions::default()` 一致；改了 Rust 要同步这里。 */
 const DEFAULT_OPTIONS: PixelizeOptions = {
@@ -388,6 +403,9 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     undoStack: [],
     notice: null,
     settingsOpen: false,
+    mcpServers: EMPTY_MCP,
+    mcpOpen: false,
+    mcpBusy: false,
     workflows: [],
     catalogReady: false,
     kind: "image_gen",
@@ -414,6 +432,14 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
           models = EMPTY_MODELS;
         }
         setState({ models });
+        let mcpServers: McpServersView;
+        try {
+          mcpServers = await bridge.listMcpServers();
+        } catch (error) {
+          fail(`读取 MCP 服务器配置失败：${String(error)}`);
+          mcpServers = EMPTY_MCP;
+        }
+        setState({ mcpServers });
         let sessions: SessionInfo[] = [];
         try {
           sessions = await bridge.listSessions();
@@ -548,6 +574,64 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     activateModel: async (id) => {
       const models = await bridge.setActiveModel(id);
       setState({ models });
+    },
+
+    refreshMcp: async () => {
+      try {
+        setState({ mcpServers: await bridge.listMcpServers() });
+      } catch (error) {
+        fail(`读取 MCP 服务器配置失败：${String(error)}`);
+      }
+    },
+
+    openMcp: () => setState({ mcpOpen: true }),
+
+    closeMcp: () => setState({ mcpOpen: false }),
+
+    upsertMcpServer: async (config) => {
+      setState({ mcpBusy: true });
+      try {
+        setState({ mcpServers: await bridge.upsertMcpServer(config) });
+      } catch (error) {
+        fail(`保存 MCP 服务器失败：${String(error)}`);
+      } finally {
+        setState({ mcpBusy: false });
+      }
+    },
+
+    removeMcpServer: async (name) => {
+      setState({ mcpBusy: true });
+      try {
+        setState({ mcpServers: await bridge.removeMcpServer(name) });
+      } catch (error) {
+        fail(`删除 MCP 服务器失败：${String(error)}`);
+      } finally {
+        setState({ mcpBusy: false });
+      }
+    },
+
+    connectMcpServer: async (name) => {
+      setState({ mcpBusy: true });
+      try {
+        setState({ mcpServers: await bridge.connectMcpServer(name) });
+      } catch (error) {
+        // 失败原因由 Rust 带回视图；这里只负责把视图刷出来让用户看见。
+        setState({ mcpServers: await bridge.listMcpServers() });
+        fail(`连接 MCP 服务器失败：${String(error)}`);
+      } finally {
+        setState({ mcpBusy: false });
+      }
+    },
+
+    disconnectMcpServer: async (name) => {
+      setState({ mcpBusy: true });
+      try {
+        setState({ mcpServers: await bridge.disconnectMcpServer(name) });
+      } catch (error) {
+        fail(`断开 MCP 服务器失败：${String(error)}`);
+      } finally {
+        setState({ mcpBusy: false });
+      }
     },
 
     attachReferenceImages: async (paths) => {

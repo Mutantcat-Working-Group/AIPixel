@@ -5,10 +5,12 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use agent_core::{AgentSession, Capabilities, ModelConfig, Protocol};
+use agent_core::{AgentSession, Capabilities, McpRegistry, McpServerConfig, ModelConfig, Protocol};
 use pixel_core::document::Document;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
+
+use crate::mcp::McpFile;
 
 /// 模型配置文件，落盘在 app config 目录。api_key 只留在本机。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -49,6 +51,8 @@ pub struct ModelsView {
 pub struct AppState {
     sessions: Mutex<HashMap<String, Arc<AgentSession>>>,
     models: Mutex<ModelsFile>,
+    /// MCP 服务器登记表：配置的唯一真相，mcp.json 只是它的落盘影子。
+    mcp: Arc<McpRegistry>,
     config_dir: Mutex<PathBuf>,
     counter: Mutex<u64>,
 }
@@ -58,6 +62,7 @@ impl Default for AppState {
         AppState {
             sessions: Mutex::new(HashMap::new()),
             models: Mutex::new(ModelsFile::default()),
+            mcp: Arc::new(McpRegistry::new()),
             config_dir: Mutex::new(PathBuf::new()),
             counter: Mutex::new(0),
         }
@@ -74,7 +79,57 @@ impl AppState {
         std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create config dir: {e}"))?;
         *self.config_dir.lock().unwrap() = dir;
         self.load_models();
+        self.schedule_mcp_recovery();
         Ok(())
+    }
+
+    fn mcp_path(&self) -> PathBuf {
+        self.config_dir.lock().unwrap().join("mcp.json")
+    }
+
+    pub fn mcp_registry(&self) -> Arc<McpRegistry> {
+        self.mcp.clone()
+    }
+
+    pub fn save_mcp_file(&self) {
+        let file = McpFile {
+            entries: self.mcp.configs(),
+        };
+        if let Ok(text) = serde_json::to_string_pretty(&file) {
+            let _ = std::fs::write(self.mcp_path(), text);
+        }
+    }
+
+    fn load_mcp_file(&self) -> Vec<McpServerConfig> {
+        let Ok(text) = std::fs::read_to_string(self.mcp_path()) else {
+            return Vec::new();
+        };
+        match serde_json::from_str::<McpFile>(&text) {
+            Ok(file) => file.entries,
+            Err(e) => {
+                eprintln!("mcp.json is broken, starting with no servers: {e}");
+                Vec::new()
+            }
+        }
+    }
+
+    /// 开机恢复：逐条登记（校验不过的跳过），auto_connect 的再排队连。
+    /// 一个坏服务器不该挡住启动，失败只留状态，不冒泡。
+    fn schedule_mcp_recovery(&self) {
+        let entries = self.load_mcp_file();
+        let registry = self.mcp.clone();
+        tauri::async_runtime::spawn(async move {
+            for entry in entries {
+                if registry.register(entry.clone()).await.is_err() {
+                    continue;
+                }
+                if entry.auto_connect {
+                    if let Err(e) = registry.connect(&entry.name).await {
+                        eprintln!("auto-connect {} failed: {e}", entry.name);
+                    }
+                }
+            }
+        });
     }
 
     fn models_path(&self) -> PathBuf {
@@ -240,7 +295,8 @@ impl AppState {
             id.clone(),
             self.active_config(),
             document,
-        ));
+        )
+        .with_mcp_registry(self.mcp.clone()));
         self.sessions
             .lock()
             .unwrap()
