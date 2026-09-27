@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { Button, Segmented, Tooltip } from "antd";
+import { Button, InputNumber, Segmented, Slider, Tooltip } from "antd";
 import {
   ArrowLeft,
+  ArrowDown,
+  ArrowUp,
   ArrowRight,
   Brush,
   Copy,
@@ -297,11 +299,22 @@ export default function DocumentPanel() {
   const frames = document?.frames ?? [];
   const firstFrame = frameIndex <= 0;
   const lastFrame = frameIndex >= frames.length - 1;
+  // 图层列表反过来显示：最上层在最前面。合成时 layers[0] 画在最底下，
+  // 所以 vec 里越靠后越盖得住，箭头上移 = to_index + 1。
+  const layersTopFirst = [...(document?.layers ?? [])].reverse();
+  const layerCount = document?.layers.length ?? 0;
+  const activeLayer = document?.layers.find((layer) => layer.id === active.layer) ?? null;
+  const activeLayerIndex = document?.layers.findIndex((layer) => layer.id === active.layer) ?? -1;
+  // vec 里越靠后越盖得住：末位就是最上层，首位就是最底层。
+  const topLayer = activeLayerIndex < 0 || activeLayerIndex >= layerCount - 1;
+  const bottomLayer = activeLayerIndex <= 0;
+  const opacityPercent = Math.round(((activeLayer?.opacity ?? 255) / 255) * 100);
   // active.color 可空：归一成 ink，画笔与预览都吃这一份。
   const ink: InkColor = active.color ?? null;
   const canPlay = frames.length > 1;
   // 播放时高亮跟着本地帧号走，store 的 frameIndex 还停在开播那一帧。
   const shownFrame = playing ? playFrame : frameIndex;
+  const currentFrame = frames[frameIndex];
 
   return (
     <aside className="panel doc">
@@ -414,19 +427,71 @@ export default function DocumentPanel() {
           <div className="doc-section-title">
             <Layers size={12} />
             {t("doc.layers")}
+            <span className="grow" />
+            <Tooltip title={t("doc.layer_up")}>
+              <Button
+                size="small"
+                type="text"
+                icon={<ArrowUp size={13} />}
+                disabled={topLayer}
+                onClick={() => void useStore.getState().moveLayer(1)}
+              />
+            </Tooltip>
+            <Tooltip title={t("doc.layer_down")}>
+              <Button
+                size="small"
+                type="text"
+                icon={<ArrowDown size={13} />}
+                disabled={bottomLayer}
+                onClick={() => void useStore.getState().moveLayer(-1)}
+              />
+            </Tooltip>
           </div>
-          {document?.layers.map((layer) => (
-            <button
-              type="button"
+          {/* 最上层排在最前面，和 Aseprite / Photoshop 的图层列表同一约定：
+              箭头向上就是往栈顶走，方向不需要在脑子里换算一次。 */}
+          {layersTopFirst.map((layer) => (
+            <div
               key={layer.id}
               className={`layer-row ${active.layer === layer.id ? "active" : ""}`}
-              onClick={() => useStore.getState().setActiveLayer(layer.id)}
             >
-              {layer.visible ? <Eye size={13} /> : <EyeOff size={13} />}
-              <span className="layer-id">{layer.id}</span>
-              <span className="grow">{layer.name}</span>
-            </button>
+              <Tooltip title={t("doc.layer_visible")}>
+                <button
+                  type="button"
+                  className={`layer-eye ${layer.visible ? "" : "off"}`}
+                  aria-label={t("doc.layer_visible")}
+                  onClick={() =>
+                    void useStore.getState().setLayerVisible(layer.id, !layer.visible)
+                  }
+                >
+                  {layer.visible ? <Eye size={13} /> : <EyeOff size={13} />}
+                </button>
+              </Tooltip>
+              <button
+                type="button"
+                className="layer-name"
+                onClick={() => useStore.getState().setActiveLayer(layer.id)}
+              >
+                <span className="layer-id">{layer.id}</span>
+                <span className="grow">{layer.name}</span>
+              </button>
+            </div>
           ))}
+          {activeLayer ? (
+            <div className="layer-opacity">
+              <span className="layer-opacity-label">{t("doc.layer_opacity")}</span>
+              <Slider
+                className="layer-opacity-slider"
+                min={0}
+                max={255}
+                value={activeLayer.opacity}
+                tooltip={{ formatter: (value) => `${Math.round(((value ?? 0) / 255) * 100)}%` }}
+                onChange={(value) =>
+                  void useStore.getState().setLayerOpacity(activeLayer.id, value)
+                }
+              />
+              <span className="layer-opacity-value">{opacityPercent}%</span>
+            </div>
+          ) : null}
         </div>
 
         <div className="doc-section">
@@ -488,6 +553,19 @@ export default function DocumentPanel() {
                 {frame.id} · {frame.duration_ms}ms
               </button>
             ))}
+          </div>
+          <div className="frame-duration">
+            <span className="frame-duration-label">{t("doc.frame_duration")}</span>
+            <InputNumber
+              size="small"
+              className="frame-duration-input"
+              min={1}
+              max={60000}
+              step={10}
+              value={currentFrame?.duration_ms ?? 100}
+              onChange={(next) => void useStore.getState().setFrameDuration(next ?? 100)}
+            />
+            <span className="frame-duration-unit">ms</span>
           </div>
         </div>
 

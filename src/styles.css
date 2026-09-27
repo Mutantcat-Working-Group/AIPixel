@@ -606,7 +606,6 @@ body {
   border-radius: 5px;
   background: transparent;
   color: var(--text);
-  cursor: pointer;
   font-size: 12px;
   text-align: left;
 }
@@ -618,6 +617,46 @@ body {
 .layer-row.active {
   background: var(--accent-soft);
   border-color: rgba(62, 155, 255, 0.3);
+}
+
+.layer-eye {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.layer-eye:hover {
+  background: var(--bg-panel-2);
+  color: var(--text);
+}
+
+.layer-eye.off {
+  color: var(--text-faint);
+  opacity: 0.7;
+}
+
+.layer-name {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
 }
 
 .layer-row .layer-id {
@@ -632,6 +671,71 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 侧栏只有约 210px 可用：label 与读数固定宽，滑块吃掉剩余空间。 */
+.layer-opacity {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
+  padding: 0 7px;
+}
+
+.layer-opacity-label {
+  flex: none;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.layer-opacity-slider {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+}
+
+.layer-opacity-slider .ant-slider-rail,
+.layer-opacity-slider .ant-slider-track,
+.layer-opacity-slider .ant-slider-step {
+  height: 4px;
+}
+
+.layer-opacity-value {
+  flex: none;
+  min-width: 32px;
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.frame-duration {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
+}
+
+.frame-duration-label {
+  flex: none;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.frame-duration-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.frame-duration-input .ant-input-number-input {
+  padding: 0 6px;
+}
+
+.frame-duration-unit {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
 }
 
 .frame-strip {
@@ -1363,6 +1467,10 @@ body {
   align-items: center;
   gap: 8px;
   width: 100%;
+  /* 窄窗（≤1180px）下列表只有 200px：工具条允许折一行，别把撤销按钮挤出栏外。 */
+  flex-wrap: wrap;
+  row-gap: 8px;
+  min-width: 0;
 }
 
 .tool-label {
