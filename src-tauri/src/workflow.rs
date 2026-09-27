@@ -1,0 +1,820 @@
+//! 工作流命令层：把 agent-core 的六条工作流接到 Tauri 上。
+//!
+//! 分成三类的道理：生图类要等模型回图，只能异步跑；本机类（插帧、量化）是纯计算，
+//! 同步返回更快也更不容易中途改坏文档；探针类只回答「这段素材长什么样」。
+//!
+// 所有改文档的工作流都走 `AgentSession::with_document_mut`，和 agent 主循环共用同一把锁，
+//! 因此不会出现「主循环正在跑，工作流插进去改了画布」的交织。改完统一发
+//! `AgentEvent::DocumentUpdated`，前端只有一条刷新路径。
+
+use agent_core::{
+    imagegen, refine as refine_flow, video as video_flow, vision, ActiveContext, AgentEvent,
+    AgentSession, Attachment, AttachmentRole, RefineRequest, RefineTarget,
+};
+use pixel_core::decode;
+use pixel_core::document::Document;
+use pixel_core::ops::{self, PixelOperation};
+use pixel_core::pixelize::{self, PixelizeOptions, PixelizeReport};
+use pixel_core::tween::{self, MigrateOrder, TweenMode, TweenOptions};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::path::PathBuf;
+use tauri::{AppHandle, Emitter, State};
+
+use crate::state::AppState;
+
+/// 视频抽帧的临时落点。放在系统临时目录，不占用用户的工程目录。
+pub const FRAME_STAGING_DIR: &str = "aipixel/video-frames";
+
+/// 工作流跑完的统一回执：新 revision、一句人话摘要、以及给 UI 展开看的结构化细节。
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkflowOutcome {
+    pub revision: u64,
+    pub summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<Value>,
+}
+
+/// 一条工作流的目录项 + 当前会话的模型跑不跑得动。
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkflowEntry {
+    #[serde(flatten)]
+    pub info: agent_core::WorkflowInfo,
+    pub readiness: agent_core::Readiness,
+}
+
+/// 视频探针结果。source 决定 UI 该说「抽帧」还是「这就是一串静帧」。
+#[derive(Debug, Clone, Serialize)]
+pub struct VideoProbeResult {
+    pub probe: agent_core::VideoProbe,
+    pub source: agent_core::ProbeSource,
+}
+
+/// 位图落到文档的哪个位置。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LandSpot {
+    /// 默认落在激活 cel：单张参考图的量化不该顺手多出一帧来。
+    #[default]
+    /// 覆盖当前激活的 cel。
+    ActiveCel,
+    /// 新建一帧再落进去（逐帧生图 / 视频抽帧都走这条）。
+    NewFrame,
+}
+
+/// 一次落图的结果：落在哪儿 + 量化的统计。
+#[derive(Debug, Clone)]
+struct LandedImage {
+    layer: String,
+    frame: String,
+    report: PixelizeReport,
+}
+
+// ---------- 入参 ----------
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TweenParams {
+    pub from_frame: String,
+    pub to_frame: String,
+    #[serde(default = "default_count")]
+    pub count: usize,
+    #[serde(default = "default_tween_mode")]
+    pub mode: TweenMode,
+    #[serde(default = "default_migrate_order")]
+    pub order: MigrateOrder,
+    #[serde(default = "default_true")]
+    pub ease: bool,
+    #[serde(default = "default_frame_duration")]
+    pub duration_ms: u32,
+    #[serde(default)]
+    pub layer: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PixelizeParams {
+    /// base64 位图，带不带 `data:` 前缀都行。
+    pub image_base64: String,
+    /// 裸 base64 时必须给；带 data: 前缀时忽略。
+    #[serde(default)]
+    pub media_type: Option<String>,
+    #[serde(default)]
+    pub options: Option<PixelizeOptions>,
+    #[serde(default)]
+    pub layer: Option<String>,
+    #[serde(default)]
+    pub frame: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ImageGenParams {
+    pub prompt: String,
+    /// 只有 chat modalities 传输认这个，形如 "1024x1024"。
+    #[serde(default)]
+    pub size: Option<String>,
+    /// 垫图路径：用户拿一张图让模型照着改。
+    #[serde(default)]
+    pub reference_path: Option<String>,
+    #[serde(default)]
+    pub options: Option<PixelizeOptions>,
+    #[serde(default)]
+    pub spot: LandSpot,
+    #[serde(default = "default_frame_duration")]
+    pub duration_ms: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct VideoFramesParams {
+    pub path: String,
+    /// 0 表示「全都要」，仍受 agent_core::video::MAX_EXTRACT_FRAMES 限制。
+    #[serde(default)]
+    pub count: usize,
+    #[serde(default)]
+    pub options: Option<PixelizeOptions>,
+    #[serde(default = "default_frame_duration")]
+    pub duration_ms: u32,
+}
+
+fn default_count() -> usize {
+    4
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_frame_duration() -> u32 {
+    83
+}
+
+fn default_tween_mode() -> TweenMode {
+    TweenMode::Migrate
+}
+
+fn default_migrate_order() -> MigrateOrder {
+    MigrateOrder::Scan
+}
+
+// ---------- 目录与只读查询 ----------
+
+/// 六条工作流 + 当前会话模型的能力判断。能力跟着会话而不是全局激活模型：
+/// 用户随时可以把会话改绑到另一个模型。
+#[tauri::command]
+pub fn workflow_catalog(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<WorkflowEntry>, String> {
+    let session = state.session(&id)?;
+    let caps = session.model_config().capabilities;
+    Ok(agent_core::catalog()
+        .into_iter()
+        .map(|info| {
+            let readiness = agent_core::readiness(info.kind, &caps);
+            WorkflowEntry { info, readiness }
+        })
+        .collect())
+}
+
+/// 探一段素材：视频走 ffprobe，目录走静帧枚举。只读，不碰文档。
+#[tauri::command]
+pub async fn video_probe(path: String) -> Result<VideoProbeResult, String> {
+    let target = PathBuf::from(&path);
+    let (probe, source) = video_flow::probe(&target).await?;
+    Ok(VideoProbeResult { probe, source })
+}
+
+// ---------- 生图与读图（要等模型） ----------
+
+/// 提示词微调。只产文本，不碰文档：这条工作流的结果是要给用户逐行改的。
+#[tauri::command]
+pub async fn prompt_refine(
+    state: State<'_, AppState>,
+    id: String,
+    idea: String,
+    width: u32,
+    height: u32,
+    target: Option<RefineTarget>,
+) -> Result<agent_core::RefinedPrompt, String> {
+    let session = state.session(&id)?;
+    let config = session.model_config();
+    let (w, h) = {
+        let doc = session.document();
+        (doc.width, doc.height)
+    };
+    let req = RefineRequest {
+        idea,
+        width: if width == 0 { w } else { width },
+        height: if height == 0 { h } else { height },
+        target: target.unwrap_or_default(),
+    };
+    refine_flow::refine(&config, &req)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// 参考图简报：读图模型把图读成结构化文字。刻意不落文档，
+/// 因为简报是要给用户改的中间产物，改完再由用户决定发不发去画。
+#[tauri::command]
+pub async fn vision_brief(
+    state: State<'_, AppState>,
+    id: String,
+    path: String,
+) -> Result<vision::VisionBrief, String> {
+    let session = state.session(&id)?;
+    let config = session.model_config();
+    if !config.capabilities.vision {
+        return Err(
+            "this model is not marked as able to read images; enable vision in model settings"
+                .into(),
+        );
+    }
+    let attachment = read_reference(&path)?;
+    let (w, h) = {
+        let doc = session.document();
+        (doc.width, doc.height)
+    };
+    vision::brief_reference(&config, &attachment, w, h)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// 生图：模型出位图 -> 量化落到画布上。位图只是原料，权威状态仍是文本网格。
+#[tauri::command]
+pub async fn workflow_image_gen(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    params: ImageGenParams,
+) -> Result<WorkflowOutcome, String> {
+    let session = state.session(&id)?;
+    let config = session.model_config();
+    if !config.capabilities.image_gen {
+        return Err("this model is not marked as able to generate images; enable image generation in model settings".into());
+    }
+    if params.prompt.trim().is_empty() {
+        return Err("image generation needs a prompt".into());
+    }
+    let reference = match &params.reference_path {
+        Some(path) => Some(read_reference(path)?),
+        None => None,
+    };
+    let generator = imagegen::build_image_generator(&config);
+    let request = imagegen::ImageGenParams {
+        prompt: params.prompt,
+        size: params.size,
+        reference,
+    };
+    emit_status(&app, "asking the model for an image");
+    let image = generator
+        .generate(&request)
+        .await
+        .map_err(|e| e.to_string())?;
+    emit_status(
+        &app,
+        &format!("quantizing a {} image onto the grid", image.transport),
+    );
+
+    let (rgba, width, height) =
+        decode::decode_image(&image.bytes, &image.media_type).map_err(|e| e.to_string())?;
+    let opts = params.options.clone().unwrap_or_default();
+    let active = session.active();
+    let landed = session.with_document_mut(|doc| {
+        land_bitmap(
+            doc,
+            &active,
+            LandRequest {
+                spot: params.spot,
+                after: None,
+                duration_ms: params.duration_ms,
+                rgba: &rgba,
+                width,
+                height,
+                opts: &opts,
+            },
+        )
+    })?;
+
+    // 新帧落图后把激活帧挪过去：否则模型下一轮还在旧帧上画，用户看到的也对不上。
+    if params.spot == LandSpot::NewFrame {
+        let mut next = active.clone();
+        next.frame = landed.frame.clone();
+        session.set_active(next);
+    }
+    let revision = emit_document(&app, &session);
+    Ok(WorkflowOutcome {
+        revision,
+        summary: format!(
+            "{} landed on layer {} frame {} ({} colors, {} new)",
+            image.transport,
+            landed.layer,
+            landed.frame,
+            landed.report.colors_used,
+            landed.report.palette_added
+        ),
+        detail: Some(landed_detail(&landed)),
+    })
+}
+
+/// 视频抽帧并逐帧量化。ffmpeg 不在时退回「目录里的一串静帧」。
+#[tauri::command]
+pub async fn workflow_video_frames(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    params: VideoFramesParams,
+) -> Result<WorkflowOutcome, String> {
+    let session = state.session(&id)?;
+    let source = PathBuf::from(&params.path);
+    let (probe, origin) = video_flow::probe(&source).await?;
+    let staging = std::env::temp_dir().join(FRAME_STAGING_DIR);
+    let frames = video_flow::extract_frames(&source, &staging, params.count).await?;
+    if frames.is_empty() {
+        return Err("no frames came out of that source".into());
+    }
+    let opts = params.options.clone().unwrap_or_default();
+    let active = session.active();
+
+    let mut after: Option<String> = None;
+    let mut landed: Vec<LandedImage> = Vec::with_capacity(frames.len());
+    let mut failures: Vec<String> = Vec::new();
+    for (index, path) in frames.iter().enumerate() {
+        emit_status(
+            &app,
+            &format!("reading frame {} of {}", index + 1, frames.len()),
+        );
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                failures.push(format!("{}: {e}", path.display()));
+                continue;
+            }
+        };
+        let media_type = media_type_for(path);
+        let decoded = match decode::decode_image(&bytes, &media_type) {
+            Ok(d) => d,
+            Err(e) => {
+                failures.push(format!("{}: {e}", path.display()));
+                continue;
+            }
+        };
+        let (rgba, width, height) = decoded;
+        match session.with_document_mut(|doc| {
+            land_bitmap(
+                doc,
+                &active,
+                LandRequest {
+                    spot: LandSpot::NewFrame,
+                    after: after.clone(),
+                    duration_ms: params.duration_ms,
+                    rgba: &rgba,
+                    width,
+                    height,
+                    opts: &opts,
+                },
+            )
+        }) {
+            Ok(one) => {
+                after = Some(one.frame.clone());
+                landed.push(one);
+            }
+            Err(e) => failures.push(format!("{}: {e}", path.display())),
+        }
+    }
+    if landed.is_empty() {
+        let reason = failures.join("; ");
+        return Err(if reason.is_empty() {
+            "every frame failed to land".into()
+        } else {
+            reason
+        });
+    }
+    let last_frame = landed[landed.len() - 1].frame.clone();
+    let mut next = active.clone();
+    next.frame = last_frame;
+    session.set_active(next);
+    let revision = emit_document(&app, &session);
+
+    let mut summary = format!(
+        "{} frame(s) from {} landed on layer {} frames {}-{}",
+        landed.len(),
+        origin_label(origin),
+        landed[0].layer,
+        landed[0].frame,
+        landed[landed.len() - 1].frame,
+    );
+    if !failures.is_empty() {
+        summary.push_str(&format!(" ({} skipped)", failures.len()));
+    }
+    let detail = json!({
+        "source": origin_label(origin),
+        "probe_width": probe.width,
+        "probe_height": probe.height,
+        "duration_s": probe.duration_s,
+        "fps": probe.fps,
+        "frames": landed.iter().map(|l| l.frame.clone()).collect::<Vec<_>>(),
+        "skipped": failures,
+    });
+    Ok(WorkflowOutcome {
+        revision,
+        summary,
+        detail: Some(detail),
+    })
+}
+
+// ---------- 本机计算（同步） ----------
+
+/// 插帧。不吃模型额度，纯粹本机算，所以同步返回。
+#[tauri::command]
+pub fn workflow_tween(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    params: TweenParams,
+) -> Result<WorkflowOutcome, String> {
+    let session = state.session(&id)?;
+    if params.count == 0 {
+        return Err("tween needs at least 1 frame".into());
+    }
+    let active = session.active();
+    let layer = params.layer.clone().unwrap_or_else(|| active.layer.clone());
+    let opts = TweenOptions {
+        mode: params.mode,
+        order: params.order,
+        ease: params.ease,
+        duration_ms: params.duration_ms,
+    };
+    let (report, onion) = session
+        .with_document_mut(|doc| {
+            let report = tween::insert_tween_frames(
+                doc,
+                &layer,
+                &params.from_frame,
+                &params.to_frame,
+                params.count,
+                &opts,
+            )?;
+            let onion =
+                tween::onion_summary(doc, &report.layer, &report.from_frame, &report.to_frame);
+            Ok::<_, String>((report, onion))
+        })
+        .map_err(|e| format!("tween failed: {e}"))?;
+    let revision = emit_document(&app, &session);
+    Ok(WorkflowOutcome {
+        revision,
+        summary: format!(
+            "{} frame(s) inserted between {} and {} on layer {}; {} px changed",
+            report.created.len(),
+            report.from_frame,
+            report.to_frame,
+            report.layer,
+            report.changed_pixels,
+        ),
+        detail: Some(json!({
+            "created": report.created,
+            "changed_pixels": report.changed_pixels,
+            "palette_added": report.palette_added,
+            "layer": report.layer,
+            "onion": onion,
+        })),
+    })
+}
+
+/// 把一张位图量化到指定 cel。用户的图、刚生成的图、抽出来的静帧都走这条。
+#[tauri::command]
+pub fn workflow_pixelize(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    params: PixelizeParams,
+) -> Result<WorkflowOutcome, String> {
+    let session = state.session(&id)?;
+    let active = session.active();
+    let layer = params.layer.clone().unwrap_or_else(|| active.layer.clone());
+    let frame = params.frame.clone().unwrap_or_else(|| active.frame.clone());
+    let opts = params.options.clone().unwrap_or_default();
+
+    let landed = session.with_document_mut(|doc| {
+        let report = pixelize_onto_cel(
+            doc,
+            &layer,
+            &frame,
+            &params.image_base64,
+            params.media_type.as_deref(),
+            &opts,
+        )?;
+        Ok::<_, String>(LandedImage {
+            layer,
+            frame,
+            report,
+        })
+    })?;
+    let revision = emit_document(&app, &session);
+    Ok(WorkflowOutcome {
+        revision,
+        summary: format!(
+            "quantized onto layer {} frame {} ({} colors, {} new)",
+            landed.layer, landed.frame, landed.report.colors_used, landed.report.palette_added
+        ),
+        detail: Some(landed_detail(&landed)),
+    })
+}
+
+// ---------- 内部工具 ----------
+
+/// 文档被工作流改过之后，把新文档推回前端。和主循环的 DocumentUpdated 同一个通道，
+/// 前端因此只有一条刷新路径，不需要区分「这次是谁改的」。
+fn emit_document(app: &AppHandle, session: &AgentSession) -> u64 {
+    let revision = session.revision();
+    let document = session.document_json();
+    let _ = app.emit(
+        "agent-event",
+        AgentEvent::DocumentUpdated { revision, document },
+    );
+    revision
+}
+
+fn emit_status(app: &AppHandle, message: &str) {
+    let _ = app.emit(
+        "agent-event",
+        AgentEvent::Status {
+            message: message.to_string(),
+        },
+    );
+}
+
+fn landed_detail(landed: &LandedImage) -> Value {
+    json!({
+        "layer": landed.layer,
+        "frame": landed.frame,
+        "colors_used": landed.report.colors_used,
+        "palette_added": landed.report.palette_added,
+        "opaque_pixels": landed.report.opaque_pixels,
+        "transparent_pixels": landed.report.transparent_pixels,
+        "fit": landed.report.fit,
+    })
+}
+
+fn origin_label(origin: agent_core::ProbeSource) -> &'static str {
+    match origin {
+        agent_core::ProbeSource::Ffprobe => "ffmpeg",
+        agent_core::ProbeSource::Directory => "stills directory",
+        agent_core::ProbeSource::None => "video",
+    }
+}
+
+/// 把一张位图量化到指定 cel。cel 的校验刻意排在解码之前：
+/// 一个写错的帧 id 不该让用户赔上一次几百 KB 的解码，错误也应该先说帧的事。
+fn pixelize_onto_cel(
+    doc: &mut Document,
+    layer: &str,
+    frame: &str,
+    encoded: &str,
+    media_type: Option<&str>,
+    opts: &PixelizeOptions,
+) -> Result<PixelizeReport, String> {
+    if doc.cel(layer, frame).is_none() {
+        return Err(format!("unknown cel: {layer}/{frame}"));
+    }
+    let (rgba, width, height) = decode_payload(encoded, media_type)?;
+    pixelize::pixelize_into_cel(doc, layer, frame, &rgba, width, height, opts)
+}
+
+/// 位图入参：优先按 data URL 解，退化到裸 base64 + media_type。
+fn decode_payload(encoded: &str, media_type: Option<&str>) -> Result<(Vec<u8>, u32, u32), String> {
+    let trimmed = encoded.trim();
+    if trimmed.is_empty() {
+        return Err("image payload is empty".into());
+    }
+    if trimmed.starts_with("data:") {
+        return decode::decode_data_url(trimmed);
+    }
+    let media_type = media_type
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .ok_or("media_type is required when the image is bare base64")?;
+    let bytes = decode::decode_base64(trimmed)?;
+    decode::decode_image(&bytes, media_type)
+}
+
+/// 读一张参考图成附件。简报与垫图共用，角色恒为 reference：
+/// 快照是上下文，参考图才是真值，混起来模型会照着截图临摹。
+fn read_reference(path: &str) -> Result<Attachment, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+    Ok(Attachment {
+        role: AttachmentRole::Reference,
+        media_type: media_type_for(PathBuf::from(path).as_path()),
+        data_base64: pixel_core::png::base64_encode(&bytes),
+    })
+}
+
+/// 按扩展名猜 media type；认不出来就交给 decode 做内容嗅探。
+fn media_type_for(path: &std::path::Path) -> String {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "tif" | "tiff" => "image/tiff",
+        _ => "image/png",
+    }
+    .to_string()
+}
+
+/// 一次落图的全部输入。合成一个结构而不是散一串参数：
+/// 「落在哪儿」「按什么量化」「图是什么」本来就是同一件事。
+struct LandRequest<'a> {
+    spot: LandSpot,
+    /// NewFrame 时新帧的锚点；None 表示追加到激活帧之后。
+    /// 连续抽帧必须一帧接一帧，不能每次都插回同一个锚点后面。
+    after: Option<String>,
+    duration_ms: u32,
+    rgba: &'a [u8],
+    width: u32,
+    height: u32,
+    opts: &'a PixelizeOptions,
+}
+
+/// 把一张位图落到文档上。
+fn land_bitmap(
+    doc: &mut Document,
+    active: &ActiveContext,
+    req: LandRequest<'_>,
+) -> Result<LandedImage, String> {
+    let (layer, frame) = match req.spot {
+        LandSpot::ActiveCel => (active.layer.clone(), active.frame.clone()),
+        LandSpot::NewFrame => {
+            let anchor = req.after.as_deref().unwrap_or(&active.frame);
+            let position = doc
+                .frames
+                .iter()
+                .position(|f| f.id == anchor)
+                .ok_or_else(|| format!("unknown frame: {anchor}"))?;
+            ops::apply_batch(
+                doc,
+                &[PixelOperation::CreateFrame {
+                    after: Some(anchor.to_string()),
+                    duration_ms: req.duration_ms.clamp(1, 60_000),
+                    id: None,
+                }],
+            )
+            .map_err(|e| e.to_string())?;
+            // CreateFrame 把新帧插在锚点之后，所以位置就在 position + 1。
+            let created = doc
+                .frames
+                .get(position + 1)
+                .ok_or("the new frame did not land after the anchor")?
+                .id
+                .clone();
+            (active.layer.clone(), created)
+        }
+    };
+    let report = pixelize::pixelize_into_cel(
+        doc, &layer, &frame, req.rgba, req.width, req.height, req.opts,
+    )?;
+    Ok(LandedImage {
+        layer,
+        frame,
+        report,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pixel_core::document::Document;
+
+    fn doc() -> Document {
+        Document::new("t", 8, 8).unwrap()
+    }
+
+    fn active() -> ActiveContext {
+        ActiveContext {
+            layer: "L0".into(),
+            frame: "F0".into(),
+            color: None,
+        }
+    }
+
+    /// 一张 2x2 的纯红 PNG，2x2 是 image crate 无条件支持的尺寸。
+    fn red_png_b64() -> String {
+        let mut d = doc();
+        d.palette = vec![pixel_core::Rgba::rgb(255, 0, 0)];
+        if let Some(cel) = d.cel_mut("L0", "F0") {
+            cel.indices.iter_mut().for_each(|i| *i = 1);
+        }
+        let bytes = pixel_core::png::document_to_png(&d).unwrap();
+        pixel_core::png::base64_encode(&bytes)
+    }
+
+    #[test]
+    fn lands_a_bitmap_on_a_new_frame_after_the_anchor() {
+        let mut d = doc();
+        let opts = PixelizeOptions::default();
+        let bytes = decode_base64_bare(&red_png_b64());
+        let (rgba, w, h) = decode::decode_image(&bytes, "image/png").unwrap();
+        let first = land_bitmap(
+            &mut d,
+            &active(),
+            LandRequest {
+                spot: LandSpot::NewFrame,
+                after: None,
+                duration_ms: 100,
+                rgba: &rgba,
+                width: w,
+                height: h,
+                opts: &opts,
+            },
+        )
+        .unwrap();
+        assert_eq!(first.frame, "F1");
+        assert_eq!(d.frames.len(), 2);
+        // 第二次要接着第一次往下排，不能又插回 F0 后面
+        let second = land_bitmap(
+            &mut d,
+            &active(),
+            LandRequest {
+                spot: LandSpot::NewFrame,
+                after: Some(first.frame.clone()),
+                duration_ms: 100,
+                rgba: &rgba,
+                width: w,
+                height: h,
+                opts: &opts,
+            },
+        )
+        .unwrap();
+        assert_eq!(second.frame, "F2");
+        assert_eq!(d.frames[1].id, "F1");
+        assert_eq!(d.frames[2].id, "F2");
+    }
+
+    #[test]
+    fn active_cel_spot_leaves_the_frame_list_alone() {
+        let mut d = doc();
+        let opts = PixelizeOptions::default();
+        let bytes = decode_base64_bare(&red_png_b64());
+        let (rgba, w, h) = decode::decode_image(&bytes, "image/png").unwrap();
+        let landed = land_bitmap(
+            &mut d,
+            &active(),
+            LandRequest {
+                spot: LandSpot::ActiveCel,
+                after: None,
+                duration_ms: 100,
+                rgba: &rgba,
+                width: w,
+                height: h,
+                opts: &opts,
+            },
+        )
+        .unwrap();
+        assert_eq!(landed.frame, "F0");
+        assert_eq!(landed.layer, "L0");
+        assert_eq!(d.frames.len(), 1);
+        assert_eq!(landed.report.colors_used, 1);
+    }
+
+    #[test]
+    fn a_bad_frame_is_reported_before_the_payload_is_even_looked_at() {
+        // 载荷是空的，仍然要先报 cel 的错：校验顺序本身就是这条断言在守的东西。
+        let mut d = doc();
+        let err = pixelize_onto_cel(
+            &mut d,
+            "L0",
+            "F9",
+            "",
+            Some("image/png"),
+            &PixelizeOptions::default(),
+        )
+        .unwrap_err();
+        assert!(err.contains("L0/F9"), "{err}");
+    }
+
+    #[test]
+    fn bare_base64_demands_a_media_type_but_a_data_url_does_not() {
+        let mut d = doc();
+        let bare = decode_payload("AAAA", None).unwrap_err();
+        assert!(bare.contains("media_type"), "{bare}");
+        let url = format!("data:image/png;base64,{}", red_png_b64());
+        let report =
+            pixelize_onto_cel(&mut d, "L0", "F0", &url, None, &PixelizeOptions::default()).unwrap();
+        assert_eq!(report.colors_used, 1);
+        assert_eq!(report.palette_added, 1);
+    }
+
+    #[test]
+    fn media_type_falls_back_to_png_for_unknown_extensions() {
+        assert_eq!(media_type_for(std::path::Path::new("a.webp")), "image/webp");
+        assert_eq!(media_type_for(std::path::Path::new("a.jpeg")), "image/jpeg");
+        assert_eq!(media_type_for(std::path::Path::new("a.xyz")), "image/png");
+        assert_eq!(media_type_for(std::path::Path::new("a")), "image/png");
+    }
+
+    fn decode_base64_bare(text: &str) -> Vec<u8> {
+        decode::decode_base64(text).unwrap()
+    }
+}

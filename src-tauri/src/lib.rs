@@ -3,6 +3,7 @@
 
 mod commands;
 mod state;
+mod workflow;
 
 use tauri::Manager;
 
@@ -38,6 +39,14 @@ pub fn run() {
             commands::session_create,
             commands::session_drop,
             commands::session_list,
+            workflow::prompt_refine,
+            workflow::video_probe,
+            workflow::vision_brief,
+            workflow::workflow_catalog,
+            workflow::workflow_image_gen,
+            workflow::workflow_pixelize,
+            workflow::workflow_tween,
+            workflow::workflow_video_frames,
         ])
         .run(tauri::generate_context!())
         .expect("error while running AIPixel");
