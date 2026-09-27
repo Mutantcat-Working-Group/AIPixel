@@ -10,15 +10,21 @@
 //! 前后端边界：本 crate 只做纯 Rust，不依赖 Tauri。UI 通过一个 `tokio::sync::mpsc` 通道接收
 //! `AgentEvent`，由上层（src-tauri）转成 Tauri 事件广播。
 
+pub mod imagegen;
 pub mod models;
+pub mod one_shot;
 pub mod prompt;
 pub mod providers;
 pub mod runner;
 pub mod tools;
+pub mod vision;
+pub mod workflows;
 
 pub use models::{
-    ActiveContext, AgentEvent, Attachment, AttachmentRole, ChatRequest, ContentBlock, LlmEvent,
-    Message, ModelConfig, PermissionMode, Protocol, Role, RunnerConfig, ToolSpec,
+    ActiveContext, AgentEvent, Attachment, AttachmentRole, Capabilities, ChatRequest, ContentBlock,
+    LlmEvent, Message, ModelConfig, PermissionMode, Protocol, Role, RunnerConfig, ToolSpec,
 };
 pub use providers::{build_provider, EventStream, LlmProvider, ProviderError};
 pub use runner::AgentSession;
+pub use vision::{brief_reference, render_for_prompt, VisionBrief};
+pub use workflows::{available, catalog, info, readiness, Readiness, WorkflowInfo, WorkflowKind};

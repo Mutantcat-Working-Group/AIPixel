@@ -541,7 +541,7 @@ fn anthropic_block(b: &ContentBlock) -> Option<Value> {
     })
 }
 
-fn to_anthropic_messages(messages: &[Message]) -> Vec<Value> {
+pub(crate) fn to_anthropic_messages(messages: &[Message]) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
     let mut i = 0;
     while i < messages.len() {
@@ -577,7 +577,7 @@ fn to_anthropic_messages(messages: &[Message]) -> Vec<Value> {
     out
 }
 
-fn to_openai_messages(messages: &[Message]) -> Vec<Value> {
+pub(crate) fn to_openai_messages(messages: &[Message]) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
     for m in messages {
         match m.role {
