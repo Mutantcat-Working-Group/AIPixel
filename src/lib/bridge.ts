@@ -8,12 +8,16 @@ import type {
   ActiveContext,
   AgentEvent,
   Attachment,
+  ApprovalDecision,
+  EditorOperation,
+  InkColor,
   Message,
   ModelConfig,
   ModelsView,
   PermissionMode,
   PixelDocument,
   SessionInfo,
+  StrokeRequest,
   ImageGenParams,
   PixelizeParams,
   RefinedPrompt,
@@ -170,4 +174,38 @@ export function workflowVideoFrames(
 
 export function listenAgentEvents(handler: (event: AgentEvent) => void): Promise<UnlistenFn> {
   return listen<AgentEvent>(AGENT_EVENT_CHANNEL, (event) => handler(event.payload));
+}
+
+// ---------- 工作台编辑器与审批 ----------
+
+/** 对挂起的工具调用给出决定。call_id 对不上（过期）Rust 会直接报错。 */
+export function resolveApproval(
+  id: string,
+  callId: string,
+  decision: ApprovalDecision,
+): Promise<void> {
+  return invoke("agent_resolve_approval", { id, callId, decision });
+}
+
+/** 结构与帧操作（建帧、复制帧、挪帧……），返回新 revision。 */
+export function applyEditorOps(id: string, ops: EditorOperation[]): Promise<number> {
+  return invoke<number>("editor_apply_ops", { id, ops });
+}
+
+/** 落一笔：抬笔时整笔发送，一笔一色。返回新 revision。 */
+export function paintStroke(id: string, stroke: StrokeRequest): Promise<number> {
+  return invoke<number>("editor_paint_stroke", { id, stroke });
+}
+
+/** 油漆桶：color 为 null 表示把整片区域浸回透明。返回新 revision。 */
+export function fillCells(
+  id: string,
+  layer: string,
+  frame: string,
+  x: number,
+  y: number,
+  color: InkColor,
+): Promise<number> {
+  // 落点与颜色收成一个嵌套对象：Rust 侧对应 FillRequest，字段名逐字 snake_case。
+  return invoke<number>("editor_fill", { id, fill: { layer, frame, x, y, color } });
 }

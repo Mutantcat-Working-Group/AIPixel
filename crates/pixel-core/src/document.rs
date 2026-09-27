@@ -219,11 +219,13 @@ impl Document {
             .and_then(|frames| frames.get_mut(frame))
     }
 
-    pub(crate) fn bump(&mut self) {
+    /// 原地改过文档之后必须调一次，否则前端的 revision 比对会把新内容当过期结果丢掉。
+    pub fn bump(&mut self) {
         self.revision += 1;
     }
 
-    pub(crate) fn check_limits(&self) -> Result<(), DocumentError> {
+    /// 编辑器（src-tauri）直接改文档后也要自查限额，故开放。
+    pub fn check_limits(&self) -> Result<(), DocumentError> {
         if self.layers.len() > MAX_LAYERS
             || self.frames.len() > MAX_FRAMES
             || self.palette.len() > MAX_PALETTE

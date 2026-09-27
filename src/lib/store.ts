@@ -16,6 +16,8 @@ import type {
   ActiveContext,
   Attachment,
   AgentEvent,
+  ApprovalDecision,
+  EditorOperation,
   DockKind,
   DockDraft,
   ImageGenParams,
@@ -23,6 +25,7 @@ import type {
   ModelsView,
   PixelizeParams,
   PendingAttachment,
+  PendingApproval,
   PermissionMode,
   PixelDocument,
   PixelizeOptions,
@@ -37,6 +40,7 @@ import type {
   WorkflowOutcome,
   TranscriptEntry,
   Usage,
+  StrokeCell,
 } from "./types";
 
 export interface DocumentSnapshot {
@@ -85,6 +89,12 @@ interface StoreState extends DocumentSnapshot, WorkflowState {
   permission: PermissionMode;
   active: ActiveContext;
   busy: boolean;
+  /** 主循环正停在一条工具调用上等决定；Ask / Chat 模式下才有。 */
+  pendingApproval: PendingApproval | null;
+  /** 结构操作（建帧、复制帧、挪帧）后想选到哪一帧，等新文档到达时结算。 */
+  pendingFrameIndex: number | null;
+  /** 编辑器自己的改动快照，最新一版在栈顶。模型改动不进栈。 */
+  undoStack: PixelDocument[];
   notice: { text: string; isError: boolean } | null;
   settingsOpen: boolean;
 }
@@ -136,6 +146,20 @@ export interface StoreActions {
   requestCompose: (text: string) => void;
   /** 「用这条提示词生图」：写进生图面板并切过去。 */
   usePromptInGen: (prompt: string) => void;
+  /** 对挂起的工具调用给出决定；Approve all 只降级本 turn。 */
+  resolveApproval: (decision: ApprovalDecision) => Promise<void>;
+  /** 落一笔：抬笔时整笔发送，颜色取当前调色板选择（null = 擦除）。 */
+  paintStroke: (cells: StrokeCell[]) => Promise<void>;
+  /** 油漆桶点一下；颜色取当前调色板选择（null = 浸回透明）。 */
+  fillCell: (x: number, y: number) => Promise<void>;
+  /** 结构与帧操作。frameHint 是新文档到达后要选中的帧序。 */
+  runEditorOps: (ops: EditorOperation[], frameHint?: number) => Promise<number | null>;
+  addFrame: () => Promise<void>;
+  duplicateFrame: () => Promise<void>;
+  deleteFrame: () => Promise<void>;
+  moveFrame: (delta: number) => Promise<void>;
+  /** 回退一步编辑器改动：撤销栈见底就什么都不做。 */
+  undoEdit: () => Promise<void>;
 }
 
 const EMPTY_MODELS: ModelsView = { active_id: "", entries: [] };
@@ -214,9 +238,58 @@ let unlisten: (() => void) | null = null;
 let booting: Promise<void> | null = null;
 let snapshotSeq = 0;
 
+/** 撤销栈上限：再老的笔触就别指望了，省得内存和「撤销到天边」一起失控。 */
+const UNDO_LIMIT = 40;
+/**
+ * 下一次 document_updated 若是编辑器自己触发的，就把改前的文档压进撤销栈。
+ * 为什么不让模型改动也进栈：一轮 agent 跑下来事件几十条，会把这些笔触挤没。
+ */
+let undoCapture = false;
+
+function pushUndo(stack: PixelDocument[], doc: PixelDocument): PixelDocument[] {
+  const next = [...stack, doc];
+  return next.length > UNDO_LIMIT ? next.slice(next.length - UNDO_LIMIT) : next;
+}
+
 export const useStore = create<StoreState & StoreActions>()((setState, getState) => {
   function fail(message: string) {
     setState({ notice: { text: message, isError: true }, running: false });
+  }
+
+  /** document_updated 的统一落点：文档、撤销栈、帧选择意图一起结算。 */
+  function applyDocument(
+    document: PixelDocument,
+    revision: number,
+    frameHint: number | null,
+  ) {
+    const state = getState();
+    const stale = revision < state.pngRevision;
+    const next: Partial<StoreState> = {
+      document,
+      revision,
+      // 撤销栈只吃编辑器自己那次改动前的快照，见 undoCapture 的说明。
+      undoStack:
+        undoCapture && state.document
+          ? pushUndo(state.undoStack, state.document)
+          : state.undoStack,
+      pendingFrameIndex: null,
+      pngRevision: stale ? state.pngRevision : revision,
+    };
+    if (frameHint !== null) {
+      // 结构操作后帧表已变：按预期位置选帧，越界夹到末帧。
+      const index = Math.max(0, Math.min(frameHint, document.frames.length - 1));
+      const frame = document.frames[index];
+      next.frameIndex = index;
+      if (frame) next.active = { ...state.active, frame: frame.id };
+    }
+    undoCapture = false;
+    setState(next);
+    if (frameHint !== null) {
+      const id = getState().activeId;
+      const active = getState().active;
+      if (id) void bridge.setActive(id, active);
+    }
+    void getState().refreshPng();
   }
 
   /** agent-event 路由：文档事件驱动画布，其余折叠进对话条目。 */
@@ -224,26 +297,28 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     if (unlisten) return;
     unlisten = await bridge.listenAgentEvents((event: AgentEvent) => {
       const state = getState();
-      if (event.kind === "document_updated") {
-        const stale = event.revision < state.pngRevision;
+      if (event.kind === "approval_request") {
         setState({
-          document: event.document,
-          revision: event.revision,
-          pngRevision: stale ? state.pngRevision : event.revision,
+          pendingApproval: { callId: event.call_id, name: event.name, input: event.input },
         });
-        void getState().refreshPng();
         return;
       }
-      if (event.kind === "usage") {
-        setState({ usage: { input: event.input_tokens, output: event.output_tokens } });
+      if (event.kind === "document_updated") {
+        applyDocument(event.document, event.revision, state.pendingFrameIndex);
         return;
       }
       if (event.kind === "completed" || event.kind === "error" || event.kind === "interrupted") {
         setState({
           entries: sealTranscript(reduceEvent(state.entries, event)),
           running: false,
+          // 一轮收尾，挂着没批的调用跟着作废——别让下一轮还看见这张票。
+          pendingApproval: null,
         });
         void getState().refreshSessions();
+        return;
+      }
+      if (event.kind === "usage") {
+        setState({ usage: { input: event.input_tokens, output: event.output_tokens } });
         return;
       }
       setState({ entries: reduceEvent(state.entries, event) });
@@ -260,6 +335,10 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       outcomeError: null,
       catalogReady: false,
       refinedDraft: "",
+      // 撤销栈是当前会话的笔迹，换会话不跟着走；挂着的审批同理。
+      undoStack: [],
+      pendingApproval: null,
+      pendingFrameIndex: null,
     });
     try {
       const messages = await bridge.agentHistory(id);
@@ -304,6 +383,9 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     permission: "auto",
     active: { layer: "L0", frame: "F0", color: null },
     busy: false,
+    pendingApproval: null,
+    pendingFrameIndex: null,
+    undoStack: [],
     notice: null,
     settingsOpen: false,
     workflows: [],
@@ -574,9 +656,11 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       if (!id) return;
       setState({ busy: true });
       try {
-        const document = await bridge.aipLoad(path);
-        await bridge.syncDocument(id, document);
-        setState({ notice: { text: `已载入 ${baseName(path)}`, isError: false } });
+      const document = await bridge.aipLoad(path);
+      await bridge.syncDocument(id, document);
+      // 新文档和旧笔迹无关，撤销栈清空；否则一撤销就退回上一个文件。
+      setState({ undoStack: [], pendingFrameIndex: null });
+      setState({ notice: { text: `已载入 ${baseName(path)}`, isError: false } });
         await getState().refreshDocument();
       } catch (error) {
         fail(`打开 .aip 失败：${String(error)}`);
@@ -781,6 +865,131 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         outcomeError: null,
         dockDraft: { ...getState().dockDraft, prompt },
       }),
+
+    resolveApproval: async (decision) => {
+      const id = getState().activeId;
+      const pending = getState().pendingApproval;
+      if (!id || !pending) return;
+      // 乐观清票：Button 点了就别让人再点，决定已经在路上了。
+      setState({ pendingApproval: null });
+      try {
+        await bridge.resolveApproval(id, pending.callId, decision);
+      } catch (error) {
+        // 多半是这一轮已经翻页（新一轮开始 / 被中断），票自然作废，不是死锁。
+        fail(`审批失败：${String(error)}`);
+      }
+    },
+
+    paintStroke: async (cells) => {
+      const id = getState().activeId;
+      const document = getState().document;
+      const active = getState().active;
+      if (!id || !document || cells.length === 0) return;
+      undoCapture = true;
+      try {
+        await bridge.paintStroke(id, {
+          layer: active.layer,
+          frame: active.frame,
+          cells,
+          color: active.color ?? null,
+        });
+      } catch (error) {
+        fail(`落笔失败：${String(error)}`);
+      }
+    },
+
+    fillCell: async (x, y) => {
+      const id = getState().activeId;
+      const active = getState().active;
+      if (!id) return;
+      undoCapture = true;
+      try {
+        await bridge.fillCells(id, active.layer, active.frame, x, y, active.color ?? null);
+      } catch (error) {
+        fail(`填充失败：${String(error)}`);
+      }
+    },
+
+    runEditorOps: async (ops, frameHint) => {
+      const id = getState().activeId;
+      if (!id) return null;
+      undoCapture = true;
+      // 先把帧选择意图挂上：新文档还在路上，到了就按这个落点选帧。
+      if (frameHint !== undefined) setState({ pendingFrameIndex: frameHint });
+      try {
+        return await bridge.applyEditorOps(id, ops);
+      } catch (error) {
+        setState({ pendingFrameIndex: null });
+        fail(`编辑失败：${String(error)}`);
+        return null;
+      }
+    },
+
+    addFrame: async () => {
+      const document = getState().document;
+      if (!document) return;
+      const current = document.frames[getState().frameIndex];
+      // 时长继承当前帧：逐帧动画里新帧几乎总是延续同一节拍。
+      await getState().runEditorOps(
+        [
+          {
+            op: "create_frame",
+            after: current?.id ?? null,
+            duration_ms: current?.duration_ms ?? 100,
+          },
+        ],
+        getState().frameIndex + 1,
+      );
+    },
+
+    duplicateFrame: async () => {
+      const document = getState().document;
+      const current = document?.frames[getState().frameIndex];
+      if (!current) return;
+      // 复制帧插在源帧后面，所以新选中的是下一格。
+      await getState().runEditorOps([{ op: "duplicate_frame", id: current.id }], getState().frameIndex + 1);
+    },
+
+    deleteFrame: async () => {
+      const document = getState().document;
+      const current = document?.frames[getState().frameIndex];
+      if (!document || !current || document.frames.length <= 1) return;
+      // 删掉第 i 帧后原第 i+1 帧顶上来，所以还选 i；本来就在末帧则夹到新末帧。
+      await getState().runEditorOps([{ op: "delete_frame", id: current.id }], getState().frameIndex);
+    },
+
+    moveFrame: async (delta) => {
+      const document = getState().document;
+      const current = document?.frames[getState().frameIndex];
+      if (!document || !current) return;
+      const target = getState().frameIndex + delta;
+      if (target < 0 || target >= document.frames.length) return;
+      await getState().runEditorOps([{ op: "move_frame", id: current.id, to_index: target }], target);
+    },
+
+    undoEdit: async () => {
+      const id = getState().activeId;
+      const stack = getState().undoStack;
+      const previous = stack[stack.length - 1];
+      if (!id || !previous) return;
+      setState({ undoStack: stack.slice(0, -1), pendingFrameIndex: null });
+      try {
+        await bridge.syncDocument(id, previous);
+        // sync_document 不发 document_updated：状态和预览都得自己结算。
+        const frameIndex = Math.max(0, Math.min(getState().frameIndex, previous.frames.length - 1));
+        const frame = previous.frames[frameIndex];
+        setState({
+          document: previous,
+          revision: previous.revision,
+          pngRevision: previous.revision,
+          frameIndex,
+          active: frame ? { ...getState().active, frame: frame.id } : getState().active,
+        });
+        await getState().refreshPng();
+      } catch (error) {
+        fail(`撤销失败：${String(error)}`);
+      }
+    },
 
     refreshSessions: async () => {
       try {

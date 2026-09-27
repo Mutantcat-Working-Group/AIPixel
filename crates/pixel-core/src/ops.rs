@@ -20,6 +20,11 @@ pub enum PixelOperation {
     DeleteFrame {
         id: String,
     },
+    /// 整帧复制（所有图层的 cel 一起），插在源帧后面。
+    /// 「照着这一帧改」是编辑器与模型都高频的动作，值得一个原子操作。
+    DuplicateFrame {
+        id: String,
+    },
     MoveFrame {
         id: String,
         to_index: usize,
@@ -207,6 +212,39 @@ pub fn apply_one(doc: &mut Document, op: &PixelOperation) -> Result<(), Operatio
             doc.frames.remove(pos);
             for frames in doc.cels.values_mut() {
                 frames.remove(id);
+            }
+        }
+        PixelOperation::DuplicateFrame { id } => {
+            let src =
+                doc.frames.iter().position(|f| &f.id == id).ok_or_else(|| {
+                    OperationError::Document(DocumentError::UnknownFrame(id.clone()))
+                })?;
+            let existing: Vec<String> = doc.frames.iter().map(|f| f.id.clone()).collect();
+            let new_id = next_id("F", &existing);
+            let duration_ms = doc.frames[src].duration_ms;
+            // 先把各图层的 cel 副本取出来再动 frames，避免同时借 doc.cels 和 doc.frames。
+            let mut copies: Vec<(String, Cel)> = Vec::with_capacity(doc.layers.len());
+            for layer in &doc.layers {
+                let cel = doc
+                    .cels
+                    .get(&layer.id)
+                    .and_then(|frames| frames.get(id))
+                    .cloned()
+                    .unwrap_or_else(|| Cel::new(doc.width, doc.height));
+                copies.push((layer.id.clone(), cel));
+            }
+            doc.frames.insert(
+                (src + 1).min(doc.frames.len()),
+                Frame {
+                    id: new_id.clone(),
+                    duration_ms,
+                },
+            );
+            for (layer_id, cel) in copies {
+                doc.cels
+                    .entry(layer_id)
+                    .or_default()
+                    .insert(new_id.clone(), cel);
             }
         }
         PixelOperation::MoveFrame { id, to_index } => {

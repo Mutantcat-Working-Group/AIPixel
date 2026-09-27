@@ -41,7 +41,7 @@ pub fn specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "pixel_apply_operations",
-            description: "Apply ONE transaction of typed pixel/layer/frame/palette operations. Structure ops (create/move/delete/rename layers and frames, set duration, add palette colors) and tiny precise pixel patches (set_pixels, stamp_grid, draw_shape, bucket_fill, clear_region). Fails atomically if any operation is invalid; the error names the failing operation index.",
+            description: "Apply ONE transaction of typed pixel/layer/frame/palette operations. Structure ops (create/move/delete/duplicate/rename layers and frames, set duration, add palette colors) and tiny precise pixel patches (set_pixels, stamp_grid, draw_shape, bucket_fill, clear_region). Fails atomically if any operation is invalid; the error names the failing operation index.",
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -52,7 +52,7 @@ pub fn specs() -> Vec<ToolSpec> {
                             "properties": {
                                 "op": {
                                     "type": "string",
-                                    "enum": ["create_frame","delete_frame","move_frame","set_frame_duration","create_layer","delete_layer","move_layer","rename_layer","set_layer_properties","add_palette_colors","set_pixels","bucket_fill","draw_shape","clear_region","stamp_grid"]
+                                    "enum": ["create_frame","delete_frame","duplicate_frame","move_frame","set_frame_duration","create_layer","delete_layer","move_layer","rename_layer","set_layer_properties","add_palette_colors","set_pixels","bucket_fill","draw_shape","clear_region","stamp_grid"]
                                 },
                                 "id": {"type": "string"},
                                 "after": {"type": "string"},
@@ -666,6 +666,30 @@ mod tests {
         );
         assert!(out.is_error);
         assert!(out.content.contains("unknown cel"), "{}", out.content);
+    }
+
+    #[test]
+    fn duplicate_frame_copies_every_layer_cel_and_lands_after_the_source() {
+        let mut doc = two_pose_doc();
+        let out = execute(
+            &mut doc,
+            &active(),
+            "pixel_apply_operations",
+            &json!({"operations": [{"op": "duplicate_frame", "id": "F0"}]}),
+        );
+        assert!(!out.is_error, "{}", out.content);
+        // 新帧紧跟源帧，原有顺序不受影响。
+        assert_eq!(doc.frames.len(), 3);
+        assert_eq!(doc.frames[1].id, "F2");
+        assert_eq!(doc.frames[2].id, "F1");
+        assert_eq!(
+            doc.frames[1].duration_ms, doc.frames[0].duration_ms,
+            "时长跟着源帧"
+        );
+        let source = &doc.cels["L0"]["F0"];
+        let copy = &doc.cels["L0"]["F2"];
+        assert_eq!(copy.indices, source.indices, "复制必须连内容一起");
+        assert_eq!(copy.indices[0], 1, "F0 左上角是调色板索引 1");
     }
 
     #[test]

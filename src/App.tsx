@@ -19,9 +19,9 @@ const RAIL_OPTIONS = [
 ];
 
 const PERMISSION_OPTIONS = [
-  { label: "Auto", value: "auto", title: "工具直接执行" },
-  { label: "Chat", value: "chat", title: "Chat 模式（预留审批）" },
-  { label: "Ask", value: "ask", title: "Ask 模式（预留审批）" },
+  { label: "Auto", value: "auto", title: "Run tools straight away, never ask" },
+  { label: "Chat", value: "chat", title: "Reads run free, writes ask one by one" },
+  { label: "Ask", value: "ask", title: "Ask before every tool call" },
 ];
 
 const AIP_FILTER = [{ name: "AIP", extensions: ["aip"] }];
@@ -108,7 +108,7 @@ export default function App() {
             />
           </Tooltip>
 
-          <Tooltip title="权限模式：Auto 直接执行；Chat / Ask 为工作台阶段预留的审批档">
+          <Tooltip title="Permission mode: how much the agent may do on its own">
             <Segmented
               size="small"
               value={store.permission}

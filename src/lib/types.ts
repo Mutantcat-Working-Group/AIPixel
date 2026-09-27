@@ -123,6 +123,12 @@ export type AgentEvent =
   | { kind: "token"; text: string }
   | { kind: "reasoning"; text: string }
   | { kind: "tool_call"; id: string; name: string; input: Record<string, unknown> }
+  | {
+      kind: "approval_request";
+      call_id: string;
+      name: string;
+      input: Record<string, unknown>;
+    }
   | { kind: "tool_result"; id: string; name: string; summary: string; is_error: boolean }
   | { kind: "document_updated"; revision: number; document: PixelDocument }
   | { kind: "usage"; input_tokens: number | null; output_tokens: number | null }
@@ -163,6 +169,54 @@ export type TranscriptEntry =
   | { key: string; kind: "notice"; text: string; isError: boolean };
 
 export type ToolName = "pixel_apply_operations" | "pixel_read_canvas" | "pixel_run_shader";
+
+// ---------- 工作台 ----------
+
+/** 审批的三种决定，对应 Rust ApprovalDecision 的 snake_case 拼写。 */
+export type ApprovalDecision = "approve" | "reject" | "approve_all";
+
+/** 主循环停在工具调用上等决定时，前端持的这张票（字段转成前端习惯的 camelCase）。 */
+export interface PendingApproval {
+  callId: string;
+  name: string;
+  input: Record<string, unknown>;
+}
+
+/**
+ * 编辑器直接下的结构与帧操作：op tag 与字段名逐字锚定 Rust PixelOperation
+ * （serde 内部 tag = "op"），改 Rust 要同步这里。
+ */
+export type EditorOperation =
+  | { op: "create_frame"; after?: string | null; duration_ms?: number; id?: string | null }
+  | { op: "delete_frame"; id: string }
+  | { op: "duplicate_frame"; id: string }
+  | { op: "move_frame"; id: string; to_index: number }
+  | { op: "set_frame_duration"; id: string; duration_ms: number }
+  | { op: "create_layer"; after?: string | null; name?: string | null; id?: string | null }
+  | { op: "delete_layer"; id: string }
+  | { op: "move_layer"; id: string; to_index: number }
+  | { op: "rename_layer"; id: string; name: string }
+  | { op: "set_layer_properties"; id: string; visible?: boolean | null; opacity?: number | null }
+  | { op: "add_palette_colors"; colors: string[] };
+
+/** 落笔颜色：hex 字面量；null = 擦回透明（索引 0）。 */
+export type InkColor = string | null;
+
+/** 编辑器工具。橡皮不是独立工具：调色板里选透明格即是擦。 */
+export type EditorTool = "brush" | "fill";
+
+export interface StrokeCell {
+  x: number;
+  y: number;
+}
+
+/** 一笔笔画：跨 move 事件采样，抬笔时才整笔发给 Rust。 */
+export interface StrokeRequest {
+  layer: string;
+  frame: string;
+  cells: StrokeCell[];
+  color: InkColor;
+}
 
 // ---------- 工作流 ----------
 
