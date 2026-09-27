@@ -1,11 +1,75 @@
+# 本仓库是混合工程：根目录的 Python 工具链 + Tauri 桌面端（Rust workspace + React 前端）。
+# 仓库自带的样例数据（input/ output/ refer_aip/ refer_img/ reverse/）是 README 引用的，
+# 属于交付内容，不在此文件忽略范围内；新增产物目录时请显式加白，而不是靠这里兜底。
+
+# ---------- Python（根目录遗留工具链） ----------
 __pycache__/
 *.py[cod]
+*.egg
 *.egg-info/
-build/
-dist/
-node_modules/
-target/
-*.tsbuildinfo
+
+# setuptools 输出；锚定根目录，避免误伤嵌套的 build 目录
+/build/
+
 .venv/
+venv/
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+
+# ---------- Node / 前端 ----------
+node_modules/
+
+# vite 构建产物，同时是 Tauri 的 frontendDist 指向的位置
+/dist/
+
+*.tsbuildinfo
+.vite/
+*.local
+.env
+.env.local
+.env.*.local
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+.eslintcache
+/coverage/
+
+# ---------- Rust / Tauri ----------
+
+# cargo 工作空间产物；src-tauri 若脱离 workspace 单独构建，也会落在 src-tauri/target
+target/
+
+*.rs.bk
+*.pdb
+
+# Tauri 各平台打包产物
+*.app
+*.dmg
+*.msi
+*.exe
+*.deb
+*.rpm
+*.AppImage
+
+# ---------- 系统与编辑器 ----------
 .DS_Store
+._*
+.Spotlight-V100
+.Trashes
+.fseventsd
+.TemporaryItems
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ---------- 本地工具输出 ----------
 .playwright-cli/
