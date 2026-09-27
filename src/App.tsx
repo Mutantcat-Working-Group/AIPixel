@@ -11,26 +11,30 @@ import SessionSidebar from "./ui/SessionSidebar";
 import StarterGate from "./ui/StarterGate";
 import WorkflowDock from "./ui/WorkflowDock";
 import { useStore } from "./lib/store";
+import { useT } from "./lib/t";
 import type { PermissionMode } from "./lib/types";
-
-/** 右栏两个视图：画布看结果，工作流跑流程。 */
-const RAIL_OPTIONS = [
-  { label: "Canvas", value: "canvas" },
-  { label: "Workflows", value: "workflows" },
-];
-
-const PERMISSION_OPTIONS = [
-  { label: "Auto", value: "auto", title: "Run tools straight away, never ask" },
-  { label: "Chat", value: "chat", title: "Reads run free, writes ask one by one" },
-  { label: "Ask", value: "ask", title: "Ask before every tool call" },
-];
-
-const AIP_FILTER = [{ name: "AIP", extensions: ["aip"] }];
-const IMAGE_FILTER = [{ name: "图片", extensions: ["png", "jpg", "jpeg", "webp", "gif"] }];
 
 export default function App() {
   const store = useStore();
   const [rail, setRail] = useState("canvas");
+
+  const t = useT();
+
+  /** 右栏两个视图：画布看结果，工作流跑流程。 */
+  const railOptions = [
+    { label: t("rail.canvas"), value: "canvas" },
+    { label: t("rail.workflows"), value: "workflows" },
+  ];
+
+  /** 审批档位。文案要让用户一眼看出「问不问」的差别，所以每档都带 tooltip。 */
+  const permissionOptions = [
+    { label: t("perm.auto"), value: "auto", title: t("perm.auto.title") },
+    { label: t("perm.chat"), value: "chat", title: t("perm.chat.title") },
+    { label: t("perm.ask"), value: "ask", title: t("perm.ask.title") },
+  ];
+
+  const aipFilter = [{ name: t("dialog.aip"), extensions: ["aip"] }];
+  const imageFilter = [{ name: t("dialog.image"), extensions: ["png", "jpg", "jpeg", "webp", "gif"] }];
 
   useEffect(() => {
     void store.boot();
@@ -54,20 +58,20 @@ export default function App() {
   const documentName = store.document?.name ?? "untitled";
 
   async function pickAndOpenAip() {
-    const picked = await open({ multiple: false, filters: AIP_FILTER });
+    const picked = await open({ multiple: false, filters: aipFilter });
     if (typeof picked === "string") await store.openAip(picked);
   }
 
   async function pickAndSaveAip() {
     const target = await save({
       defaultPath: `${documentName}.aip`,
-      filters: AIP_FILTER,
+      filters: aipFilter,
     });
     if (typeof target === "string") await store.saveAip(target);
   }
 
   async function pickReferenceImages() {
-    const picked = await open({ multiple: true, filters: IMAGE_FILTER });
+    const picked = await open({ multiple: true, filters: imageFilter });
     if (!picked) return;
     const paths = Array.isArray(picked) ? picked : [picked];
     await store.attachReferenceImages(paths);
@@ -89,13 +93,13 @@ export default function App() {
             <span />
           </span>
           AIPixel
-          <span className="brand-tag">AGENT</span>
+          <span className="brand-tag">{t("app.brand_tag")}</span>
         </div>
 
         <div className="topbar-spacer" />
 
         <div className="topbar-group">
-          <Tooltip title="当前会话使用的模型（自带 Provider，无登录无计费）">
+          <Tooltip title={t("topbar.model")}>
             <Select
               size="small"
               style={{ width: 210 }}
@@ -105,15 +109,15 @@ export default function App() {
                 value: m.id,
               }))}
               onChange={(value: string) => void store.bindSessionModel(value)}
-              placeholder="选择模型"
+              placeholder={t("topbar.select_model")}
             />
           </Tooltip>
 
-          <Tooltip title="Permission mode: how much the agent may do on its own">
+          <Tooltip title={t("perm.tooltip")}>
             <Segmented
               size="small"
               value={store.permission}
-              options={PERMISSION_OPTIONS.map((o) => ({
+              options={permissionOptions.map((o) => ({
                 label: o.label,
                 value: o.value,
                 title: o.title,
@@ -126,13 +130,13 @@ export default function App() {
         </div>
 
         <div className="topbar-group">
-          <Tooltip title="打开 .aip 文件（v2 或旧版）">
+          <Tooltip title={t("topbar.open_aip")}>
             <Button size="small" type="text" icon={<FolderOpen size={14} />} onClick={pickAndOpenAip} />
           </Tooltip>
-          <Tooltip title="把当前文档另存为 .aip v2 文本">
+          <Tooltip title={t("topbar.save_aip")}>
             <Button size="small" type="text" icon={<Save size={14} />} onClick={pickAndSaveAip} />
           </Tooltip>
-          <Tooltip title="载入参考图，随下一条消息一起发给模型">
+          <Tooltip title={t("topbar.attach_reference")}>
             <Button
               size="small"
               type="text"
@@ -140,7 +144,7 @@ export default function App() {
               onClick={pickReferenceImages}
             />
           </Tooltip>
-          <Tooltip title="模型与 Provider 设置">
+          <Tooltip title={t("topbar.settings")}>
             <Button
               size="small"
               type="text"
@@ -148,7 +152,7 @@ export default function App() {
               onClick={store.openSettings}
             />
           </Tooltip>
-          <Tooltip title="MCP tool servers">
+          <Tooltip title={t("topbar.mcp")}>
             <Button
               size="small"
               type="text"
@@ -174,7 +178,7 @@ export default function App() {
             <Segmented
               size="small"
               value={rail}
-              options={RAIL_OPTIONS}
+              options={railOptions}
               onChange={(next) => setRail(next as string)}
             />
           </div>

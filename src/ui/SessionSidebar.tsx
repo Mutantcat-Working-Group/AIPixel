@@ -3,10 +3,12 @@ import { Button, InputNumber, Modal, Tooltip } from "antd";
 import { Github, Plus, Trash2 } from "lucide-react";
 
 import { useStore } from "../lib/store";
+import { useT } from "../lib/t";
 
 const REPO_URL = "https://github.com/Mutantcat-Working-Group/AIPixel";
 
 export default function SessionSidebar() {
+  const t = useT();
   const sessions = useStore((s) => s.sessions);
   const activeId = useStore((s) => s.activeId);
   const createSession = useStore((s) => s.createSession);
@@ -23,12 +25,12 @@ export default function SessionSidebar() {
   return (
     <aside className="panel sidebar">
       <div className="panel-head">
-        <strong>Sessions</strong>
+        <strong>{t("sidebar.sessions")}</strong>
         <span className="grow" />
-        <Tooltip title="新建空白会话">
+        <Tooltip title={t("sidebar.new")}>
           <Button size="small" type="text" icon={<Plus size={14} />} onClick={createDefault} />
         </Tooltip>
-        <Tooltip title="指定画布尺寸新建">
+        <Tooltip title={t("sidebar.new_sized")}>
           <Button size="small" type="text" onClick={() => setSizedOpen(true)}>
             WxH
           </Button>
@@ -45,7 +47,7 @@ export default function SessionSidebar() {
             >
               <span className="session-id">{session.id}</span>
               <span className="session-actions">
-                <Tooltip title="删除会话">
+                <Tooltip title={t("sidebar.delete")}>
                   <Button
                     size="small"
                     type="text"
@@ -58,12 +60,12 @@ export default function SessionSidebar() {
                   />
                 </Tooltip>
               </span>
-              <span className="session-model">{session.model_label || "unbound"}</span>
+              <span className="session-model">{session.model_label || t("sidebar.unbound")}</span>
               <span className="session-meta">
                 <span>
                   {session.width}x{session.height}
                 </span>
-                <span>rev {session.revision}</span>
+                <span>{t("sidebar.rev", { rev: session.revision })}</span>
               </span>
             </div>
           ))}
@@ -73,15 +75,15 @@ export default function SessionSidebar() {
       <div className="sidebar-foot">
         <a className="repo-link" href={REPO_URL} target="_blank" rel="noreferrer">
           <Github size={12} />
-          AIPixel on GitHub
+          {t("sidebar.repo")}
         </a>
       </div>
 
       <Modal
-        title="New canvas"
+        title={t("sidebar.modal_title")}
         open={sizedOpen}
-        okText="Create"
-        cancelText="Cancel"
+        okText={t("sidebar.modal_ok")}
+        cancelText={t("sidebar.modal_cancel")}
         onOk={async () => {
           setSizedOpen(false);
           await createSession(width, height);
@@ -91,11 +93,11 @@ export default function SessionSidebar() {
       >
         <div className="gate-points">
           <label className="gate-point">
-            <span className="k">W</span>
+            <span className="k">{t("sidebar.width")}</span>
             <InputNumber min={8} max={512} value={width} onChange={(v) => setWidth(v ?? 64)} />
           </label>
           <label className="gate-point">
-            <span className="k">H</span>
+            <span className="k">{t("sidebar.height")}</span>
             <InputNumber min={8} max={512} value={height} onChange={(v) => setHeight(v ?? 64)} />
           </label>
         </div>

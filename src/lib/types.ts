@@ -162,7 +162,7 @@ export interface Attachment {
 
 /** AgentEvent 的 kind tag，snake_case。 */
 export type AgentEvent =
-  | { kind: "status"; message: string }
+  | { kind: "status"; message: UiText }
   | { kind: "token"; text: string }
   | { kind: "reasoning"; text: string }
   | { kind: "tool_call"; id: string; name: string; input: Record<string, unknown> }
@@ -298,6 +298,17 @@ export type Readiness =
   | { state: "ready" }
   | { state: "blocked"; missing: string[] };
 
+/**
+ * Rust 侧传来的一句话：键 + 插值变量 + 一句英文后备。
+ * 界面语言只存在于前端字典里，所以 Rust 永远不给拼好的句子；
+ * 键不在字典里（版本错位）时用 fallback 原样展示。
+ */
+export interface UiText {
+  key: string;
+  vars?: Record<string, string | number>;
+  fallback: string;
+}
+
 /** 位图落点：盖在当前 cel 上，还是新建一帧。 */
 export type LandSpot = "active_cel" | "new_frame";
 
@@ -401,7 +412,7 @@ export interface VideoFramesParams {
 
 export interface WorkflowOutcome {
   revision: number;
-  summary: string;
+  summary: UiText;
   detail?: Record<string, unknown> | null;
 }
 

@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 
 import { useStore } from "../lib/store";
+import { useT } from "../lib/t";
 import { appendStroke, lineCells } from "../lib/stroke";
 import type {
   EditorTool,
@@ -50,6 +51,7 @@ function cellFromEvent(
 }
 
 export default function DocumentPanel() {
+  const t = useT();
   const document = useStore((s) => s.document);
   const pngUrl = useStore((s) => s.pngUrl);
   const active = useStore((s) => s.active);
@@ -167,7 +169,7 @@ export default function DocumentPanel() {
                 value: "brush",
                 label: (
                   <span className="tool-label">
-                    <Brush size={13} /> Brush
+                    <Brush size={13} /> {t("doc.brush")}
                   </span>
                 ),
               },
@@ -175,14 +177,18 @@ export default function DocumentPanel() {
                 value: "fill",
                 label: (
                   <span className="tool-label">
-                    <PaintBucket size={13} /> Fill
+                    <PaintBucket size={13} /> {t("doc.fill")}
                   </span>
                 ),
               },
             ]}
           />
           <span className="grow" />
-          <Tooltip title={undoDepth > 0 ? `Undo the last edit (${undoDepth} left)` : "Nothing to undo"}>
+          <Tooltip
+            title={
+              undoDepth > 0 ? t("doc.undo", { count: undoDepth }) : t("doc.undo_none")
+            }
+          >
             <Button
               size="small"
               type="text"
@@ -200,7 +206,7 @@ export default function DocumentPanel() {
             >
               <img
                 src={pngUrl}
-                alt="canvas preview"
+                alt={t("doc.canvas_alt")}
                 width={document.width * scale}
                 height={document.height * scale}
               />
@@ -221,11 +227,11 @@ export default function DocumentPanel() {
           ) : null}
         </div>
         <div className="doc-meta">
-          <span>{document?.name ?? "empty"}</span>
+          <span>{document?.name ?? t("doc.empty")}</span>
           <span>
             {document ? `${document.width}x${document.height}` : "--"}
           </span>
-          <span>rev {revision}</span>
+          <span>{t("doc.rev", { rev: revision })}</span>
         </div>
       </div>
 
@@ -233,7 +239,7 @@ export default function DocumentPanel() {
         <div className="doc-section">
           <div className="doc-section-title">
             <Layers size={12} />
-            Layers
+            {t("doc.layers")}
           </div>
           {document?.layers.map((layer) => (
             <button
@@ -251,9 +257,9 @@ export default function DocumentPanel() {
 
         <div className="doc-section">
           <div className="doc-section-title">
-            Frames
+            {t("doc.frames")}
             <span className="grow" />
-            <Tooltip title="New frame after this one">
+            <Tooltip title={t("doc.new_frame")}>
               <Button
                 size="small"
                 type="text"
@@ -261,7 +267,7 @@ export default function DocumentPanel() {
                 onClick={() => void useStore.getState().addFrame()}
               />
             </Tooltip>
-            <Tooltip title="Duplicate this frame">
+            <Tooltip title={t("doc.duplicate_frame")}>
               <Button
                 size="small"
                 type="text"
@@ -269,7 +275,7 @@ export default function DocumentPanel() {
                 onClick={() => void useStore.getState().duplicateFrame()}
               />
             </Tooltip>
-            <Tooltip title="Delete this frame">
+            <Tooltip title={t("doc.delete_frame")}>
               <Button
                 size="small"
                 type="text"
@@ -278,7 +284,7 @@ export default function DocumentPanel() {
                 onClick={() => void useStore.getState().deleteFrame()}
               />
             </Tooltip>
-            <Tooltip title="Move this frame earlier">
+            <Tooltip title={t("doc.move_earlier")}>
               <Button
                 size="small"
                 type="text"
@@ -287,7 +293,7 @@ export default function DocumentPanel() {
                 onClick={() => void useStore.getState().moveFrame(-1)}
               />
             </Tooltip>
-            <Tooltip title="Move this frame later">
+            <Tooltip title={t("doc.move_later")}>
               <Button
                 size="small"
                 type="text"
@@ -312,9 +318,9 @@ export default function DocumentPanel() {
         </div>
 
         <div className="doc-section">
-          <div className="doc-section-title">Palette</div>
+          <div className="doc-section-title">{t("doc.palette")}</div>
           <div className="palette-grid">
-            <Tooltip title="Transparent (index 0). With the brush it erases.">
+            <Tooltip title={t("doc.transparent")}>
               <button
                 type="button"
                 className={`swatch eraser ${active.color === null ? "active" : ""}`}
@@ -326,7 +332,10 @@ export default function DocumentPanel() {
                 .map((channel) => channel.toString(16).padStart(2, "0"))
                 .join("")}`;
               return (
-                <Tooltip key={`${hex}-${index}`} title={`${hex} · index ${index + 1}`}>
+                <Tooltip
+                  key={`${hex}-${index}`}
+                  title={t("doc.swatch", { hex, index: index + 1 })}
+                >
                   <button
                     type="button"
                     className={`swatch ${active.color === hex ? "active" : ""}`}
@@ -340,9 +349,9 @@ export default function DocumentPanel() {
         </div>
 
         <div className="doc-section">
-          <Tooltip title="Inspect the .aip v2 text for this document">
+          <Tooltip title={t("doc.aip_tooltip")}>
             <Button size="small" type="text" icon={<FileCode2 size={13} />} onClick={toggleAipText}>
-              {aipOpen ? "Hide .aip" : "Show .aip"}
+              {aipOpen ? t("doc.hide_aip") : t("doc.show_aip")}
             </Button>
           </Tooltip>
           {aipOpen && aipText !== null ? <pre className="aip-text">{aipText}</pre> : null}

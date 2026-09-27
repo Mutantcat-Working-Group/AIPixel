@@ -1,5 +1,5 @@
 <div align="center">
-<img src="https://raw.githubusercontent.com/Mutantcat-Working-Group/AIPixel/main/output/storm_sword.png" style="width:100px;" width="100"/>
+<img src="./icon.png" style="width:100px;" width="100"/>
 <h2>AIPixel</h2>
 </div>
 

@@ -1014,6 +1014,21 @@ body {
   min-width: 0;
 }
 
+/* 设置弹窗顶部：界面语言。切了就整棵树跟着变，不用保存。 */
+.model-lang {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.model-lang-label {
+  color: var(--text-faint);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
 .model-form .ant-form-item {
   margin-bottom: 10px;
 }

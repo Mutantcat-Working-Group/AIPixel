@@ -3,6 +3,7 @@ import { Alert, Button, Checkbox, Input, Modal, Segmented, Tag, Tooltip } from "
 import { Plus, Trash2 } from "lucide-react";
 
 import { useStore } from "../lib/store";
+import { useT, type T } from "../lib/t";
 import type {
   McpServerConfig,
   McpServerView,
@@ -55,17 +56,18 @@ function linesToMap(text: string): Record<string, string> {
   return out;
 }
 
-function statusTag(server: McpServerView) {
+function statusTag(server: McpServerView, t: T) {
   if (server.connected) {
-    return <Tag color="green">Connected</Tag>;
+    return <Tag color="green">{t("mcp.connected")}</Tag>;
   }
   if (server.last_error) {
-    return <Tag color="red">Error</Tag>;
+    return <Tag color="red">{t("mcp.error")}</Tag>;
   }
-  return <Tag>Offline</Tag>;
+  return <Tag>{t("mcp.offline")}</Tag>;
 }
 
 export default function McpPanel() {
+  const t = useT();
   const open = useStore((s) => s.mcpOpen);
   const servers = useStore((s) => s.mcpServers.entries);
   const busy = useStore((s) => s.mcpBusy);
@@ -116,13 +118,13 @@ export default function McpPanel() {
   async function save() {
     setError(null);
     if (!draft.name.trim()) {
-      setError("Name is required");
+      setError(t("mcp.name_required"));
       return;
     }
     let transport: McpTransportConfig;
     if (draft.kind === "stdio") {
       if (!draft.command.trim()) {
-        setError("Command is required for a stdio server");
+        setError(t("mcp.command_required"));
         return;
       }
       transport = {
@@ -133,7 +135,7 @@ export default function McpPanel() {
       };
     } else {
       if (!/^https?:\/\//.test(draft.url.trim())) {
-        setError("URL must start with http:// or https://");
+        setError(t("mcp.url_required"));
         return;
       }
       transport = {
@@ -157,18 +159,18 @@ export default function McpPanel() {
 
   return (
     <Modal
-      title="MCP tool servers"
+      title={t("mcp.title")}
       open={open}
       onCancel={closeMcp}
       width={640}
       className="mcp-modal"
       footer={[
         <Button key="close" onClick={closeMcp}>
-          Close
+          {t("mcp.close")}
         </Button>,
         editing ? (
           <Button key="save" type="primary" loading={busy} onClick={save}>
-            Save
+            {t("mcp.save")}
           </Button>
         ) : null,
       ]}
@@ -176,7 +178,7 @@ export default function McpPanel() {
       <div className="mcp-list">
         {servers.length === 0 ? (
           <div className="mcp-empty">
-            No servers yet. Add one to let the agent call its tools.
+            {t("mcp.empty")}
           </div>
         ) : null}
         {servers.map((server) => (
@@ -184,10 +186,10 @@ export default function McpPanel() {
             <div className="mcp-row-head">
               <span className="mcp-row-name">{server.name}</span>
               <Tag>{server.transport.kind}</Tag>
-              {statusTag(server)}
+              {statusTag(server, t)}
               {server.auto_connect ? (
-                <Tooltip title="connect on app start">
-                  <Tag color="blue">Auto</Tag>
+                <Tooltip title={t("mcp.auto_hint")}>
+                  <Tag color="blue">{t("mcp.auto")}</Tag>
                 </Tooltip>
               ) : null}
               <span className="grow" />
@@ -197,7 +199,7 @@ export default function McpPanel() {
                   disabled={busy}
                   onClick={() => void disconnectMcpServer(server.name)}
                 >
-                  Disconnect
+                  {t("mcp.disconnect")}
                 </Button>
               ) : (
                 <Button
@@ -206,11 +208,11 @@ export default function McpPanel() {
                   disabled={busy}
                   onClick={() => void connectMcpServer(server.name)}
                 >
-                  Connect
+                  {t("mcp.connect")}
                 </Button>
               )}
               <Button size="small" disabled={busy} onClick={() => startEdit(server)}>
-                Edit
+                {t("mcp.edit")}
               </Button>
               <Button
                 size="small"
@@ -226,7 +228,7 @@ export default function McpPanel() {
                 {server.tools.map((tool) => (
                   <Tooltip
                     key={tool.name}
-                    title={tool.description || "no description from the server"}
+                    title={tool.description || t("mcp.no_description")}
                   >
                     <span className="mcp-tool">{tool.name}</span>
                   </Tooltip>
@@ -242,27 +244,29 @@ export default function McpPanel() {
           disabled={busy}
           onClick={startNew}
         >
-          Add server
+          {t("mcp.add_server")}
         </Button>
       </div>
 
       {editing ? (
         <div className="mcp-form">
           <div className="mcp-form-title">
-            {editing === "new" ? "New server" : `Edit ${editing}`}
+            {editing === "new"
+              ? t("mcp.new_server")
+              : t("mcp.edit_server", { name: editing })}
           </div>
           <label className="mcp-field">
-            <span>Name</span>
+            <span>{t("mcp.name")}</span>
             <Input
               value={draft.name}
               disabled={editing !== "new"}
-              placeholder="files"
+              placeholder={t("mcp.name_placeholder")}
               spellCheck={false}
               onChange={(event) => patch({ name: event.target.value })}
             />
           </label>
           <label className="mcp-field">
-            <span>Transport</span>
+            <span>{t("mcp.transport")}</span>
             <Segmented
               value={draft.kind}
               options={KIND_OPTIONS}
@@ -272,30 +276,30 @@ export default function McpPanel() {
           {draft.kind === "stdio" ? (
             <>
               <label className="mcp-field">
-                <span>Command</span>
+                <span>{t("mcp.command")}</span>
                 <Input
                   value={draft.command}
-                  placeholder="npx"
+                  placeholder={t("mcp.command_placeholder")}
                   spellCheck={false}
                   onChange={(event) => patch({ command: event.target.value })}
                 />
               </label>
               <label className="mcp-field">
-                <span>Arguments</span>
+                <span>{t("mcp.args")}</span>
                 <Input.TextArea
                   value={draft.args}
                   rows={2}
-                  placeholder={"-y\n@modelcontextprotocol/server-filesystem\n/tmp"}
+                  placeholder={t("mcp.args_placeholder")}
                   spellCheck={false}
                   onChange={(event) => patch({ args: event.target.value })}
                 />
               </label>
               <label className="mcp-field">
-                <span>Environment</span>
+                <span>{t("mcp.env")}</span>
                 <Input.TextArea
                   value={draft.env}
                   rows={2}
-                  placeholder={"API_TOKEN=secret"}
+                  placeholder={t("mcp.env_placeholder")}
                   spellCheck={false}
                   onChange={(event) => patch({ env: event.target.value })}
                 />
@@ -304,20 +308,20 @@ export default function McpPanel() {
           ) : (
             <>
               <label className="mcp-field">
-                <span>URL</span>
+                <span>{t("mcp.url")}</span>
                 <Input
                   value={draft.url}
-                  placeholder="https://mcp.example.com/mcp"
+                  placeholder={t("mcp.url_placeholder")}
                   spellCheck={false}
                   onChange={(event) => patch({ url: event.target.value })}
                 />
               </label>
               <label className="mcp-field">
-                <span>Headers</span>
+                <span>{t("mcp.headers")}</span>
                 <Input.TextArea
                   value={draft.headers}
                   rows={2}
-                  placeholder={"Authorization=Bearer token"}
+                  placeholder={t("mcp.headers_placeholder")}
                   spellCheck={false}
                   onChange={(event) => patch({ headers: event.target.value })}
                 />
@@ -328,15 +332,15 @@ export default function McpPanel() {
             checked={draft.auto_connect}
             onChange={(event) => patch({ auto_connect: event.target.checked })}
           >
-            Connect automatically on app start
+            {t("mcp.auto_connect")}
           </Checkbox>
           {error ? <Alert type="error" message={error} showIcon /> : null}
           <span className="inline-note">
-            Blank value keeps the stored one; delete a line to drop the key. Credentials stay in the local mcp.json.
+            {t("mcp.credentials_note")}
           </span>
           <div className="mcp-form-actions">
             <span className="grow" />
-            <Button onClick={() => setEditing(null)}>Cancel</Button>
+            <Button onClick={() => setEditing(null)}>{t("mcp.cancel")}</Button>
           </div>
         </div>
       ) : null}
