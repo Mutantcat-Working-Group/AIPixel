@@ -1,4 +1,4 @@
-//! 工作流命令层：把 agent-core 的六条工作流接到 Tauri 上。
+//! 工作流命令层：把 agent-core 的七条工作流接到 Tauri 上。
 //!
 //! 分成三类的道理：生图类要等模型回图，只能异步跑；本机类（插帧、量化）是纯计算，
 //! 同步返回更快也更不容易中途改坏文档；探针类只回答「这段素材长什么样」。
@@ -7,6 +7,9 @@
 //! 因此不会出现「主循环正在跑，工作流插进去改了画布」的交织。改完统一发
 //! `AgentEvent::DocumentUpdated`，前端只有一条刷新路径。
 
+use agent_core::video_brief::{
+    brief_frame_indices, brief_video as brief_video_flow, source_note, BRIEF_THUMB_MAX_DIM,
+};
 use agent_core::{
     imagegen, refine as refine_flow, video as video_flow, vision, ActiveContext, AgentEvent,
     AgentSession, Attachment, AttachmentRole, LandSpot, RefineRequest, RefineTarget, UiText,
@@ -125,6 +128,18 @@ pub struct VideoFramesParams {
     pub options: Option<PixelizeOptions>,
     #[serde(default = "default_frame_duration")]
     pub duration_ms: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct VideoBriefParams {
+    pub path: String,
+    /// 从素材里抽多少帧给模型看。0 走默认值；上限由 `brief_frame_indices` 统一收口。
+    #[serde(default = "default_brief_count")]
+    pub count: usize,
+}
+
+fn default_brief_count() -> usize {
+    8
 }
 
 fn default_count() -> usize {
@@ -450,6 +465,93 @@ pub async fn workflow_video_frames(
         summary,
         detail: Some(detail),
     })
+}
+
+/// 读视频简报：把关键帧缩成小图喂给读视频模型，换一份可编辑的运动简报。
+///
+/// 和 `vision_brief` 一样刻意不落文档：简报是给人改的中间产物，改完由用户
+/// 决定发去画，还是丢给 agent 主循环。抽帧在这里只是「给模型准备看的料」，
+/// 量化不参与，所以它跟视频抽帧那条工作流是两回事。
+#[tauri::command]
+pub async fn video_brief(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    params: VideoBriefParams,
+) -> Result<agent_core::VideoBrief, String> {
+    let session = state.session(&id)?;
+    let config = session.model_config();
+    if !config.capabilities.video {
+        return Err(
+            "this model is not marked as able to read video; enable video in model settings".into(),
+        );
+    }
+    let source = PathBuf::from(&params.path);
+    let (probe, origin) = video_flow::probe(&source).await?;
+    let staging = std::env::temp_dir().join(FRAME_STAGING_DIR);
+    let pull = if params.count == 0 {
+        default_brief_count()
+    } else {
+        params.count
+    };
+    let frames = video_flow::extract_frames(&source, &staging, pull).await?;
+    if frames.is_empty() {
+        return Err("no frames came out of that source".into());
+    }
+    let (w, h) = {
+        let doc = session.document();
+        (doc.width, doc.height)
+    };
+    // 抽出来的帧可能远多于模型该看的数量，也可能有的读坏了。
+    // 挑下标在读文件之前就定好：省掉无用的 IO，也保证顺序仍是时间序。
+    let picked = brief_frame_indices(frames.len());
+    let mut attachments: Vec<Attachment> = Vec::with_capacity(picked.len());
+    let mut failures: Vec<String> = Vec::new();
+    for &index in picked.iter() {
+        let path = &frames[index];
+        emit_status(
+            &app,
+            UiText::new("status.reading_frame", "reading frame {index} of {total}")
+                .with("index", (index + 1) as u64)
+                // 报的是「要读几帧」，不是素材里一共有多少帧：只读挑中的那一小撮，
+                // 拿总帧数当分母会让进度条永远走不到头。
+                .with("total", picked.len() as u64),
+        );
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                failures.push(format!("{}: {e}", path.display()));
+                continue;
+            }
+        };
+        let media_type = media_type_for(path);
+        let (thumb, thumb_type) =
+            match decode::thumbnail_png(&bytes, &media_type, BRIEF_THUMB_MAX_DIM) {
+                Ok(t) => t,
+                Err(e) => {
+                    failures.push(format!("{}: {e}", path.display()));
+                    continue;
+                }
+            };
+        attachments.push(Attachment {
+            role: AttachmentRole::Reference,
+            media_type: thumb_type,
+            data_base64: pixel_core::png::base64_encode(&thumb),
+        });
+    }
+    // 一帧都没读出来就别发请求：模型看到的会是一场缺帧的戏，timing 会全错。
+    if attachments.is_empty() {
+        let reason = failures.join("; ");
+        return Err(if reason.is_empty() {
+            "no readable frame came out of that source".into()
+        } else {
+            reason
+        });
+    }
+    let note = source_note(&probe, origin);
+    brief_video_flow(&config, &attachments, w, h, note.as_deref())
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // ---------- 本机计算（同步） ----------

@@ -36,6 +36,7 @@ import type {
   RefineTarget,
   SessionInfo,
   TweenParams,
+  VideoBrief,
   VideoFramesParams,
   VideoProbeResult,
   VisionBrief,
@@ -70,6 +71,8 @@ export interface WorkflowState {
   refineTarget: RefineTarget;
   vision: VisionBrief | null;
   probe: VideoProbeResult | null;
+  /** 读视频模型给的运动简报。不落文档，是一次性的中间产物。 */
+  videoBrief: VideoBrief | null;
   /** 微调结果的可编辑副本；用户改的就是这段，refined.prompt 留作原文对照。 */
   refinedDraft: string;
   dockDraft: DockDraft;
@@ -154,6 +157,7 @@ export interface StoreActions {
   runPixelize: (params: PixelizeParams) => Promise<WorkflowOutcome | null>;
   refinePrompt: (idea: string) => Promise<void>;
   briefReference: (path: string) => Promise<void>;
+  briefVideo: (path: string, count: number) => Promise<void>;
   probeVideo: (path: string) => Promise<void>;
   clearWorkflowResult: () => void;
   patchDraft: (patch: Partial<DockDraft>) => void;
@@ -218,6 +222,7 @@ const INITIAL_DOCK_DRAFT: DockDraft = {
   visionPath: null,
   videoPath: null,
   videoCount: 4,
+  briefCount: 8,
   quantizePath: null,
   // 帧 id 由文档决定，loadDocument 之后由坞按真实帧校正。
   tweenFrom: "",
@@ -370,6 +375,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       refined: null,
       vision: null,
       probe: null,
+      videoBrief: null,
       outcome: null,
       outcomeError: null,
       catalogReady: false,
@@ -440,6 +446,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     refineTarget: "image_gen",
     vision: null,
     probe: null,
+    videoBrief: null,
     refinedDraft: "",
     dockDraft: INITIAL_DOCK_DRAFT,
     composeRequest: null,
@@ -941,6 +948,23 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       }
     },
 
+    briefVideo: async (path, count) => {
+      const id = getState().activeId;
+      if (!id) {
+        failKey("store.no_session");
+        return;
+      }
+      setState({ workflowBusy: true, outcomeError: null, videoBrief: null });
+      try {
+        const videoBrief = await bridge.videoBrief(id, { path, count });
+        setState({ videoBrief, outcomeError: null });
+      } catch (error) {
+        setState({ outcomeError: workflowError(error) });
+      } finally {
+        setState({ workflowBusy: false });
+      }
+    },
+
     probeVideo: async (path) => {
       setState({ workflowBusy: true, outcomeError: null, probe: null });
       try {
@@ -960,6 +984,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         refined: null,
         vision: null,
         probe: null,
+        videoBrief: null,
         refinedDraft: "",
       }),
 

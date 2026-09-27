@@ -20,6 +20,7 @@ pub mod refine;
 pub mod runner;
 pub mod tools;
 pub mod video;
+pub mod video_brief;
 pub mod vision;
 pub mod workflows;
 
@@ -37,5 +38,9 @@ pub use providers::{build_provider, EventStream, LlmProvider, ProviderError};
 pub use refine::{refine, RefineRequest, RefineTarget, RefinedPrompt};
 pub use runner::AgentSession;
 pub use video::{extract_frames, probe, ProbeSource, VideoProbe};
+pub use video_brief::{
+    brief_frame_indices, brief_video, render_for_prompt as render_video_brief, source_note,
+    VideoBrief, BRIEF_THUMB_MAX_DIM, MAX_BRIEF_FRAMES,
+};
 pub use vision::{brief_reference, render_for_prompt, VisionBrief};
 pub use workflows::{available, catalog, info, readiness, Readiness, WorkflowInfo, WorkflowKind};

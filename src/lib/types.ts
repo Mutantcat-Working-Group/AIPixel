@@ -269,12 +269,13 @@ export interface StrokeRequest {
 
 // ---------- 工作流 ----------
 
-/** 六条工作流。前四条覆盖「不同模型怎么做同一件事」，后两条是编辑助手。 */
+/** 七条工作流。前五条覆盖「不同模型怎么做同一件事」，后两条是编辑助手。 */
 export type WorkflowKind =
   | "agent"
   | "image_gen"
   | "vision_brief"
   | "video_frames"
+  | "video_brief"
   | "frame_tween"
   | "prompt_refine";
 
@@ -377,6 +378,21 @@ export interface VideoProbeResult {
   source: ProbeSource;
 }
 
+/**
+ * 视频运动简报：读视频模型把一段视频读成「怎么动」。
+ * 与 VisionBrief 的分工就在字段上：这边全是运动语义，没有剪影和比例。
+ */
+export interface VideoBrief {
+  subject: string;
+  motion: string;
+  /** 按时间顺序的关键姿态。 */
+  key_poses: string[];
+  timing: string;
+  palette: string[];
+  craft_notes: string;
+  raw: string;
+}
+
 export interface TweenParams {
   from_frame: string;
   to_frame: string;
@@ -418,6 +434,12 @@ export interface VideoFramesParams {
   duration_ms?: number;
 }
 
+export interface VideoBriefParams {
+  path: string;
+  /** 从素材里抽多少帧给模型看；0 或省略走 Rust 侧默认。 */
+  count?: number;
+}
+
 export interface WorkflowOutcome {
   revision: number;
   summary: UiText;
@@ -445,6 +467,8 @@ export interface DockDraft {
   videoPath: string | null;
   /** 0 = 全都要，上限由 Rust 的 MAX_EXTRACT_FRAMES 管。 */
   videoCount: number;
+  /** 给读视频模型看几帧；0 或省略走 Rust 默认。与 videoCount 分开：那边 0 是「全部」，这边不是。 */
+  briefCount: number;
   quantizePath: string | null;
   tweenFrom: string;
   tweenTo: string;

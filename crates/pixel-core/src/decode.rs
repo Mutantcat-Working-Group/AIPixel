@@ -48,6 +48,43 @@ pub fn decode_image(bytes: &[u8], media_type: &str) -> Result<(Vec<u8>, u32, u32
     Ok((rgba.into_raw(), w, h))
 }
 
+/// 把一张位图缩到最长边不超过 `max_dim`，重新编码成 PNG 字节。
+///
+/// 存在的理由只有一个：读视频的工作流要把若干帧同时塞进一条消息，
+/// 1080p 的 PNG 一帧就几兆，模型还没读到内容上下文就先爆了。
+/// 缩小用 Triangle 滤波而不是 Nearest：缩完的图是给模型「看懂动作」用的，
+/// 不是给像素量化用的，保持形体比保持硬边缘重要。
+/// 已经够小的图原样返回，不再折腾一遍编解码。
+pub fn thumbnail_png(
+    bytes: &[u8],
+    media_type: &str,
+    max_dim: u32,
+) -> Result<(Vec<u8>, String), String> {
+    let (rgba, width, height) = decode_image(bytes, media_type)?;
+    let longest = width.max(height);
+    if longest == 0 {
+        return Err("image has a zero dimension".into());
+    }
+    let img = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_raw(width, height, rgba)
+        .ok_or_else(|| "decoded buffer does not match its dimensions".to_string())?;
+    // max_dim 为 0 表示「不缩」。够小的图也原样编码，只把容器统一成 PNG。
+    if max_dim > 0 && longest > max_dim {
+        let scale = max_dim as f32 / longest as f32;
+        let target = (
+            ((width as f32 * scale).round() as u32).max(1),
+            ((height as f32 * scale).round() as u32).max(1),
+        );
+        let small = image::imageops::resize(
+            &img,
+            target.0,
+            target.1,
+            image::imageops::FilterType::Triangle,
+        );
+        return Ok((super::png::encode_png(&small)?, "image/png".into()));
+    }
+    Ok((super::png::encode_png(&img)?, "image/png".into()))
+}
+
 /// 从 data URL（`data:image/png;base64,...`）解码；生图模型常用这种形式回图。
 pub fn decode_data_url(url: &str) -> Result<(Vec<u8>, u32, u32), String> {
     let (media_type, payload) = split_data_url(url)?;
@@ -184,5 +221,48 @@ mod tests {
         let (rgba, w, h) = decode_data_url(&url).unwrap();
         assert_eq!((w, h), (1, 1));
         assert_eq!(rgba, vec![12, 34, 56, 255]);
+    }
+
+    #[test]
+    fn a_thumbnail_respects_the_longest_edge_and_keeps_the_shape() {
+        let mut img = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::new(64, 32);
+        for (x, _y, pixel) in img.enumerate_pixels_mut() {
+            // 渐变：缩完之后颜色必须还是渐变的，验证滤波真的在插值而不是丢块。
+            let v = (x * 255 / 63) as u8;
+            *pixel = image::Rgba([v, 128, 255 - v, 255]);
+        }
+        let png = super::super::png::encode_png(&img).unwrap();
+        let (bytes, media_type) = thumbnail_png(&png, "image/png", 16).unwrap();
+        assert_eq!(media_type, "image/png");
+        let (rgba, w, h) = decode_image(&bytes, "image/png").unwrap();
+        assert_eq!((w, h), (16, 8), "aspect ratio must survive the resize");
+        // 渐变从左往右变亮，缩完还留着这个方向，说明滤波在插值而不是丢块。
+        assert!(rgba[0] < rgba[(15 * 4) as usize], "{rgba:?}");
+    }
+
+    #[test]
+    fn an_image_under_the_cap_is_returned_untouched() {
+        let mut img = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::new(4, 4);
+        img.put_pixel(0, 0, image::Rgba([9, 9, 9, 255]));
+        let png = super::super::png::encode_png(&img).unwrap();
+        let (bytes, _) = thumbnail_png(&png, "image/png", 16).unwrap();
+        let (rgba, w, h) = decode_image(&bytes, "image/png").unwrap();
+        assert_eq!((w, h), (4, 4));
+        assert_eq!(&rgba[0..4], &[9, 9, 9, 255]);
+    }
+
+    #[test]
+    fn a_zero_cap_means_do_not_scale() {
+        let mut img = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::new(8, 8);
+        img.put_pixel(0, 0, image::Rgba([1, 2, 3, 255]));
+        let png = super::super::png::encode_png(&img).unwrap();
+        let (bytes, _) = thumbnail_png(&png, "image/png", 0).unwrap();
+        let (_, w, h) = decode_image(&bytes, "image/png").unwrap();
+        assert_eq!((w, h), (8, 8));
+    }
+
+    #[test]
+    fn a_broken_image_cannot_become_a_thumbnail() {
+        assert!(thumbnail_png(b"not an image at all", "image/png", 16).is_err());
     }
 }
