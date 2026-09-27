@@ -15,6 +15,7 @@ pub mod models;
 pub mod one_shot;
 pub mod prompt;
 pub mod providers;
+pub mod refine;
 pub mod runner;
 pub mod tools;
 pub mod video;
@@ -26,6 +27,7 @@ pub use models::{
     LlmEvent, Message, ModelConfig, PermissionMode, Protocol, Role, RunnerConfig, ToolSpec,
 };
 pub use providers::{build_provider, EventStream, LlmProvider, ProviderError};
+pub use refine::{refine, RefineRequest, RefineTarget, RefinedPrompt};
 pub use runner::AgentSession;
 pub use video::{extract_frames, probe, ProbeSource, VideoProbe};
 pub use vision::{brief_reference, render_for_prompt, VisionBrief};
