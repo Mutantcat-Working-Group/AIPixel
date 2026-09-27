@@ -145,6 +145,16 @@ export function readImageContext(path: string): Promise<Attachment> {
   return invoke<Attachment>("read_image_context", { path });
 }
 
+/** 导出动画：gif 是无限循环动画，sheet 是 PNG spritesheet（columns 0 = 排成一行）。 */
+export function documentExport(
+  id: string,
+  format: "gif" | "sheet",
+  path: string,
+  columns = 0
+): Promise<void> {
+  return invoke<void>("document_export", { id, format, path, columns });
+}
+
 // ---------- 工作流 ----------
 // params 是嵌套结构体，Tauri 的 camelCase 转换只作用于顶层参数名，
 // 所以 params 里的键必须逐字写 Rust 的 snake_case 字段名（from_frame / duration_ms ...）。

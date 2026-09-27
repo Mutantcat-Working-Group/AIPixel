@@ -1,5 +1,6 @@
 //! pixel-core: 像素文档模型、类型化操作、RLE 上下文编码、
-//! .aip v2 文本格式（参照 PixTXT 设计，图层/帧一等公民）、Lua 沙箱着色器与 PNG 导出。
+//! .aip v2 文本格式（参照 PixTXT 设计，图层/帧一等公民）、Lua 沙箱着色器，
+//! 以及 PNG 序列 / spritesheet / GIF 导出。
 //!
 //! 设计约束（来自前作逆向 + 三份参照）：
 //! - 文档是唯一权威状态，文本网格优先于任何位图渲染
@@ -15,6 +16,7 @@ pub mod pixelize;
 pub mod png;
 pub mod rle;
 pub mod shader;
+pub mod sheet;
 pub mod tween;
 
 pub use document::{Cel, Document, Frame, Layer, Rgba};

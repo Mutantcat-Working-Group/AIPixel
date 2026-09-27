@@ -237,6 +237,30 @@ pub fn document_png_url(
     ))
 }
 
+/// 把整个动画导出到磁盘：`gif` 走无限循环动画，`sheet` 走 PNG spritesheet。
+/// `columns` 为 0 或 None 时 spritesheet 排成一行。
+///
+/// 用户选什么扩展名就写什么字节，引擎和素材库各取所需，不做二次确认。
+#[tauri::command]
+pub fn document_export(
+    state: State<'_, AppState>,
+    id: String,
+    format: String,
+    path: String,
+    columns: Option<u32>,
+) -> Result<(), String> {
+    let doc = state.session(&id)?.document();
+    let bytes = match format.as_str() {
+        "gif" => pixel_core::sheet::encode_gif(&doc)?,
+        "sheet" => {
+            let img = pixel_core::sheet::spritesheet(&doc, columns.unwrap_or(0));
+            pixel_core::png::encode_png(&img)?
+        }
+        other => return Err(format!("unsupported export format: {other}")),
+    };
+    std::fs::write(&path, &bytes).map_err(|e| format!("cannot write {path}: {e}"))
+}
+
 /// 读一张参考图，转成 send_message 可用的附件（角色为 reference）。
 #[tauri::command]
 pub fn read_image_context(path: String) -> Result<Attachment, String> {
