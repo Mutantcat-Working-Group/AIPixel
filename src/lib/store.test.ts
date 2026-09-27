@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
+import { briefToText, probeSummary } from "./dock-format";
 import { blankDocument } from "./store";
+import type { VideoProbe, VisionBrief } from "./types";
 
 describe("blankDocument", () => {
   it("builds the same baseline structure Rust Document::new produces", () => {
@@ -19,5 +21,69 @@ describe("blankDocument", () => {
     const doc = blankDocument(4, 3);
     expect(doc.cels.L0.F0.indices).toHaveLength(12);
     expect(doc.cels.L0.F0.indices.every((index) => index === 0)).toBe(true);
+  });
+});
+
+function brief(over: Partial<VisionBrief> = {}): VisionBrief {
+  return {
+    subject: "a fox blacksmith",
+    silhouette: "round ears over a square apron",
+    palette: ["#2b1d18", "#c9603a", "#f2d3a8"],
+    pose_notes: "leaning forward, hammer raised",
+    proportions: "head one third of the height",
+    craft_notes: "hard edges, no antialiasing",
+    raw: "subject: a fox blacksmith",
+    ...over,
+  };
+}
+
+describe("briefToText", () => {
+  it("keeps only the fields the model filled in", () => {
+    const text = briefToText(brief({ proportions: "", craft_notes: "  " }));
+    expect(text).toBe(
+      [
+        "subject: a fox blacksmith",
+        "silhouette: round ears over a square apron",
+        "pose: leaning forward, hammer raised",
+        "palette: #2b1d18, #c9603a, #f2d3a8",
+      ].join("\n"),
+    );
+  });
+
+  it("drops the palette line when nothing was read", () => {
+    expect(briefToText(brief({ palette: [] }))).not.toContain("palette:");
+  });
+});
+
+function probe(over: Partial<VideoProbe> = {}): VideoProbe {
+  return {
+    width: 640,
+    height: 360,
+    duration_s: 3.5,
+    fps: 12.0,
+    frame_count: 42,
+    codec: "h264",
+    has_audio: false,
+    ...over,
+  };
+}
+
+describe("probeSummary", () => {
+  it("reads like a clip when ffprobe answered", () => {
+    expect(probeSummary(probe(), "ffprobe")).toBe("640x360, 12.00 fps, 3.5s");
+  });
+
+  it("counts stills instead of timing for a directory of frames", () => {
+    expect(probeSummary(probe({ width: null, height: null }), "directory")).toBe("42 still(s)");
+  });
+
+  it("says what it does not know instead of printing 0", () => {
+    expect(probeSummary(probe({ fps: null, duration_s: null }), "none")).toBe(
+      "640x360, unknown fps, unknown length",
+    );
+  });
+
+  it("mentions audio only when there is audio", () => {
+    expect(probeSummary(probe({ has_audio: true }), "ffprobe")).toContain("with audio");
   });
 });

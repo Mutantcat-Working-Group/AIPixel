@@ -113,6 +113,19 @@ export function pushUserMessage(
   return [...entries, { key: key(), kind: "user", text, attachments }];
 }
 
+/**
+ * 追加一条系统提示（工作流跑完的结果、失败原因）。
+ * 先封口 live 条目：直接 append 会把 notice 塞进正在流式输出的气泡后面，
+ * 下一个 token 就会另起一个气泡，把一轮对话撕成两半。
+ */
+export function pushNotice(
+  entries: TranscriptEntry[],
+  text: string,
+  isError: boolean,
+): TranscriptEntry[] {
+  return [...sealTranscript(entries), { key: key(), kind: "notice", text, isError }];
+}
+
 function sealLiveAssistant(entries: TranscriptEntry[]): TranscriptEntry[] {
   const next = [...entries];
   for (let i = next.length - 1; i >= 0; i -= 1) {

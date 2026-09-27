@@ -14,6 +14,16 @@ import type {
   PermissionMode,
   PixelDocument,
   SessionInfo,
+  ImageGenParams,
+  PixelizeParams,
+  RefinedPrompt,
+  RefineTarget,
+  TweenParams,
+  VideoFramesParams,
+  VideoProbeResult,
+  VisionBrief,
+  WorkflowEntry,
+  WorkflowOutcome,
 } from "./types";
 
 export const AGENT_EVENT_CHANNEL = "agent-event";
@@ -105,6 +115,57 @@ export function aipLoad(path: string): Promise<PixelDocument> {
 
 export function readImageContext(path: string): Promise<Attachment> {
   return invoke<Attachment>("read_image_context", { path });
+}
+
+// ---------- 工作流 ----------
+// params 是嵌套结构体，Tauri 的 camelCase 转换只作用于顶层参数名，
+// 所以 params 里的键必须逐字写 Rust 的 snake_case 字段名（from_frame / duration_ms ...）。
+
+export function workflowCatalog(id: string): Promise<WorkflowEntry[]> {
+  return invoke<WorkflowEntry[]>("workflow_catalog", { id });
+}
+
+export function promptRefine(
+  id: string,
+  idea: string,
+  width: number,
+  height: number,
+  target: RefineTarget,
+): Promise<RefinedPrompt> {
+  return invoke<RefinedPrompt>("prompt_refine", { id, idea, width, height, target });
+}
+
+export function videoProbe(path: string): Promise<VideoProbeResult> {
+  return invoke<VideoProbeResult>("video_probe", { path });
+}
+
+export function visionBrief(id: string, path: string): Promise<VisionBrief> {
+  return invoke<VisionBrief>("vision_brief", { id, path });
+}
+
+export function workflowImageGen(
+  id: string,
+  params: ImageGenParams,
+): Promise<WorkflowOutcome> {
+  return invoke<WorkflowOutcome>("workflow_image_gen", { id, params });
+}
+
+export function workflowPixelize(
+  id: string,
+  params: PixelizeParams,
+): Promise<WorkflowOutcome> {
+  return invoke<WorkflowOutcome>("workflow_pixelize", { id, params });
+}
+
+export function workflowTween(id: string, params: TweenParams): Promise<WorkflowOutcome> {
+  return invoke<WorkflowOutcome>("workflow_tween", { id, params });
+}
+
+export function workflowVideoFrames(
+  id: string,
+  params: VideoFramesParams,
+): Promise<WorkflowOutcome> {
+  return invoke<WorkflowOutcome>("workflow_video_frames", { id, params });
 }
 
 export function listenAgentEvents(handler: (event: AgentEvent) => void): Promise<UnlistenFn> {

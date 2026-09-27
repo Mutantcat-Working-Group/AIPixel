@@ -1,13 +1,47 @@
 import { useEffect, useState } from "react";
-import { Alert, Button, Form, Input, InputNumber, Modal, Select, Tooltip } from "antd";
+import {
+  Alert,
+  Button,
+  Checkbox,
+  Form,
+  Input,
+  InputNumber,
+  Modal,
+  Select,
+  Tooltip,
+} from "antd";
 import { KeyRound, Plus, Star, Trash2 } from "lucide-react";
 
 import { useStore } from "../lib/store";
-import type { ModelConfig, ModelView, Protocol } from "../lib/types";
+import type { Capabilities, ModelConfig, ModelView, Protocol } from "../lib/types";
 
 const PROTOCOL_OPTIONS: { label: string; value: Protocol }[] = [
   { label: "Anthropic Messages", value: "anthropic" },
   { label: "OpenAI-compatible", value: "open_ai_compat" },
+];
+
+const NO_CAPABILITIES: Capabilities = { vision: false, image_gen: false, video: false };
+
+const CAPABILITY_FIELDS: {
+  key: keyof Capabilities;
+  label: string;
+  hint: string;
+}[] = [
+  {
+    key: "vision",
+    label: "Read images",
+    hint: "Multimodal input: the model can look at a reference you attach.",
+  },
+  {
+    key: "image_gen",
+    label: "Generate images",
+    hint: "The model can return an image bitmap instead of only text.",
+  },
+  {
+    key: "video",
+    label: "Read video",
+    hint: "The model accepts video input, so frames can go straight to it.",
+  },
 ];
 
 interface FormShape {
@@ -18,6 +52,7 @@ interface FormShape {
   model: string;
   max_tokens: number | null;
   temperature: number | null;
+  capabilities: Capabilities;
 }
 
 function toForm(model: ModelView | null): FormShape {
@@ -30,6 +65,7 @@ function toForm(model: ModelView | null): FormShape {
       model: "claude-sonnet-4-5",
       max_tokens: 4096,
       temperature: null,
+      capabilities: { ...NO_CAPABILITIES },
     };
   }
   return {
@@ -40,6 +76,7 @@ function toForm(model: ModelView | null): FormShape {
     model: model.model,
     max_tokens: model.max_tokens,
     temperature: model.temperature,
+    capabilities: { ...model.capabilities },
   };
 }
 
@@ -98,6 +135,7 @@ export default function ModelSettingsModal() {
       model: values.model.trim(),
       max_tokens: values.max_tokens ?? null,
       temperature: values.temperature ?? null,
+      capabilities: values.capabilities ?? { ...NO_CAPABILITIES },
     };
     try {
       await upsertModel(config);
@@ -201,6 +239,19 @@ export default function ModelSettingsModal() {
           <Form.Item name="temperature" label="Temperature">
             <InputNumber min={0} max={2} step={0.1} style={{ width: "100%" }} />
           </Form.Item>
+          <ModelFragment
+            title="Capabilities"
+            hint="declared by you, so the dock knows what this model can run"
+          />
+          <div className="cap-grid">
+            {CAPABILITY_FIELDS.map((field) => (
+              <Tooltip key={field.key} title={field.hint}>
+                <Form.Item name={["capabilities", field.key]} valuePropName="checked" noStyle>
+                  <Checkbox>{field.label}</Checkbox>
+                </Form.Item>
+              </Tooltip>
+            ))}
+          </div>
         </Form>
 
         {error ? <Alert type="error" message={error} showIcon /> : null}

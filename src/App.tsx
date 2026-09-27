@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Button, Segmented, Select, Spin, Tooltip } from "antd";
 import { FolderOpen, ImagePlus, Save, Settings2, X } from "lucide-react";
 import { open, save } from "@tauri-apps/plugin-dialog";
@@ -8,8 +8,15 @@ import DocumentPanel from "./ui/DocumentPanel";
 import ModelSettingsModal from "./ui/ModelSettingsModal";
 import SessionSidebar from "./ui/SessionSidebar";
 import StarterGate from "./ui/StarterGate";
+import WorkflowDock from "./ui/WorkflowDock";
 import { useStore } from "./lib/store";
 import type { PermissionMode } from "./lib/types";
+
+/** 右栏两个视图：画布看结果，工作流跑流程。 */
+const RAIL_OPTIONS = [
+  { label: "Canvas", value: "canvas" },
+  { label: "Workflows", value: "workflows" },
+];
 
 const PERMISSION_OPTIONS = [
   { label: "Auto", value: "auto", title: "工具直接执行" },
@@ -22,6 +29,7 @@ const IMAGE_FILTER = [{ name: "图片", extensions: ["png", "jpg", "jpeg", "webp
 
 export default function App() {
   const store = useStore();
+  const [rail, setRail] = useState("canvas");
 
   useEffect(() => {
     void store.boot();
@@ -152,7 +160,17 @@ export default function App() {
       <div className="app-body">
         <SessionSidebar />
         <ChatPanel />
-        <DocumentPanel />
+        <div className="rail">
+          <div className="rail-switch">
+            <Segmented
+              size="small"
+              value={rail}
+              options={RAIL_OPTIONS}
+              onChange={(next) => setRail(next as string)}
+            />
+          </div>
+          {rail === "canvas" ? <DocumentPanel /> : <WorkflowDock />}
+        </div>
       </div>
 
       <ModelSettingsModal />
