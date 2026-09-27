@@ -25,6 +25,8 @@ import type {
   RefinedPrompt,
   RefineTarget,
   TweenParams,
+  VideoBrief,
+  VideoBriefParams,
   VideoFramesParams,
   VideoProbeResult,
   VisionBrief,
@@ -192,6 +194,13 @@ export function workflowVideoFrames(
   params: VideoFramesParams,
 ): Promise<WorkflowOutcome> {
   return invoke<WorkflowOutcome>("workflow_video_frames", { id, params });
+}
+
+export function videoBrief(
+  id: string,
+  params: VideoBriefParams,
+): Promise<VideoBrief> {
+  return invoke<VideoBrief>("video_brief", { id, params });
 }
 
 export function listenAgentEvents(handler: (event: AgentEvent) => void): Promise<UnlistenFn> {

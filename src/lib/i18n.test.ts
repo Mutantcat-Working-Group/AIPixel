@@ -11,6 +11,7 @@ const DOCK_KINDS = [
   "image_gen",
   "vision_brief",
   "video_frames",
+  "video_brief",
   "frame_tween",
   "prompt_refine",
   "quantize",

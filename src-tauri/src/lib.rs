@@ -55,6 +55,7 @@ pub fn run() {
             workflow::workflow_pixelize,
             workflow::workflow_tween,
             workflow::workflow_video_frames,
+            workflow::video_brief,
             editor::editor_apply_ops,
             editor::editor_fill,
             editor::editor_paint_stroke,

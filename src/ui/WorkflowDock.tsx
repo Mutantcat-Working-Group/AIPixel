@@ -1,4 +1,4 @@
-// 工作流坞：目录里的六条 + 一条纯本机的量化。
+// 工作流坞：目录里的七条 + 一条纯本机的量化。
 // 目录跟着会话绑的模型算 readiness；被能力挡住的条目照样列出来，只是禁用并写清缺什么，
 // 不然用户只看到灰按钮，不知道为什么。
 // quantize 不在能力目录里（它不需要模型），但确实是常用的一条，所以单独挂在末尾。
@@ -7,6 +7,7 @@ import { useMemo, type ReactNode } from "react";
 import { Alert, Button, Input, InputNumber, Segmented, Select, Slider, Switch, Tooltip } from "antd";
 import {
   ArrowRight,
+  Clapperboard,
   Film,
   Frame as FrameIcon,
   FolderOpen,
@@ -22,7 +23,7 @@ import {
 import { open } from "@tauri-apps/plugin-dialog";
 
 import * as bridge from "../lib/bridge";
-import { briefToText, probeSummary } from "../lib/dock-format";
+import { briefToText, probeSummary, videoBriefToText } from "../lib/dock-format";
 import { renderUiText, translate, translateText, type Lang } from "../lib/i18n";
 import { useStore } from "../lib/store";
 import { useT, type T } from "../lib/t";
@@ -36,6 +37,7 @@ import type {
   RefineTarget,
   TweenMode,
   VisionBrief,
+  VideoBrief,
   WorkflowEntry,
 } from "../lib/types";
 
@@ -44,6 +46,7 @@ const KIND_ICONS: Record<DockKind, ReactNode> = {
   image_gen: <Image size={13} />,
   vision_brief: <ScanEye size={13} />,
   video_frames: <Film size={13} />,
+  video_brief: <Clapperboard size={13} />,
   frame_tween: <FrameIcon size={13} />,
   prompt_refine: <Sparkles size={13} />,
   quantize: <Grid2x2 size={13} />,
@@ -206,15 +209,9 @@ function QuantizeFields({
   );
 }
 
-function BriefView({ brief }: { brief: VisionBrief }) {
+/** 两种简报共用的骨架：空字段整行不画，配色永远画色块。 */
+function BriefRows({ rows, palette }: { rows: [string, string][]; palette: string[] }) {
   const t = useT();
-  const rows: [string, string][] = [
-    [t("brief.subject"), brief.subject],
-    [t("brief.silhouette"), brief.silhouette],
-    [t("brief.pose"), brief.pose_notes],
-    [t("brief.proportions"), brief.proportions],
-    [t("brief.craft"), brief.craft_notes],
-  ];
   return (
     <div className="dock-brief">
       {rows.map(([label, text]) =>
@@ -225,11 +222,11 @@ function BriefView({ brief }: { brief: VisionBrief }) {
           </div>
         ),
       )}
-      {brief.palette.length > 0 ? (
+      {palette.length > 0 ? (
         <div className="dock-brief-row">
           <span className="dock-brief-label">{t("brief.palette")}</span>
           <span className="brief-swatches">
-            {brief.palette.map((hex, index) => (
+            {palette.map((hex, index) => (
               <span
                 key={`${hex}-${index}`}
                 className="brief-swatch"
@@ -241,6 +238,39 @@ function BriefView({ brief }: { brief: VisionBrief }) {
         </div>
       ) : null}
     </div>
+  );
+}
+
+function BriefView({ brief }: { brief: VisionBrief }) {
+  const t = useT();
+  return (
+    <BriefRows
+      rows={[
+        [t("brief.subject"), brief.subject],
+        [t("brief.silhouette"), brief.silhouette],
+        [t("brief.pose"), brief.pose_notes],
+        [t("brief.proportions"), brief.proportions],
+        [t("brief.craft"), brief.craft_notes],
+      ]}
+      palette={brief.palette}
+    />
+  );
+}
+
+/** 运动简报没有剪影和比例可言，行换成运动和节奏。 */
+function MotionBriefView({ brief }: { brief: VideoBrief }) {
+  const t = useT();
+  return (
+    <BriefRows
+      rows={[
+        [t("brief.subject"), brief.subject],
+        [t("brief.motion"), brief.motion],
+        [t("brief.key_poses"), brief.key_poses.join(" | ")],
+        [t("brief.timing"), brief.timing],
+        [t("brief.craft"), brief.craft_notes],
+      ]}
+      palette={brief.palette}
+    />
   );
 }
 // ---------- 坞 ----------
@@ -362,6 +392,7 @@ export default function WorkflowDock() {
           {kind === "image_gen" ? <ImageGenPanel gated={gated} /> : null}
           {kind === "vision_brief" ? <VisionPanel gated={gated} /> : null}
           {kind === "video_frames" ? <VideoPanel gated={gated} /> : null}
+          {kind === "video_brief" ? <VideoBriefPanel gated={gated} /> : null}
           {kind === "frame_tween" ? (
             <TweenPanel gated={gated} frameCount={frameCount} />
           ) : null}
@@ -730,6 +761,92 @@ function VideoPanel({ gated }: { gated: boolean }) {
       >
         {t("dock.pull_frames")}
       </Button>
+    </>
+  );
+}
+
+/**
+ * 读视频模型的画板：挑一段视频，模型逐帧看缩略图，吐出可编辑的运动简报。
+ * 和 VideoPanel 的分工是这边不落帧：结果是一段文本，交给生图或对话去画。
+ */
+function VideoBriefPanel({ gated }: { gated: boolean }) {
+  const t = useT();
+  const path = useStore((s) => s.dockDraft.videoPath);
+  const count = useStore((s) => s.dockDraft.briefCount);
+  const probe = useStore((s) => s.probe);
+  const brief = useStore((s) => s.videoBrief);
+  const busy = useStore((s) => s.workflowBusy);
+  const patchDraft = useStore((s) => s.patchDraft);
+  const probeVideo = useStore((s) => s.probeVideo);
+  const briefVideo = useStore((s) => s.briefVideo);
+  const usePromptInGen = useStore((s) => s.usePromptInGen);
+  const requestCompose = useStore((s) => s.requestCompose);
+
+  return (
+    <>
+      <PathField
+        label={t("dock.clip")}
+        buttonLabel={t("dock.pick_video")}
+        extensions={VIDEO_EXTENSIONS}
+        value={path}
+        onPick={(picked) => {
+          patchDraft({ videoPath: picked });
+          void probeVideo(picked);
+        }}
+        onClear={() => patchDraft({ videoPath: null })}
+      />
+      {path && probe ? (
+        <p className="dock-probe">
+          {baseName(path)} - {probeSummary(probe.probe, probe.source)}
+        </p>
+      ) : null}
+      <Field label={t("dock.frames_to_pull")}>
+        <InputNumber
+          size="small"
+          style={{ width: "100%" }}
+          min={1}
+          max={12}
+          value={count}
+          addonAfter={t("dock.frames_unit")}
+          onChange={(next) => patchDraft({ briefCount: next ?? 8 })}
+        />
+      </Field>
+      <Button
+        block
+        size="small"
+        type="primary"
+        icon={<Clapperboard size={12} />}
+        loading={busy}
+        disabled={gated || path === null}
+        onClick={() => {
+          if (path) void briefVideo(path, count);
+        }}
+      >
+        {t("dock.read_clip")}
+      </Button>
+      {brief ? <MotionBriefView brief={brief} /> : null}
+      <div className="dock-actions">
+        <Button
+          size="small"
+          icon={<ArrowRight size={13} />}
+          disabled={gated || brief === null}
+          onClick={() => {
+            if (brief) usePromptInGen(videoBriefToText(brief));
+          }}
+        >
+          {t("dock.draw_from_this")}
+        </Button>
+        <Button
+          size="small"
+          icon={<MessageSquare size={13} />}
+          disabled={brief === null}
+          onClick={() => {
+            if (brief) requestCompose(videoBriefToText(brief));
+          }}
+        >
+          {t("dock.send_to_chat")}
+        </Button>
+      </div>
     </>
   );
 }

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 pub use super::models::Capabilities;
 
-/// 六条工作流。前四条覆盖「不同模型怎么做同一件事」，后两条是纯本地的编辑助手。
+/// 七条工作流。前五条覆盖「不同模型怎么做同一件事」，后两条是纯本地的编辑助手。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowKind {
@@ -22,6 +22,8 @@ pub enum WorkflowKind {
     VisionBrief,
     /// 读视频模型/抽帧得到关键帧序列，逐帧量化或作为参考。
     VideoFrames,
+    /// 读视频模型把一段视频读成结构化运动简报，再交给 agent 主循环。
+    VideoBrief,
     /// 在两个已有帧之间插帧（本机计算，不吃模型额度）。
     FrameTween,
     /// 提示词微调：把一句大白话改写成结构化生图提示词。
@@ -38,7 +40,7 @@ impl WorkflowKind {
     }
 
     pub fn needs_video(self) -> bool {
-        matches!(self, WorkflowKind::VideoFrames)
+        matches!(self, WorkflowKind::VideoFrames | WorkflowKind::VideoBrief)
     }
 
     /// 纯本机、不请求模型的工作流。
@@ -52,6 +54,7 @@ impl WorkflowKind {
             WorkflowKind::ImageGen => "image_gen",
             WorkflowKind::VisionBrief => "vision_brief",
             WorkflowKind::VideoFrames => "video_frames",
+            WorkflowKind::VideoBrief => "video_brief",
             WorkflowKind::FrameTween => "frame_tween",
             WorkflowKind::PromptRefine => "prompt_refine",
         }
@@ -130,6 +133,16 @@ pub fn catalog() -> Vec<WorkflowInfo> {
                 ..Default::default()
             },
             "A frame sequence drawn from video stills",
+        ),
+        WorkflowInfo::new(
+            WorkflowKind::VideoBrief,
+            "Video Brief",
+            "A video model reads a clip into a motion brief you can edit, then draws.",
+            Capabilities {
+                video: true,
+                ..Default::default()
+            },
+            "Motion brief text plus a drawn canvas",
         ),
         WorkflowInfo::new(
             WorkflowKind::FrameTween,
@@ -218,6 +231,10 @@ mod tests {
             none.missing_for(WorkflowKind::VideoFrames),
             vec!["video".to_string()]
         );
+        assert_eq!(
+            none.missing_for(WorkflowKind::VideoBrief),
+            vec!["video".to_string()]
+        );
 
         let all = Capabilities {
             vision: true,
@@ -228,6 +245,7 @@ mod tests {
             WorkflowKind::ImageGen,
             WorkflowKind::VisionBrief,
             WorkflowKind::VideoFrames,
+            WorkflowKind::VideoBrief,
         ] {
             assert!(all.missing_for(kind).is_empty(), "{kind:?} should be ready");
         }
@@ -265,6 +283,8 @@ mod tests {
         assert_eq!(value, serde_json::json!("vision_brief"));
         let value = serde_json::to_value(WorkflowKind::FrameTween).unwrap();
         assert_eq!(value, serde_json::json!("frame_tween"));
+        let value = serde_json::to_value(WorkflowKind::VideoBrief).unwrap();
+        assert_eq!(value, serde_json::json!("video_brief"));
     }
 
     #[test]

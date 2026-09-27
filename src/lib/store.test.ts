@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import { briefToText, probeSummary } from "./dock-format";
+import { briefToText, probeSummary, videoBriefToText } from "./dock-format";
 import { blankDocument } from "./store";
-import type { VideoProbe, VisionBrief } from "./types";
+import type { VideoBrief, VideoProbe, VisionBrief } from "./types";
 
 describe("blankDocument", () => {
   it("builds the same baseline structure Rust Document::new produces", () => {
@@ -85,5 +85,43 @@ describe("probeSummary", () => {
 
   it("mentions audio only when there is audio", () => {
     expect(probeSummary(probe({ has_audio: true }), "ffprobe")).toContain("with audio");
+  });
+});
+
+function motion(over: Partial<VideoBrief> = {}): VideoBrief {
+  return {
+    subject: "a crow taking off",
+    motion: "a two-step hop, then wings open",
+    key_poses: ["crouched, weight forward", "wings half open", "fully airborne"],
+    timing: "hop on 1, lift on 3, full wing on 5",
+    palette: ["#1b1b22", "#3d4a6b", "#e8e2d0"],
+    craft_notes: "hard edges, no motion blur",
+    raw: "subject: a crow taking off",
+    ...over,
+  };
+}
+
+describe("videoBriefToText", () => {
+  it("keeps poses in order, joined by a pipe so the model reads a sequence", () => {
+    const text = videoBriefToText(motion());
+    expect(text).toBe(
+      [
+        "subject: a crow taking off",
+        "motion: a two-step hop, then wings open",
+        "key_poses: crouched, weight forward | wings half open | fully airborne",
+        "timing: hop on 1, lift on 3, full wing on 5",
+        "craft: hard edges, no motion blur",
+        "palette: #1b1b22, #3d4a6b, #e8e2d0",
+      ].join("\n"),
+    );
+  });
+
+  it("drops empty rows and the pose line when there are no poses", () => {
+    const text = videoBriefToText(
+      motion({ motion: "", timing: "  ", key_poses: [], palette: [] }),
+    );
+    expect(text).toBe(
+      ["subject: a crow taking off", "craft: hard edges, no motion blur"].join("\n"),
+    );
   });
 });
