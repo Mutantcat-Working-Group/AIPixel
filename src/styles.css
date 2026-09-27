@@ -581,6 +581,21 @@ body {
   margin-bottom: 7px;
 }
 
+/* 两个导出按钮平摊整行，别让标签长短决定按钮宽度。 */
+.export-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.export-row .ant-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  font-size: 11.5px;
+}
+
 .layer-row {
   display: flex;
   align-items: center;
@@ -1370,6 +1385,27 @@ body {
   inset: 0;
   width: 100%;
   height: 100%;
+}
+
+/* 帧层：播放与洋葱皮都画在这里。尺寸就是文档尺寸，放大交给 CSS。 */
+.frame-layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  image-rendering: pixelated;
+}
+
+/* 播放时权威 png 让位给帧层，两层别互相打架。 */
+.canvas-stack[data-playing="true"] .canvas-img {
+  display: none;
+}
+
+/* 开关类按钮：按下的状态得看得出来，不然洋葱皮开没开只能靠猜。 */
+.tool-on {
+  color: var(--accent) !important;
+  background: var(--accent-soft) !important;
 }
 
 .paint-layer {

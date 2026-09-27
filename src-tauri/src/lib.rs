@@ -34,6 +34,7 @@ pub fn run() {
             commands::aip_save,
             commands::aip_text,
             commands::document_png_url,
+            commands::document_export,
             commands::model_remove,
             commands::model_set_active,
             commands::model_upsert,
