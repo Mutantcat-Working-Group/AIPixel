@@ -8,11 +8,15 @@
 
 pub mod aip;
 pub mod context;
+pub mod decode;
 pub mod document;
 pub mod ops;
+pub mod pixelize;
 pub mod png;
 pub mod rle;
 pub mod shader;
+pub mod tween;
 
 pub use document::{Cel, Document, Frame, Layer, Rgba};
 pub use ops::{OperationError, PixelOperation};
+pub use pixelize::{pixelize_rgba, PixelizeOptions, PixelizeReport};
