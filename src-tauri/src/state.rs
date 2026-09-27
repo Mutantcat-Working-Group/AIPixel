@@ -175,6 +175,9 @@ impl AppState {
             existing.max_tokens = entry.max_tokens;
             existing.temperature = entry.temperature;
             existing.api_key = entry.api_key.clone();
+            // 能力必须跟着保存：漏了它，用户在弹窗里勾的勾选一关一开就丢了，
+            // 而工作流可用性完全由它决定。
+            existing.capabilities = entry.capabilities;
         } else {
             file.entries.push(entry);
         }

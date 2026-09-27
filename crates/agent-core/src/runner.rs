@@ -142,6 +142,13 @@ impl AgentSession {
         self.document.lock().unwrap().clone()
     }
 
+    /// 借出文档做一次性原地修改（插帧、量化、编辑器操作），完成后返回新 revision。
+    /// 主循环的 agent turn 也走同一把锁，所以这里不会和并发 turn 交织。
+    pub fn with_document_mut<T>(&self, f: impl FnOnce(&mut Document) -> T) -> T {
+        let mut doc = self.document.lock().unwrap();
+        f(&mut doc)
+    }
+
     pub fn document_json(&self) -> Value {
         let doc = self.document.lock().unwrap();
         serde_json::to_value(&*doc).unwrap_or(Value::Null)
