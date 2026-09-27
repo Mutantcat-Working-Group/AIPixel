@@ -9,7 +9,7 @@
 
 use agent_core::{
     imagegen, refine as refine_flow, video as video_flow, vision, ActiveContext, AgentEvent,
-    AgentSession, Attachment, AttachmentRole, RefineRequest, RefineTarget,
+    AgentSession, Attachment, AttachmentRole, RefineRequest, RefineTarget, UiText,
 };
 use pixel_core::decode;
 use pixel_core::document::Document;
@@ -30,7 +30,7 @@ pub const FRAME_STAGING_DIR: &str = "aipixel/video-frames";
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkflowOutcome {
     pub revision: u64,
-    pub summary: String,
+    pub summary: UiText,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<Value>,
 }
@@ -263,14 +263,21 @@ pub async fn workflow_image_gen(
         size: params.size,
         reference,
     };
-    emit_status(&app, "asking the model for an image");
+    emit_status(
+        &app,
+        UiText::new("status.asking_image", "asking the model for an image"),
+    );
     let image = generator
         .generate(&request)
         .await
         .map_err(|e| e.to_string())?;
     emit_status(
         &app,
-        &format!("quantizing a {} image onto the grid", image.transport),
+        UiText::new(
+            "status.quantizing",
+            "quantizing a {transport} image onto the grid",
+        )
+        .with("transport", image.transport),
     );
 
     let (rgba, width, height) =
@@ -302,14 +309,16 @@ pub async fn workflow_image_gen(
     let revision = emit_document(&app, &session);
     Ok(WorkflowOutcome {
         revision,
-        summary: format!(
-            "{} landed on layer {} frame {} ({} colors, {} new)",
-            image.transport,
-            landed.layer,
-            landed.frame,
-            landed.report.colors_used,
-            landed.report.palette_added
-        ),
+        summary:
+            UiText::new(
+                "outcome.bitmap_landed",
+                "{transport} landed on layer {layer} frame {frame} ({colors} colors, {added} new)",
+            )
+            .with("transport", image.transport)
+            .with("layer", landed.layer.clone())
+            .with("colors", landed.report.colors_used as u64)
+            .with("frame", landed.frame.clone())
+            .with("added", landed.report.palette_added as u64),
         detail: Some(landed_detail(&landed)),
     })
 }
@@ -339,7 +348,9 @@ pub async fn workflow_video_frames(
     for (index, path) in frames.iter().enumerate() {
         emit_status(
             &app,
-            &format!("reading frame {} of {}", index + 1, frames.len()),
+            UiText::new("status.reading_frame", "reading frame {index} of {total}")
+                .with("index", (index + 1) as u64)
+                .with("total", frames.len() as u64),
         );
         let bytes = match std::fs::read(path) {
             Ok(b) => b,
@@ -393,16 +404,39 @@ pub async fn workflow_video_frames(
     session.set_active(next);
     let revision = emit_document(&app, &session);
 
-    let mut summary = format!(
-        "{} frame(s) from {} landed on layer {} frames {}-{}",
-        landed.len(),
-        origin_label(origin),
-        landed[0].layer,
-        landed[0].frame,
-        landed[landed.len() - 1].frame,
-    );
+    // 六种回执：来源三种、有没有跳过两种。键由 Rust 选，措辞由前端说。
+    let mut summary = match (origin, failures.is_empty()) {
+        (agent_core::ProbeSource::Ffprobe, true) => UiText::new(
+            "outcome.video_landed.ffprobe",
+            "{count} frame(s) from ffmpeg landed on layer {layer} frames {from}-{to}",
+        ),
+        (agent_core::ProbeSource::Ffprobe, false) => UiText::new(
+            "outcome.video_skipped.ffprobe",
+            "{count} frame(s) from ffmpeg landed on layer {layer} frames {from}-{to} ({skipped} skipped)",
+        ),
+        (agent_core::ProbeSource::Directory, true) => UiText::new(
+            "outcome.video_landed.directory",
+            "{count} frame(s) from a stills directory landed on layer {layer} frames {from}-{to}",
+        ),
+        (agent_core::ProbeSource::Directory, false) => UiText::new(
+            "outcome.video_skipped.directory",
+            "{count} frame(s) from a stills directory landed on layer {layer} frames {from}-{to} ({skipped} skipped)",
+        ),
+        (_, true) => UiText::new(
+            "outcome.video_landed.none",
+            "{count} frame(s) landed on layer {layer} frames {from}-{to}",
+        ),
+        (_, false) => UiText::new(
+            "outcome.video_skipped.none",
+            "{count} frame(s) landed on layer {layer} frames {from}-{to} ({skipped} skipped)",
+        ),
+    }
+    .with("count", landed.len() as u64)
+    .with("layer", landed[0].layer.clone())
+    .with("from", landed[0].frame.clone())
+    .with("to", landed[landed.len() - 1].frame.clone());
     if !failures.is_empty() {
-        summary.push_str(&format!(" ({} skipped)", failures.len()));
+        summary = summary.with("skipped", failures.len() as u64);
     }
     let detail = json!({
         "source": origin_label(origin),
@@ -460,14 +494,16 @@ pub fn workflow_tween(
     let revision = emit_document(&app, &session);
     Ok(WorkflowOutcome {
         revision,
-        summary: format!(
-            "{} frame(s) inserted between {} and {} on layer {}; {} px changed",
-            report.created.len(),
-            report.from_frame,
-            report.to_frame,
-            report.layer,
-            report.changed_pixels,
-        ),
+        summary:
+            UiText::new(
+                "outcome.tween_inserted",
+                "{count} frame(s) inserted between {from} and {to} on layer {layer}; {changed} px changed",
+            )
+            .with("count", report.created.len() as u64)
+            .with("from", report.from_frame.clone())
+            .with("to", report.to_frame.clone())
+            .with("layer", report.layer.clone())
+            .with("changed", report.changed_pixels as u64),
         detail: Some(json!({
             "created": report.created,
             "changed_pixels": report.changed_pixels,
@@ -510,10 +546,14 @@ pub fn workflow_pixelize(
     let revision = emit_document(&app, &session);
     Ok(WorkflowOutcome {
         revision,
-        summary: format!(
-            "quantized onto layer {} frame {} ({} colors, {} new)",
-            landed.layer, landed.frame, landed.report.colors_used, landed.report.palette_added
-        ),
+        summary: UiText::new(
+            "outcome.pixelize_landed",
+            "quantized onto layer {layer} frame {frame} ({colors} colors, {added} new)",
+        )
+        .with("layer", landed.layer.clone())
+        .with("frame", landed.frame.clone())
+        .with("colors", landed.report.colors_used as u64)
+        .with("added", landed.report.palette_added as u64),
         detail: Some(landed_detail(&landed)),
     })
 }
@@ -532,11 +572,11 @@ pub(crate) fn emit_document(app: &AppHandle, session: &AgentSession) -> u64 {
     revision
 }
 
-fn emit_status(app: &AppHandle, message: &str) {
+fn emit_status(app: &AppHandle, message: UiText) {
     let _ = app.emit(
         "agent-event",
         AgentEvent::Status {
-            message: message.to_string(),
+            message,
         },
     );
 }
@@ -555,9 +595,9 @@ fn landed_detail(landed: &LandedImage) -> Value {
 
 fn origin_label(origin: agent_core::ProbeSource) -> &'static str {
     match origin {
-        agent_core::ProbeSource::Ffprobe => "ffmpeg",
-        agent_core::ProbeSource::Directory => "stills directory",
-        agent_core::ProbeSource::None => "video",
+        agent_core::ProbeSource::Ffprobe => "origin.ffprobe",
+        agent_core::ProbeSource::Directory => "origin.directory",
+        agent_core::ProbeSource::None => "origin.none",
     }
 }
 

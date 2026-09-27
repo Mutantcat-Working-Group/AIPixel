@@ -1,6 +1,7 @@
 // 把 Rust 主循环广播的 AgentEvent 流折叠成可渲染的对话条目。
 // 纯函数、零依赖，方便单测；副作用（刷新画布、读 PNG）由 store 处理。
 
+import { translate, renderUiText, type Lang } from "./i18n";
 import type {
   AgentEvent,
   ContentBlock,
@@ -20,9 +21,9 @@ export function emptyTranscript(): TranscriptEntry[] {
   return [];
 }
 
-function summaryOf(content: string): string {
+function summaryOf(content: string, lang: Lang): string {
   const first = content.split("\n")[0].trim();
-  if (first === "") return "(no output)";
+  if (first === "") return translate(lang, "chat.tool_no_output");
   return first.length <= 180 ? first : `${first.slice(0, 180)}...`;
 }
 
@@ -42,13 +43,13 @@ export function stripImageCaption(text: string): string {
  * 从 Rust 会话历史重建对话视图。
  * tool_use 与 tool_result 分属两条消息，先按 tool_use_id 收拢结果，再顺序展开。
  */
-export function historyToTranscript(messages: Message[]): TranscriptEntry[] {
+export function historyToTranscript(messages: Message[], lang: Lang = "zh"): TranscriptEntry[] {
   const results = new Map<string, { summary: string; isError: boolean }>();
   for (const message of messages) {
     for (const block of message.content) {
       if (block.type === "tool_result") {
         results.set(block.tool_use_id, {
-          summary: summaryOf(block.content),
+          summary: summaryOf(block.content, lang),
           isError: block.is_error,
         });
       }
@@ -139,7 +140,11 @@ function sealLiveAssistant(entries: TranscriptEntry[]): TranscriptEntry[] {
 }
 
 /** 折叠一条事件。document_updated 不在这里处理（驱动画布，不是对话内容）。 */
-export function reduceEvent(entries: TranscriptEntry[], event: AgentEvent): TranscriptEntry[] {
+export function reduceEvent(
+  entries: TranscriptEntry[],
+  event: AgentEvent,
+  lang: Lang = "zh",
+): TranscriptEntry[] {
   switch (event.kind) {
     case "token": {
       const last = entries[entries.length - 1];
@@ -189,13 +194,17 @@ export function reduceEvent(entries: TranscriptEntry[], event: AgentEvent): Tran
       return next;
     }
     case "status": {
-      return [...entries, { key: key(), kind: "notice", text: event.message, isError: false }];
+      return [
+        ...entries,
+        { key: key(), kind: "notice", text: renderUiText(lang, event.message), isError: false },
+      ];
     }
     case "error": {
       return [...entries, { key: key(), kind: "notice", text: event.message, isError: true }];
     }
     case "interrupted": {
-      return [...sealLiveAssistant(entries), { key: key(), kind: "notice", text: "已中断这一轮", isError: false }];
+      const text = translate(lang, "agent.interrupted");
+      return [...sealLiveAssistant(entries), { key: key(), kind: "notice", text, isError: false }];
     }
     case "completed": {
       return sealLiveAssistant(entries);

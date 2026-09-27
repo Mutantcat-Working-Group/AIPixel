@@ -3,6 +3,7 @@
 
 import { create } from "zustand";
 
+import { renderUiText, translate, type Lang, type TVARS, type TKey } from "./i18n";
 import * as bridge from "./bridge";
 import {
   emptyTranscript,
@@ -104,10 +105,13 @@ interface StoreState extends DocumentSnapshot, WorkflowState {
   mcpOpen: boolean;
   /** 连接/保存进行中：期间按钮全灭，防止连点把服务器打爆。 */
   mcpBusy: boolean;
+  /** 界面语言。默认中文，用户可在设置里改成英语；只影响这一层，不回灌 Rust。 */
+  lang: Lang;
 }
 
 export interface StoreActions {
   boot: () => Promise<void>;
+  setLang: (lang: Lang) => void;
   selectSession: (id: string) => Promise<void>;
   createSession: (width?: number, height?: number) => Promise<void>;
   removeSession: (id: string) => Promise<void>;
@@ -178,6 +182,18 @@ export interface StoreActions {
 
 const EMPTY_MODELS: ModelsView = { active_id: "", entries: [] };
 const EMPTY_MCP: McpServersView = { entries: [] };
+
+const LANG_KEY = "aipixel.lang";
+
+/** 启动时读本地记忆；没有记忆就中文。存储不可用（隐身模式 / node 测试）时同样中文。 */
+function storedLang(): Lang {
+  try {
+    const raw = globalThis.localStorage?.getItem(LANG_KEY);
+    return raw === "en" || raw === "zh" ? raw : "zh";
+  } catch {
+    return "zh";
+  }
+}
 
 /** 与 Rust `PixelizeOptions::default()` 一致；改了 Rust 要同步这里。 */
 const DEFAULT_OPTIONS: PixelizeOptions = {
@@ -267,8 +283,14 @@ function pushUndo(stack: PixelDocument[], doc: PixelDocument): PixelDocument[] {
 }
 
 export const useStore = create<StoreState & StoreActions>()((setState, getState) => {
-  function fail(message: string) {
-    setState({ notice: { text: message, isError: true }, running: false });
+  /** 键控失败：措辞跟着当前界面语言走，Rust 的原文当 {error} 追在后面。 */
+  function failKey(key: TKey, vars?: TVARS) {
+    setState({ notice: { text: translate(getState().lang, key, vars), isError: true }, running: false });
+  }
+
+  /** 一段本机成功提示（载入、保存）。不是错误，所以不进 fail 那条路。 */
+  function noteKey(key: TKey, vars?: TVARS) {
+    setState({ notice: { text: translate(getState().lang, key, vars), isError: false } });
   }
 
   /** document_updated 的统一落点：文档、撤销栈、帧选择意图一起结算。 */
@@ -310,21 +332,21 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
   /** agent-event 路由：文档事件驱动画布，其余折叠进对话条目。 */
   async function ensureListener() {
     if (unlisten) return;
-    unlisten = await bridge.listenAgentEvents((event: AgentEvent) => {
+    unlisten = await bridge.listenAgentEvents((raw: AgentEvent) => {
       const state = getState();
-      if (event.kind === "approval_request") {
+      if (raw.kind === "approval_request") {
         setState({
-          pendingApproval: { callId: event.call_id, name: event.name, input: event.input },
+          pendingApproval: { callId: raw.call_id, name: raw.name, input: raw.input },
         });
         return;
       }
-      if (event.kind === "document_updated") {
-        applyDocument(event.document, event.revision, state.pendingFrameIndex);
+      if (raw.kind === "document_updated") {
+        applyDocument(raw.document, raw.revision, state.pendingFrameIndex);
         return;
       }
-      if (event.kind === "completed" || event.kind === "error" || event.kind === "interrupted") {
+      if (raw.kind === "completed" || raw.kind === "error" || raw.kind === "interrupted") {
         setState({
-          entries: sealTranscript(reduceEvent(state.entries, event)),
+          entries: sealTranscript(reduceEvent(state.entries, raw, state.lang)),
           running: false,
           // 一轮收尾，挂着没批的调用跟着作废——别让下一轮还看见这张票。
           pendingApproval: null,
@@ -332,11 +354,11 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         void getState().refreshSessions();
         return;
       }
-      if (event.kind === "usage") {
-        setState({ usage: { input: event.input_tokens, output: event.output_tokens } });
+      if (raw.kind === "usage") {
+        setState({ usage: { input: raw.input_tokens, output: raw.output_tokens } });
         return;
       }
-      setState({ entries: reduceEvent(state.entries, event) });
+      setState({ entries: reduceEvent(state.entries, raw, state.lang) });
     });
   }
 
@@ -357,7 +379,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     });
     try {
       const messages = await bridge.agentHistory(id);
-      setState({ entries: historyToTranscript(messages) });
+      setState({ entries: historyToTranscript(messages, getState().lang) });
     } catch {
       // 历史读不到就从空对话开始，不阻塞文档加载
     }
@@ -419,6 +441,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     refinedDraft: "",
     dockDraft: INITIAL_DOCK_DRAFT,
     composeRequest: null,
+    lang: storedLang(),
 
     boot: async () => {
       if (booting) return booting;
@@ -428,7 +451,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         try {
           models = await bridge.listModels();
         } catch (error) {
-          fail(`读取模型配置失败：${String(error)}`);
+          failKey("store.read_models_failed", { error: String(error) });
           models = EMPTY_MODELS;
         }
         setState({ models });
@@ -436,7 +459,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         try {
           mcpServers = await bridge.listMcpServers();
         } catch (error) {
-          fail(`读取 MCP 服务器配置失败：${String(error)}`);
+          failKey("store.read_mcp_failed", { error: String(error) });
           mcpServers = EMPTY_MCP;
         }
         setState({ mcpServers });
@@ -444,7 +467,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         try {
           sessions = await bridge.listSessions();
         } catch (error) {
-          fail(`读取会话列表失败：${String(error)}`);
+          failKey("store.read_sessions_failed", { error: String(error) });
         }
         if (sessions.length === 0) {
           const created = await bridge.createSession();
@@ -522,7 +545,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     send: async (text) => {
       const id = getState().activeId;
       if (!id) {
-        fail("还没有会话");
+        failKey("store.no_session");
         return;
       }
       const trimmed = text.trim();
@@ -542,7 +565,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       try {
         await bridge.sendMessage(id, trimmed, payload);
       } catch (error) {
-        fail(`发送失败：${String(error)}`);
+        failKey("store.send_failed", { error: String(error) });
       }
     },
 
@@ -552,7 +575,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       try {
         await bridge.interrupt(id);
       } catch (error) {
-        fail(`中断失败：${String(error)}`);
+        failKey("store.interrupt_failed", { error: String(error) });
       }
     },
 
@@ -580,7 +603,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       try {
         setState({ mcpServers: await bridge.listMcpServers() });
       } catch (error) {
-        fail(`读取 MCP 服务器配置失败：${String(error)}`);
+        failKey("store.read_mcp_failed", { error: String(error) });
       }
     },
 
@@ -593,7 +616,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       try {
         setState({ mcpServers: await bridge.upsertMcpServer(config) });
       } catch (error) {
-        fail(`保存 MCP 服务器失败：${String(error)}`);
+        failKey("store.save_mcp_failed", { error: String(error) });
       } finally {
         setState({ mcpBusy: false });
       }
@@ -604,7 +627,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       try {
         setState({ mcpServers: await bridge.removeMcpServer(name) });
       } catch (error) {
-        fail(`删除 MCP 服务器失败：${String(error)}`);
+        failKey("store.remove_mcp_failed", { error: String(error) });
       } finally {
         setState({ mcpBusy: false });
       }
@@ -617,7 +640,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       } catch (error) {
         // 失败原因由 Rust 带回视图；这里只负责把视图刷出来让用户看见。
         setState({ mcpServers: await bridge.listMcpServers() });
-        fail(`连接 MCP 服务器失败：${String(error)}`);
+        failKey("store.connect_mcp_failed", { error: String(error) });
       } finally {
         setState({ mcpBusy: false });
       }
@@ -628,7 +651,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       try {
         setState({ mcpServers: await bridge.disconnectMcpServer(name) });
       } catch (error) {
-        fail(`断开 MCP 服务器失败：${String(error)}`);
+        failKey("store.disconnect_mcp_failed", { error: String(error) });
       } finally {
         setState({ mcpBusy: false });
       }
@@ -648,7 +671,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
             previewUrl: dataUrl(attachment.media_type, attachment.data_base64),
           });
         } catch (error) {
-          fail(`读取图片失败 ${baseName(path)}：${String(error)}`);
+          failKey("store.read_image_failed", { name: baseName(path), error: String(error) });
         }
       }
       if (pending.length > 0) setState({ attachments: [...getState().attachments, ...pending] });
@@ -661,7 +684,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         const url = await bridge.pngUrl(id);
         const { mediaType, data } = stripDataUrl(url);
         if (!data) {
-          fail("画布快照为空");
+          failKey("store.empty_snapshot");
           return;
         }
        snapshotSeq += 1;
@@ -671,7 +694,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
            {
               key: `snapshot:${getState().revision}:${snapshotSeq}`,
               role: "snapshot",
-              name: "canvas snapshot",
+              name: translate(getState().lang, "store.snapshot_name"),
               mediaType,
               dataBase64: data,
               previewUrl: url,
@@ -679,7 +702,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
           ],
         });
       } catch (error) {
-        fail(`截图失败：${String(error)}`);
+        failKey("store.snapshot_failed", { error: String(error) });
       }
     },
 
@@ -731,7 +754,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         const url = await bridge.pngUrl(id, frameIndex > 0 ? frameIndex : undefined);
         if (getState().revision === requested) setState({ pngUrl: url });
       } catch (error) {
-        fail(`渲染画布失败：${String(error)}`);
+        failKey("store.render_failed", { error: String(error) });
       }
     },
 
@@ -744,10 +767,10 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       await bridge.syncDocument(id, document);
       // 新文档和旧笔迹无关，撤销栈清空；否则一撤销就退回上一个文件。
       setState({ undoStack: [], pendingFrameIndex: null });
-      setState({ notice: { text: `已载入 ${baseName(path)}`, isError: false } });
+      noteKey("store.loaded", { name: baseName(path) });
         await getState().refreshDocument();
       } catch (error) {
-        fail(`打开 .aip 失败：${String(error)}`);
+        failKey("store.open_aip_failed", { error: String(error) });
       } finally {
         setState({ busy: false });
       }
@@ -759,9 +782,9 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       setState({ busy: true });
       try {
         await bridge.aipSave(id, path);
-        setState({ notice: { text: `已保存 ${baseName(path)}`, isError: false } });
+        noteKey("store.saved", { name: baseName(path) });
       } catch (error) {
-        fail(`保存失败：${String(error)}`);
+        failKey("store.save_failed", { error: String(error) });
       } finally {
         setState({ busy: false });
       }
@@ -773,12 +796,21 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       try {
         return await bridge.aipText(id);
       } catch (error) {
-        fail(`读取 .aip 文本失败：${String(error)}`);
+        failKey("store.read_aip_failed", { error: String(error) });
         return null;
       }
     },
 
     clearNotice: () => setState({ notice: null }),
+
+    setLang: (lang) => {
+      try {
+        globalThis.localStorage?.setItem(LANG_KEY, lang);
+      } catch {
+        // 存储不可用就只切这一趟：设置里的选择当场就生效。
+      }
+      setState({ lang });
+    },
 
     openSettings: () => setState({ settingsOpen: true }),
 
@@ -809,7 +841,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     runWorkflow: async (kind, params) => {
       const id = getState().activeId;
       if (!id) {
-        fail("还没有会话");
+        failKey("store.no_session");
         return null;
       }
       setState({ workflowBusy: true, outcomeError: null });
@@ -818,7 +850,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         setState({
           outcome,
           outcomeError: null,
-          entries: pushNotice(getState().entries, outcome.summary, false),
+          entries: pushNotice(getState().entries, renderUiText(getState().lang, outcome.summary), false),
         });
         return outcome;
       } catch (error) {
@@ -837,7 +869,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     runPixelize: async (params) => {
       const id = getState().activeId;
       if (!id) {
-        fail("还没有会话");
+        failKey("store.no_session");
         return null;
       }
       setState({ workflowBusy: true, outcomeError: null });
@@ -846,7 +878,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         setState({
           outcome,
           outcomeError: null,
-          entries: pushNotice(getState().entries, outcome.summary, false),
+          entries: pushNotice(getState().entries, renderUiText(getState().lang, outcome.summary), false),
         });
         return outcome;
       } catch (error) {
@@ -865,11 +897,11 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     refinePrompt: async (idea) => {
       const id = getState().activeId;
       if (!id) {
-        fail("还没有会话");
+        failKey("store.no_session");
         return;
       }
       if (idea.trim() === "") {
-        fail("先写一句想法");
+        failKey("store.refine_empty");
         return;
       }
       setState({ workflowBusy: true, outcomeError: null, refined: null });
@@ -893,7 +925,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     briefReference: async (path) => {
       const id = getState().activeId;
       if (!id) {
-        fail("还没有会话");
+        failKey("store.no_session");
         return;
       }
       setState({ workflowBusy: true, outcomeError: null, vision: null });
@@ -960,7 +992,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         await bridge.resolveApproval(id, pending.callId, decision);
       } catch (error) {
         // 多半是这一轮已经翻页（新一轮开始 / 被中断），票自然作废，不是死锁。
-        fail(`审批失败：${String(error)}`);
+        failKey("store.approval_failed", { error: String(error) });
       }
     },
 
@@ -978,7 +1010,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
           color: active.color ?? null,
         });
       } catch (error) {
-        fail(`落笔失败：${String(error)}`);
+        failKey("store.paint_failed", { error: String(error) });
       }
     },
 
@@ -990,7 +1022,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       try {
         await bridge.fillCells(id, active.layer, active.frame, x, y, active.color ?? null);
       } catch (error) {
-        fail(`填充失败：${String(error)}`);
+        failKey("store.fill_failed", { error: String(error) });
       }
     },
 
@@ -1004,7 +1036,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         return await bridge.applyEditorOps(id, ops);
       } catch (error) {
         setState({ pendingFrameIndex: null });
-        fail(`编辑失败：${String(error)}`);
+        failKey("store.edit_failed", { error: String(error) });
         return null;
       }
     },
@@ -1071,7 +1103,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         });
         await getState().refreshPng();
       } catch (error) {
-        fail(`撤销失败：${String(error)}`);
+        failKey("store.undo_failed", { error: String(error) });
       }
     },
 

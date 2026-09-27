@@ -23,7 +23,9 @@ import { open } from "@tauri-apps/plugin-dialog";
 
 import * as bridge from "../lib/bridge";
 import { briefToText, probeSummary } from "../lib/dock-format";
+import { renderUiText, translate, translateText, type Lang } from "../lib/i18n";
 import { useStore } from "../lib/store";
+import { useT, type T } from "../lib/t";
 import type {
   DockKind,
   FitMode,
@@ -46,33 +48,6 @@ const KIND_ICONS: Record<DockKind, ReactNode> = {
   quantize: <Grid2x2 size={13} />,
 };
 
-const FIT_OPTIONS = [
-  { label: "Contain", value: "contain" },
-  { label: "Stretch", value: "stretch" },
-];
-
-const TWEEN_MODE_OPTIONS = [
-  { label: "Migrate", value: "migrate" },
-  { label: "Blend", value: "blend" },
-  { label: "Copy", value: "copy" },
-];
-
-const TWEEN_ORDER_OPTIONS = [
-  { label: "Scan", value: "scan" },
-  { label: "Radial", value: "radial" },
-  { label: "Scatter", value: "scatter" },
-];
-
-const SPOT_OPTIONS = [
-  { label: "Active cel", value: "active_cel" },
-  { label: "New frame", value: "new_frame" },
-];
-
-const REFINE_TARGET_OPTIONS = [
-  { label: "Image gen", value: "image_gen" },
-  { label: "Lua shader", value: "shader" },
-];
-
 const SIZE_OPTIONS = ["512x512", "768x768", "1024x1024", "1024x576", "576x1024"];
 
 const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "webp", "gif"];
@@ -87,13 +62,22 @@ interface DockRow {
   readiness: { state: "ready" } | { state: "blocked"; missing: string[] };
 }
 
-const QUANTIZE_ROW: DockRow = {
-  key: "quantize",
-  title: "Quantize",
-  summary: "Drop a bitmap onto the grid. Runs on this machine, no model needed.",
-  output: "One cel of quantized pixels",
-  readiness: { state: "ready" },
-};
+/** 缺的能力名 -> 界面词。Rust 只给 snake_case 标识，中文要说人话。 */
+const CAP_LABEL_KEY = {
+  vision: "cap.vision",
+  image_gen: "cap.image_gen",
+  video: "cap.video",
+} as const;
+
+function missingLabel(name: string, t: T): string {
+  const key = CAP_LABEL_KEY[name as keyof typeof CAP_LABEL_KEY];
+  return key ? t(key) : name;
+}
+
+/** 并列能力名的连接词：中文用顿号，英文用 and。 */
+function listSep(lang: Lang): string {
+  return lang === "zh" ? "、" : " and ";
+}
 
 function baseName(path: string): string {
   const parts = path.split(/[/\\]/);
@@ -166,13 +150,14 @@ function QuantizeFields({
   value: PixelizeOptions;
   onChange: (next: PixelizeOptions) => void;
 }) {
+  const t = useT();
   return (
     <details className="dock-advanced">
       <summary>
         <Sliders size={12} />
-        Quantize
+        {t("dock.advanced")}
       </summary>
-      <Field label={`Max colors ${value.max_colors}`}>
+      <Field label={t("dock.max_colors", { count: value.max_colors })}>
         <Slider
           min={2}
           max={64}
@@ -180,7 +165,7 @@ function QuantizeFields({
           onChange={(next) => onChange({ ...value, max_colors: next })}
         />
       </Field>
-      <Field label={`Alpha cutoff ${value.alpha_threshold}`}>
+      <Field label={t("dock.alpha_cutoff", { count: value.alpha_threshold })}>
         <Slider
           min={0}
           max={255}
@@ -194,7 +179,7 @@ function QuantizeFields({
           checked={value.dither}
           onChange={(next) => onChange({ ...value, dither: next })}
         />
-        <span>Dither</span>
+        <span>{t("dock.dither")}</span>
       </div>
       <div className="dock-flag">
         <Switch
@@ -202,14 +187,17 @@ function QuantizeFields({
           checked={value.expand_palette}
           onChange={(next) => onChange({ ...value, expand_palette: next })}
         />
-        <span>Expand palette</span>
+        <span>{t("dock.expand_palette")}</span>
       </div>
-      <Field label="Fit">
+      <Field label={t("dock.fit")}>
         <Segmented
           size="small"
           block
           value={value.fit}
-          options={FIT_OPTIONS}
+          options={[
+            { label: t("fit.contain"), value: "contain" },
+            { label: t("fit.stretch"), value: "stretch" },
+          ]}
           onChange={(next) => onChange({ ...value, fit: next as FitMode })}
         />
       </Field>
@@ -218,12 +206,13 @@ function QuantizeFields({
 }
 
 function BriefView({ brief }: { brief: VisionBrief }) {
+  const t = useT();
   const rows: [string, string][] = [
-    ["Subject", brief.subject],
-    ["Silhouette", brief.silhouette],
-    ["Pose", brief.pose_notes],
-    ["Proportions", brief.proportions],
-    ["Craft", brief.craft_notes],
+    [t("brief.subject"), brief.subject],
+    [t("brief.silhouette"), brief.silhouette],
+    [t("brief.pose"), brief.pose_notes],
+    [t("brief.proportions"), brief.proportions],
+    [t("brief.craft"), brief.craft_notes],
   ];
   return (
     <div className="dock-brief">
@@ -237,7 +226,7 @@ function BriefView({ brief }: { brief: VisionBrief }) {
       )}
       {brief.palette.length > 0 ? (
         <div className="dock-brief-row">
-          <span className="dock-brief-label">Palette</span>
+          <span className="dock-brief-label">{t("brief.palette")}</span>
           <span className="brief-swatches">
             {brief.palette.map((hex, index) => (
               <span
@@ -257,6 +246,7 @@ function BriefView({ brief }: { brief: VisionBrief }) {
 
 /** 坞的主体：条目列表 + 当前条目的表单 + 最近一次回执。 */
 export default function WorkflowDock() {
+  const t = useT();
   const workflows = useStore((s) => s.workflows);
   const catalogReady = useStore((s) => s.catalogReady);
   const kind = useStore((s) => s.kind);
@@ -266,23 +256,32 @@ export default function WorkflowDock() {
   const outcomeError = useStore((s) => s.outcomeError);
   const document = useStore((s) => s.document);
   const openSettings = useStore((s) => s.openSettings);
+  const lang = useStore((s) => s.lang);
 
+  // 目录文案以字典为准，Rust 的英文原句只当缺键时的后备；quantize 不在目录里，单独补。
   const rows = useMemo<DockRow[]>(
     () => [
       ...workflows.map((entry: WorkflowEntry) => ({
         key: entry.kind,
-        title: entry.title,
-        summary: entry.summary,
-        output: entry.output,
+        title: translateText(lang, `wf.${entry.kind}.title`, undefined, entry.title),
+        summary: translateText(lang, `wf.${entry.kind}.summary`, undefined, entry.summary),
+        output: translateText(lang, `wf.${entry.kind}.output`, undefined, entry.output),
         readiness: entry.readiness,
       })),
-      QUANTIZE_ROW,
+      {
+        key: "quantize" as const,
+        title: translate(lang, "wf.quantize.title"),
+        summary: translate(lang, "wf.quantize.summary"),
+        output: translate(lang, "wf.quantize.output"),
+        readiness: { state: "ready" as const },
+      },
     ],
-    [workflows],
+    [workflows, lang],
   );
 
-  const active = rows.find((row) => row.key === kind) ?? QUANTIZE_ROW;
+  const active = rows.find((row) => row.key === kind) ?? rows[rows.length - 1];
   const missing = active.readiness.state === "blocked" ? active.readiness.missing : null;
+  const missingText = missing ? missing.map((name) => missingLabel(name, t)).join(listSep(lang)) : "";
   // quantize 纯本机，目录没取回来也跑得动；其余六条要等 readiness 说话。
   const pending = kind !== "quantize" && !catalogReady;
   const gated = busy || missing !== null || pending;
@@ -292,16 +291,19 @@ export default function WorkflowDock() {
     <section className="panel dock">
       <div className="panel-head">
         <Play size={13} />
-        <strong>Workflows</strong>
+        <strong>{t("dock.title")}</strong>
         <span className="grow" />
-        {pending ? <span className="dock-pending">readiness</span> : null}
+        {pending ? <span className="dock-pending">{t("dock.pending")}</span> : null}
       </div>
 
       <div className="kind-list">
         {rows.map((row) => {
           const flag =
-            row.readiness.state === "blocked" ? row.readiness.missing.join(", ") : "";
-          const hint = flag === "" ? row.output : `${row.summary} Missing: ${flag}.`;
+            row.readiness.state === "blocked"
+              ? row.readiness.missing.map((name) => missingLabel(name, t)).join(listSep(lang))
+              : "";
+          const hint =
+            flag === "" ? row.output : t("dock.blocked_tooltip", { summary: row.summary, missing: flag });
           return (
             <Tooltip key={row.key} title={hint} placement="right">
               <button
@@ -311,7 +313,9 @@ export default function WorkflowDock() {
               >
                 <span className="kind-icon">{KIND_ICONS[row.key]}</span>
                 <span className="kind-title">{row.title}</span>
-                {flag === "" ? null : <span className="kind-flag">needs {flag}</span>}
+                {flag === "" ? null : (
+                  <span className="kind-flag">{t("dock.needs", { missing: flag })}</span>
+                )}
               </button>
             </Tooltip>
           );
@@ -331,7 +335,7 @@ export default function WorkflowDock() {
               type="info"
               showIcon
               className="dock-alert"
-              message="Reading what the bound model can do..."
+              message={t("dock.readiness")}
             />
           ) : null}
 
@@ -340,13 +344,12 @@ export default function WorkflowDock() {
               type="warning"
               showIcon
               className="dock-alert"
-              message={`This model cannot ${active.title.toLowerCase()}`}
+              message={t("dock.blocked_title", { title: active.title })}
               description={
                 <>
-                  It is missing {missing.join(" and ")}. Switch the model, or turn the
-                  capability on in settings.
+                  {t("dock.blocked_hint", { missing: missingText })}
                   <Button size="small" type="link" onClick={openSettings}>
-                    Model settings
+                    {t("dock.settings_link")}
                   </Button>
                 </>
               }
@@ -366,10 +369,10 @@ export default function WorkflowDock() {
 
         {outcome ? (
           <div className="dock-result">
-            <div className="dock-result-summary">{outcome.summary}</div>
+            <div className="dock-result-summary">{renderUiText(lang, outcome.summary)}</div>
             {outcome.detail ? (
               <details className="dock-advanced">
-                <summary>Detail</summary>
+                <summary>{t("dock.detail")}</summary>
                 <pre>{JSON.stringify(outcome.detail, null, 2)}</pre>
               </details>
             ) : null}
@@ -387,12 +390,12 @@ export default function WorkflowDock() {
 /** 聊天那条没有 Run 按钮：它本身就是聊天面板，这里只负责把用户引过去。 */
 function AgentPanel() {
   const requestCompose = useStore((s) => s.requestCompose);
+  const t = useT();
 
   return (
     <>
       <p className="dock-note">
-        Ask in the chat panel. The agent reads the canvas first, then writes one sandboxed Lua
-        script per edit, so every change stays inside the document you see here.
+        {t("dock.agent_note")}
       </p>
       <Button
         block
@@ -404,13 +407,14 @@ function AgentPanel() {
           )
         }
       >
-        Put an ask in the composer
+        {t("dock.agent_composer")}
       </Button>
     </>
   );
 }
 
 function RefinePanel({ gated }: { gated: boolean }) {
+  const t = useT();
   const idea = useStore((s) => s.dockDraft.idea);
   const target = useStore((s) => s.refineTarget);
   const refined = useStore((s) => s.refined);
@@ -424,21 +428,24 @@ function RefinePanel({ gated }: { gated: boolean }) {
 
   return (
     <>
-      <Field label="Idea">
+      <Field label={t("dock.idea")}>
         <Input.TextArea
           value={idea}
           size="small"
           autoSize={{ minRows: 2, maxRows: 6 }}
-          placeholder="a fox blacksmith hammering at a forge"
+          placeholder={t("dock.idea_placeholder")}
           onChange={(event) => patchDraft({ idea: event.target.value })}
         />
       </Field>
-      <Field label="Target">
+      <Field label={t("dock.target")}>
         <Segmented
           size="small"
           block
           value={target}
-          options={REFINE_TARGET_OPTIONS}
+          options={[
+            { label: t("target.image_gen"), value: "image_gen" },
+            { label: t("target.shader"), value: "shader" },
+          ]}
           onChange={(next) => setRefineTarget(next as RefineTarget)}
         />
       </Field>
@@ -450,12 +457,12 @@ function RefinePanel({ gated }: { gated: boolean }) {
         disabled={gated || idea.trim() === ""}
         onClick={() => void refinePrompt(idea)}
       >
-        Refine
+        {t("dock.refine")}
       </Button>
 
       {refined ? (
         <>
-          <Field label="Refined prompt">
+          <Field label={t("dock.refined_prompt")}>
             <Input.TextArea
               value={prompt}
               size="small"
@@ -469,19 +476,19 @@ function RefinePanel({ gated }: { gated: boolean }) {
               icon={<ArrowRight size={13} />}
               onClick={() => usePromptInGen(prompt)}
             >
-              Use in image gen
+              {t("dock.use_in_gen")}
             </Button>
             <Button
               size="small"
               icon={<MessageSquare size={13} />}
               onClick={() => requestCompose(prompt)}
             >
-              Send to chat
+              {t("dock.send_to_chat")}
             </Button>
           </div>
           {refined.raw.trim() !== refined.prompt.trim() ? (
             <details className="dock-advanced">
-              <summary>The model said more</summary>
+              <summary>{t("dock.model_said_more")}</summary>
               <pre>{refined.raw}</pre>
             </details>
           ) : null}
@@ -492,6 +499,7 @@ function RefinePanel({ gated }: { gated: boolean }) {
 }
 
 function ImageGenPanel({ gated }: { gated: boolean }) {
+  const t = useT();
   const draft = useStore((s) => s.dockDraft);
   const busy = useStore((s) => s.workflowBusy);
   const patchDraft = useStore((s) => s.patchDraft);
@@ -499,16 +507,16 @@ function ImageGenPanel({ gated }: { gated: boolean }) {
 
   return (
     <>
-      <Field label="Prompt">
+      <Field label={t("dock.prompt")}>
         <Input.TextArea
           value={draft.prompt}
           size="small"
           autoSize={{ minRows: 3, maxRows: 10 }}
-          placeholder="16x16 sprite, hard edges, four colors, no antialiasing"
+          placeholder={t("dock.prompt_placeholder")}
           onChange={(event) => patchDraft({ prompt: event.target.value })}
         />
       </Field>
-      <Field label="Size">
+      <Field label={t("dock.size")}>
         <Select
           size="small"
           value={draft.size}
@@ -517,23 +525,26 @@ function ImageGenPanel({ gated }: { gated: boolean }) {
         />
       </Field>
       <PathField
-        label="Reference"
-        buttonLabel="Pick a reference image"
+        label={t("dock.reference")}
+        buttonLabel={t("dock.pick_reference")}
         extensions={IMAGE_EXTENSIONS}
         value={draft.genPath}
         onPick={(path) => patchDraft({ genPath: path })}
         onClear={() => patchDraft({ genPath: null })}
       />
-      <Field label="Landing">
+      <Field label={t("dock.landing")}>
         <Segmented
           size="small"
           block
           value={draft.spot}
-          options={SPOT_OPTIONS}
+          options={[
+            { label: t("spot.active_cel"), value: "active_cel" },
+            { label: t("spot.new_frame"), value: "new_frame" },
+          ]}
           onChange={(next) => patchDraft({ spot: next as LandSpot })}
         />
       </Field>
-      <Field label="Frame duration">
+      <Field label={t("dock.frame_duration")}>
         <InputNumber
           size="small"
           style={{ width: "100%" }}
@@ -566,13 +577,14 @@ function ImageGenPanel({ gated }: { gated: boolean }) {
           })
         }
       >
-        Generate
+        {t("dock.generate")}
       </Button>
     </>
   );
 }
 
 function VisionPanel({ gated }: { gated: boolean }) {
+  const t = useT();
   const path = useStore((s) => s.dockDraft.visionPath);
   const vision = useStore((s) => s.vision);
   const patchDraft = useStore((s) => s.patchDraft);
@@ -583,8 +595,8 @@ function VisionPanel({ gated }: { gated: boolean }) {
   return (
     <>
       <PathField
-        label="Reference"
-        buttonLabel="Pick a reference image"
+        label={t("dock.reference")}
+        buttonLabel={t("dock.pick_reference")}
         extensions={IMAGE_EXTENSIONS}
         value={path}
         onPick={(picked) => {
@@ -603,7 +615,7 @@ function VisionPanel({ gated }: { gated: boolean }) {
             if (vision) usePromptInGen(briefToText(vision));
           }}
         >
-          Draw from this
+          {t("dock.draw_from_this")}
         </Button>
         <Button
           size="small"
@@ -613,7 +625,7 @@ function VisionPanel({ gated }: { gated: boolean }) {
             if (vision) requestCompose(briefToText(vision));
           }}
         >
-          Send to chat
+          {t("dock.send_to_chat")}
         </Button>
       </div>
     </>
@@ -621,6 +633,7 @@ function VisionPanel({ gated }: { gated: boolean }) {
 }
 
 function VideoPanel({ gated }: { gated: boolean }) {
+  const t = useT();
   const draft = useStore((s) => s.dockDraft);
   const probe = useStore((s) => s.probe);
   const busy = useStore((s) => s.workflowBusy);
@@ -631,8 +644,8 @@ function VideoPanel({ gated }: { gated: boolean }) {
   return (
     <>
       <PathField
-        label="Clip"
-        buttonLabel="Pick a video"
+        label={t("dock.clip")}
+        buttonLabel={t("dock.pick_video")}
         extensions={VIDEO_EXTENSIONS}
         value={draft.videoPath}
         onPick={(picked) => {
@@ -646,14 +659,14 @@ function VideoPanel({ gated }: { gated: boolean }) {
           {baseName(draft.videoPath)} - {probeSummary(probe.probe, probe.source)}
         </p>
       ) : null}
-      <Field label="Frames to pull">
+      <Field label={t("dock.frames_to_pull")}>
         <InputNumber
           size="small"
           style={{ width: "100%" }}
           min={0}
           max={256}
           value={draft.videoCount}
-          addonAfter={draft.videoCount === 0 ? "= all" : "frame(s)"}
+          addonAfter={draft.videoCount === 0 ? t("dock.all_frames") : t("dock.frames_unit")}
           onChange={(next) => patchDraft({ videoCount: next ?? 0 })}
         />
       </Field>
@@ -677,13 +690,14 @@ function VideoPanel({ gated }: { gated: boolean }) {
           })
         }
       >
-        Pull frames
+        {t("dock.pull_frames")}
       </Button>
     </>
   );
 }
 
 function TweenPanel({ gated, frameCount }: { gated: boolean; frameCount: number }) {
+  const t = useT();
   const document = useStore((s) => s.document);
   const draft = useStore((s) => s.dockDraft);
   const busy = useStore((s) => s.workflowBusy);
@@ -703,15 +717,14 @@ function TweenPanel({ gated, frameCount }: { gated: boolean; frameCount: number 
   if (frameCount < 2) {
     return (
       <p className="dock-note">
-        Draw at least two frames first. The end frames are the ground truth; this only fills
-        what is in between.
+        {t("dock.tween_need_frames")}
       </p>
     );
   }
 
   return (
     <>
-      <Field label="From">
+      <Field label={t("dock.from")}>
         <Segmented
           size="small"
           block
@@ -720,7 +733,7 @@ function TweenPanel({ gated, frameCount }: { gated: boolean; frameCount: number 
           onChange={(next) => patchDraft({ tweenFrom: next })}
         />
       </Field>
-      <Field label="To">
+      <Field label={t("dock.to")}>
         <Segmented
           size="small"
           block
@@ -729,7 +742,7 @@ function TweenPanel({ gated, frameCount }: { gated: boolean; frameCount: number 
           onChange={(next) => patchDraft({ tweenTo: next })}
         />
       </Field>
-      <Field label={`Frames in between: ${draft.tweenCount}`}>
+      <Field label={t("dock.frames_in_between", { count: draft.tweenCount })}>
         <Slider
           min={1}
           max={32}
@@ -737,21 +750,29 @@ function TweenPanel({ gated, frameCount }: { gated: boolean; frameCount: number 
           onChange={(next) => patchDraft({ tweenCount: next })}
         />
       </Field>
-      <Field label="Mode">
+      <Field label={t("dock.mode")}>
         <Segmented
           size="small"
           block
           value={draft.tweenMode}
-          options={TWEEN_MODE_OPTIONS}
+          options={[
+            { label: t("tween.migrate"), value: "migrate" },
+            { label: t("tween.blend"), value: "blend" },
+            { label: t("tween.copy"), value: "copy" },
+          ]}
           onChange={(next) => patchDraft({ tweenMode: next as TweenMode })}
         />
       </Field>
-      <Field label="Order">
+      <Field label={t("dock.order")}>
         <Segmented
           size="small"
           block
           value={draft.tweenOrder}
-          options={TWEEN_ORDER_OPTIONS}
+          options={[
+            { label: t("order.scan"), value: "scan" },
+            { label: t("order.radial"), value: "radial" },
+            { label: t("order.scatter"), value: "scatter" },
+          ]}
           disabled={draft.tweenMode !== "migrate"}
           onChange={(next) => patchDraft({ tweenOrder: next as MigrateOrder })}
         />
@@ -762,7 +783,7 @@ function TweenPanel({ gated, frameCount }: { gated: boolean; frameCount: number 
           checked={draft.tweenEase}
           onChange={(next) => patchDraft({ tweenEase: next })}
         />
-        <span>Ease in and out</span>
+        <span>{t("dock.ease")}</span>
       </div>
       <Button
         block
@@ -783,13 +804,14 @@ function TweenPanel({ gated, frameCount }: { gated: boolean; frameCount: number 
           })
         }
       >
-        Insert
+        {t("dock.insert")}
       </Button>
     </>
   );
 }
 
 function QuantizePanel({ gated }: { gated: boolean }) {
+  const t = useT();
   const path = useStore((s) => s.dockDraft.quantizePath);
   const options = useStore((s) => s.dockDraft.options);
   const patchDraft = useStore((s) => s.patchDraft);
@@ -814,8 +836,8 @@ function QuantizePanel({ gated }: { gated: boolean }) {
   return (
     <>
       <PathField
-        label="Source"
-        buttonLabel="Pick an image"
+        label={t("dock.source")}
+        buttonLabel={t("dock.pick_image")}
         extensions={IMAGE_EXTENSIONS}
         value={path}
         onPick={(picked) => patchDraft({ quantizePath: picked })}
@@ -831,7 +853,7 @@ function QuantizePanel({ gated }: { gated: boolean }) {
         disabled={gated || path === null}
         onClick={() => void quantize()}
       >
-        Quantize
+        {t("dock.quantize")}
       </Button>
     </>
   );

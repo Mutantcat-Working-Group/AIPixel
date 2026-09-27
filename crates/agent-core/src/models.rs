@@ -3,6 +3,7 @@
 
 use super::workflows::WorkflowKind;
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -277,12 +278,37 @@ impl Default for RunnerConfig {
     }
 }
 
+/// 键控界面文案：Rust 只说键和变量，措辞由前端字典按当前语言拼。
+/// 字典缺键（版本错位）时退回 fallback，因此用户永远看得到一句完整的话。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UiText {
+    pub key: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub vars: BTreeMap<String, serde_json::Value>,
+    pub fallback: String,
+}
+
+impl UiText {
+    pub fn new(key: impl Into<String>, fallback: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            vars: BTreeMap::new(),
+            fallback: fallback.into(),
+        }
+    }
+
+    pub fn with(mut self, name: impl Into<String>, value: impl Into<serde_json::Value>) -> Self {
+        self.vars.insert(name.into(), value.into());
+        self
+    }
+}
+
 /// 广播给 UI 的进程事件（对应前作的 agent-event / agent-document）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AgentEvent {
     Status {
-        message: String,
+        message: UiText,
     },
     Token {
         text: String,

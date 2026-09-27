@@ -26,7 +26,7 @@ pub mod workflows;
 pub use models::{
     ActiveContext, AgentEvent, ApprovalDecision, Attachment, AttachmentRole, Capabilities,
     ChatRequest, ContentBlock, LlmEvent, Message, ModelConfig, PermissionMode, Protocol, Role,
-    RunnerConfig, ToolSpec,
+    RunnerConfig, ToolSpec, UiText,
 };
 pub use mcp::{
     namespaced_tool, McpClient, McpRegistry, McpServerConfig, McpTool, McpTransportConfig,

@@ -1,9 +1,11 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { ConfigProvider, theme } from "antd";
+import enUS from "antd/locale/en_US";
 import zhCN from "antd/locale/zh_CN";
 
 import App from "./App";
+import { useStore } from "./lib/store";
 import "./styles.css";
 
 // 深色工具向基调：主色继承老版本的蓝，暖色留给 agent 活动状态。
@@ -32,10 +34,21 @@ const themeConfig = {
   },
 };
 
-ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-  <React.StrictMode>
-    <ConfigProvider theme={themeConfig} locale={zhCN}>
+/** antd 自己的文案（分页、空描述）也跟着界面语言走。 */
+function LocaleShell() {
+  const lang = useStore((s) => s.lang);
+  React.useEffect(() => {
+    document.documentElement.lang = lang === "zh" ? "zh-CN" : "en";
+  }, [lang]);
+  return (
+    <ConfigProvider theme={themeConfig} locale={lang === "zh" ? zhCN : enUS}>
       <App />
     </ConfigProvider>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
+  <React.StrictMode>
+    <LocaleShell />
   </React.StrictMode>,
 );

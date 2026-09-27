@@ -8,41 +8,17 @@ import {
   InputNumber,
   Modal,
   Select,
+  Segmented,
   Tooltip,
 } from "antd";
 import { KeyRound, Plus, Star, Trash2 } from "lucide-react";
 
 import { useStore } from "../lib/store";
+import { LANG_OPTIONS, type Lang } from "../lib/i18n";
+import { useT } from "../lib/t";
 import type { Capabilities, ModelConfig, ModelView, Protocol } from "../lib/types";
 
-const PROTOCOL_OPTIONS: { label: string; value: Protocol }[] = [
-  { label: "Anthropic Messages", value: "anthropic" },
-  { label: "OpenAI-compatible", value: "open_ai_compat" },
-];
-
 const NO_CAPABILITIES: Capabilities = { vision: false, image_gen: false, video: false };
-
-const CAPABILITY_FIELDS: {
-  key: keyof Capabilities;
-  label: string;
-  hint: string;
-}[] = [
-  {
-    key: "vision",
-    label: "Read images",
-    hint: "Multimodal input: the model can look at a reference you attach.",
-  },
-  {
-    key: "image_gen",
-    label: "Generate images",
-    hint: "The model can return an image bitmap instead of only text.",
-  },
-  {
-    key: "video",
-    label: "Read video",
-    hint: "The model accepts video input, so frames can go straight to it.",
-  },
-];
 
 interface FormShape {
   label: string;
@@ -90,6 +66,9 @@ function ModelFragment({ title, hint }: { title: string; hint?: string }) {
 }
 
 export default function ModelSettingsModal() {
+  const t = useT();
+  const lang = useStore((s) => s.lang);
+  const setLang = useStore((s) => s.setLang);
   const open = useStore((s) => s.settingsOpen);
   const models = useStore((s) => s.models.entries);
   const activeId = useStore((s) => s.models.active_id);
@@ -104,6 +83,17 @@ export default function ModelSettingsModal() {
   const [error, setError] = useState<string | null>(null);
 
   const selected: ModelView | null = models.find((m) => m.id === selectedId) ?? null;
+
+  const protocolOptions: { label: string; value: Protocol }[] = [
+    { label: t("settings.protocol.anthropic"), value: "anthropic" },
+    { label: t("settings.protocol.openai"), value: "open_ai_compat" },
+  ];
+
+  const capabilityFields: { key: keyof Capabilities; label: string; hint: string }[] = [
+    { key: "vision", label: t("settings.cap.vision"), hint: t("settings.cap.vision.hint") },
+    { key: "image_gen", label: t("settings.cap.image_gen"), hint: t("settings.cap.image_gen.hint") },
+    { key: "video", label: t("settings.cap.video"), hint: t("settings.cap.video.hint") },
+  ];
 
   // 只在开关时决定选中项；保存后不抢焦点，避免选中项跳回激活模型。
   useEffect(() => {
@@ -150,22 +140,22 @@ export default function ModelSettingsModal() {
 
   return (
     <Modal
-      title="Models"
+      title={t("settings.title")}
       open={open}
       onCancel={closeSettings}
       width={720}
       className="model-modal"
       footer={[
         <Button key="close" onClick={closeSettings}>
-          Close
+          {t("settings.close")}
         </Button>,
         <Button key="save" type="primary" loading={submitting} onClick={save}>
-          Save
+          {t("settings.save")}
         </Button>,
       ]}
     >
       <div className="model-list">
-        {models.length === 0 ? <div className="model-empty">No models yet</div> : null}
+        {models.length === 0 ? <div className="model-empty">{t("settings.empty")}</div> : null}
         {models.map((model) => (
           <div
             key={model.id}
@@ -173,14 +163,14 @@ export default function ModelSettingsModal() {
             onClick={() => setSelectedId(model.id)}
           >
             {model.id === activeId ? (
-              <Tooltip title="active model">
+              <Tooltip title={t("settings.active")}>
                 <Star size={12} />
               </Tooltip>
             ) : (
               <span className="row-dot" />
             )}
             <span className="name">{model.label}</span>
-            {model.has_api_key ? null : <span className="no-key">no key</span>}
+            {model.has_api_key ? null : <span className="no-key">{t("settings.no_key")}</span>}
           </div>
         ))}
         <Button
@@ -195,56 +185,69 @@ export default function ModelSettingsModal() {
       </div>
 
       <div className="model-form">
+        <div className="model-lang">
+          <span className="model-lang-label">{t("settings.language")}</span>
+          <Segmented
+            size="small"
+            value={lang}
+            options={LANG_OPTIONS.map((option) => ({ label: option.label, value: option.value }))}
+            onChange={(value) => setLang(value as Lang)}
+          />
+        </div>
         <Form<FormShape> form={form} layout="vertical" requiredMark={false} preserve={false}>
           <Form.Item
             name="label"
-            label="Name"
-            rules={[{ required: true, message: "Name is required" }]}
+            label={t("settings.name")}
+            rules={[{ required: true, message: t("settings.name_required") }]}
           >
-            <Input placeholder="My Claude" spellCheck={false} />
+            <Input placeholder={t("settings.name_placeholder")} spellCheck={false} />
           </Form.Item>
 
-          <Form.Item name="protocol" label="Protocol">
-            <Select options={PROTOCOL_OPTIONS} />
+          <Form.Item name="protocol" label={t("settings.protocol")}>
+            <Select options={protocolOptions} />
           </Form.Item>
 
           <Form.Item
             name="base_url"
-            label="Base URL"
-            rules={[{ required: true, message: "Base URL is required" }]}
+            label={t("settings.base_url")}
+            rules={[{ required: true, message: t("settings.base_url_required") }]}
           >
-            <Input placeholder="https://api.anthropic.com/v1" spellCheck={false} />
+            <Input placeholder={t("settings.base_url_placeholder")} spellCheck={false} />
           </Form.Item>
 
           <Form.Item
             name="model"
-            label="Model"
-            rules={[{ required: true, message: "Model is required" }]}
+            label={t("settings.model")}
+            rules={[{ required: true, message: t("settings.model_required") }]}
           >
-            <Input placeholder="claude-sonnet-4-5" spellCheck={false} />
+            <Input placeholder={t("settings.model_placeholder")} spellCheck={false} />
           </Form.Item>
 
-          <Form.Item name="api_key" label="API key">
+          <Form.Item name="api_key" label={t("settings.api_key")}>
             <Input.Password
-              placeholder={selected?.has_api_key ? "Leave blank to keep stored key" : "sk-..."}
+              placeholder={
+                selected?.has_api_key
+                  ? t("settings.api_key_keep")
+                  : t("settings.api_key_placeholder")
+              }
               autoComplete="new-password"
               spellCheck={false}
             />
           </Form.Item>
 
-          <ModelFragment title="Sampling" />
-          <Form.Item name="max_tokens" label="Max tokens">
+          <ModelFragment title={t("settings.sampling")} />
+          <Form.Item name="max_tokens" label={t("settings.max_tokens")}>
             <InputNumber min={256} max={64000} step={256} style={{ width: "100%" }} />
           </Form.Item>
-          <Form.Item name="temperature" label="Temperature">
+          <Form.Item name="temperature" label={t("settings.temperature")}>
             <InputNumber min={0} max={2} step={0.1} style={{ width: "100%" }} />
           </Form.Item>
           <ModelFragment
-            title="Capabilities"
-            hint="declared by you, so the dock knows what this model can run"
+            title={t("settings.capabilities")}
+            hint={t("settings.capabilities_hint")}
           />
           <div className="cap-grid">
-            {CAPABILITY_FIELDS.map((field) => (
+            {capabilityFields.map((field) => (
               <Tooltip key={field.key} title={field.hint}>
                 <Form.Item name={["capabilities", field.key]} valuePropName="checked" noStyle>
                   <Checkbox>{field.label}</Checkbox>
@@ -259,14 +262,14 @@ export default function ModelSettingsModal() {
         <div className="model-form-actions">
           <span className="inline-note">
             <KeyRound size={11} />
-            {selected?.has_api_key ? "key stored locally" : "no key stored"}
+            {selected?.has_api_key ? t("settings.key_stored") : t("settings.no_key_stored")}
           </span>
           <span className="grow" />
           {selected ? (
             <>
               {selected.id !== activeId ? (
                 <Button size="small" onClick={() => void activateModel(selected.id)}>
-                  Set active
+                  {t("settings.set_active")}
                 </Button>
               ) : null}
               <Button
@@ -278,7 +281,7 @@ export default function ModelSettingsModal() {
                   setSelectedId(null);
                 }}
               >
-                Delete
+                {t("settings.delete")}
               </Button>
             </>
           ) : null}

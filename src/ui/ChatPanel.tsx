@@ -17,15 +17,19 @@ import {
 import { open } from "@tauri-apps/plugin-dialog";
 
 import { useStore } from "../lib/store";
+import { useT } from "../lib/t";
 import type { ApprovalDecision, PendingAttachment, TranscriptEntry } from "../lib/types";
 
-const IMAGE_FILTER = [{ name: "image", extensions: ["png", "jpg", "jpeg", "webp", "gif"] }];
+const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "webp", "gif"];
 
 function AttachChip({ item }: { item: PendingAttachment }) {
+  const t = useT();
   return (
     <span className={`attach-chip ${item.role}`}>
       <img src={item.previewUrl} alt="" />
-      <span className="role">{item.role === "snapshot" ? "snap" : "ref"}</span>
+      <span className="role">
+        {item.role === "snapshot" ? t("chat.role_snapshot") : t("chat.role_reference")}
+      </span>
       <span>{item.name}</span>
     </span>
   );
@@ -43,6 +47,7 @@ function ToolEntry({
   /** 这一条正是主循环停下来等决定的那条，状态文案要换。 */
   awaiting: boolean;
 }) {
+  const t = useT();
   const pending = entry.summary === null;
   const body = expanded ? (
     <div className="tool-body">
@@ -55,7 +60,7 @@ function ToolEntry({
         {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
         <span className="tool-name">{entry.name}</span>
         <span className="tool-summary">
-          {awaiting ? "waiting for approval" : pending ? "running..." : entry.summary}
+          {awaiting ? t("chat.awaiting") : pending ? t("chat.tool_running") : entry.summary}
         </span>
       </button>
       {body}
@@ -65,6 +70,7 @@ function ToolEntry({
 
 /** 审批卡：主循环停在一条工具调用上，只有这里能让它继续走。 */
 function ApprovalCard() {
+  const t = useT();
   const pending = useStore((s) => s.pendingApproval);
   if (!pending) return null;
   const resolve = (decision: ApprovalDecision) => () => {
@@ -75,21 +81,21 @@ function ApprovalCard() {
       <div className="approval-head">
         <ShieldQuestion size={13} />
         <span className="approval-name">{pending.name}</span>
-        <span className="approval-tag">awaiting approval</span>
+        <span className="approval-tag">{t("chat.awaiting")}</span>
       </div>
       <details className="approval-input">
-        <summary>Tool input</summary>
+        <summary>{t("chat.tool_input")}</summary>
         <pre>{JSON.stringify(pending.input, null, 2)}</pre>
       </details>
       <div className="approval-actions">
         <Button size="small" type="primary" icon={<Check size={13} />} onClick={resolve("approve")}>
-          Approve
+          {t("chat.approve")}
         </Button>
         <Button size="small" icon={<CheckCheck size={13} />} onClick={resolve("approve_all")}>
-          Approve all
+          {t("chat.approve_all")}
         </Button>
         <Button size="small" danger icon={<X size={13} />} onClick={resolve("reject")}>
-          Reject
+          {t("chat.reject")}
         </Button>
       </div>
     </div>
@@ -98,6 +104,7 @@ function ApprovalCard() {
 
 function EntryRow({ entry }: { entry: TranscriptEntry }) {
   const [expanded, setExpanded] = useState(false);
+  const t = useT();
   // 等待审批的调用要在对话流里标出来，否则用户不知道停在哪一条。
   const awaitingId = useStore((s) => s.pendingApproval?.callId ?? null);
   const toggle = () => setExpanded((v) => !v);
@@ -143,7 +150,7 @@ function EntryRow({ entry }: { entry: TranscriptEntry }) {
   if (entry.kind === "reasoning") {
     return (
       <details className="entry-reasoning">
-        <summary>Reasoning</summary>
+        <summary>{t("chat.reasoning")}</summary>
         <div className="reasoning-body">{entry.text}</div>
       </details>
     );
@@ -152,6 +159,7 @@ function EntryRow({ entry }: { entry: TranscriptEntry }) {
 }
 
 export default function ChatPanel() {
+  const t = useT();
   const entries = useStore((s) => s.entries);
   const running = useStore((s) => s.running);
   const attachments = useStore((s) => s.attachments);
@@ -173,7 +181,7 @@ export default function ChatPanel() {
   }, [compose]);
 
   async function pickReferenceImages() {
-    const picked = await open({ multiple: true, filters: IMAGE_FILTER });
+    const picked = await open({ multiple: true, filters: [{ name: t("dialog.image"), extensions: IMAGE_EXTENSIONS }] });
     if (!picked) return;
     const paths = Array.isArray(picked) ? picked : [picked];
     await useStore.getState().attachReferenceImages(paths);
@@ -196,15 +204,15 @@ export default function ChatPanel() {
     <section className="chat">
       <div className="chat-head">
         <MessageSquare size={13} />
-        <strong>Agent</strong>
+        <strong>{t("chat.title")}</strong>
         <span className="grow" />
-        {running ? <span className="chat-running">running</span> : null}
+        {running ? <span className="chat-running">{t("chat.running")}</span> : null}
       </div>
 
       <div className="panel-body transcript" ref={scrollRef}>
         {entries.length === 0 ? (
           <div className="chat-empty">
-            <p>Ask for a sprite, a palette, or a shader pass. The canvas is the only source of truth.</p>
+            <p>{t("chat.empty")}</p>
           </div>
         ) : (
           entries.map((entry) => <EntryRow key={entry.key} entry={entry} />)
@@ -222,7 +230,7 @@ export default function ChatPanel() {
                 <button
                   type="button"
                   className="remove"
-                  aria-label="remove"
+                  aria-label={t("chat.remove_attachment")}
                   onClick={() => useStore.getState().removeAttachment(item.key)}
                 >
                   <X size={12} />
@@ -237,7 +245,7 @@ export default function ChatPanel() {
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
             onKeyDown={onKeyDown}
-            placeholder="Describe the pixel art you want..."
+            placeholder={t("chat.placeholder")}
             autoSize={{ minRows: 2, maxRows: 8 }}
             disabled={running}
           />
@@ -245,10 +253,10 @@ export default function ChatPanel() {
 
         <div className="composer-hint">
           <span className="composer-actions">
-            <Tooltip title="Attach reference images (visual ground truth)">
+            <Tooltip title={t("chat.attach_reference")}>
               <Button size="small" type="text" icon={<ImagePlus size={14} />} onClick={pickReferenceImages} />
             </Tooltip>
-            <Tooltip title="Attach the current canvas as a snapshot (context only)">
+            <Tooltip title={t("chat.attach_snapshot")}>
               <Button
                 size="small"
                 type="text"
@@ -265,11 +273,11 @@ export default function ChatPanel() {
                 icon={<CircleStop size={14} />}
                 onClick={() => void useStore.getState().interrupt()}
               >
-                Stop
+                {t("chat.stop")}
               </Button>
             ) : (
               <Button size="small" type="primary" icon={<Send size={14} />} onClick={submit}>
-                Send
+                {t("chat.send")}
               </Button>
             )}
           </span>
