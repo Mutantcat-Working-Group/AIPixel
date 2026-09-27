@@ -7,6 +7,7 @@
 //! 1. `POST {base}/images/generations`，最早也最直接，OpenAI / Together / SiliconFlow 走这条。
 //! 2. `POST {base}/chat/completions` 带 `modalities: ["text","image"]`，
 //!    Gemini 图像模型和 OpenRouter 走这条，顺带还能吃参考图做垫图。
+//!
 //! 同一个 base_url 下两种都可能存在，所以这里按顺序试，只在「端点不存在」时降级；
 //! 其余错误（鉴权、参数、内容策略）必须原样抛出去，否则用户看到的会是莫名其妙的二次失败。
 
@@ -74,9 +75,10 @@ impl ImageGenerator for OpenAiCompatGenerator {
         match self.via_images(params).await {
             Ok(img) => Ok(img),
             // 端点不存在才降级。400 说明请求本身有问题，重试也是同样失败。
-            Err(ProviderError::Http { status, .. }) if matches!(status, 404 | 405 | 501) => {
-                self.via_chat(params).await
-            }
+            Err(ProviderError::Http {
+                status: 404 | 405 | 501,
+                ..
+            }) => self.via_chat(params).await,
             Err(e) => Err(e),
         }
     }
