@@ -11,9 +11,11 @@ import type {
   ApprovalDecision,
   EditorOperation,
   InkColor,
-  Message,
-  ModelConfig,
-  ModelsView,
+ Message,
+  McpServerConfig,
+  McpServersView,
+ ModelConfig,
+ ModelsView,
   PermissionMode,
   PixelDocument,
   SessionInfo,
@@ -46,6 +48,26 @@ export function removeModel(id: string): Promise<ModelsView> {
 
 export function setActiveModel(id: string): Promise<ModelsView> {
   return invoke<ModelsView>("model_set_active", { id });
+}
+
+export function listMcpServers(): Promise<McpServersView> {
+  return invoke<McpServersView>("mcp_list");
+}
+
+export function upsertMcpServer(config: McpServerConfig): Promise<McpServersView> {
+  return invoke<McpServersView>("mcp_upsert", { config });
+}
+
+export function removeMcpServer(name: string): Promise<McpServersView> {
+  return invoke<McpServersView>("mcp_remove", { name });
+}
+
+export function connectMcpServer(name: string): Promise<McpServersView> {
+  return invoke<McpServersView>("mcp_connect", { name });
+}
+
+export function disconnectMcpServer(name: string): Promise<McpServersView> {
+  return invoke<McpServersView>("mcp_disconnect", { name });
 }
 
 export function createSession(document?: PixelDocument): Promise<SessionInfo> {

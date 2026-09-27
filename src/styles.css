@@ -796,6 +796,127 @@ body {
   font-size: 11.5px;
 }
 
+/* ---------- 追加：MCP 工具服务器弹窗 ---------- */
+
+.mcp-modal .ant-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding-top: 16px;
+  max-height: min(70vh, 560px);
+  overflow-y: auto;
+}
+
+.mcp-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.mcp-empty {
+  color: var(--text-faint);
+  font-size: 12px;
+  padding: 10px 4px;
+  text-align: center;
+}
+
+.mcp-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  background: var(--bg-panel-2);
+  min-width: 0;
+}
+
+.mcp-row.active {
+  border-color: rgba(62, 155, 255, 0.35);
+  background: var(--accent-soft);
+}
+
+.mcp-row-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.mcp-row-name {
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 650;
+  word-break: break-all;
+}
+
+.mcp-error {
+  color: var(--danger);
+  font-size: 11.5px;
+  word-break: break-word;
+}
+
+.mcp-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.mcp-tool {
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 6px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  line-height: 18px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  cursor: default;
+}
+
+.mcp-tool:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.mcp-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+  min-width: 0;
+}
+
+.mcp-form-title {
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+.mcp-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.mcp-field > span {
+  color: var(--text-dim);
+  font-size: 11.5px;
+}
+
+.mcp-form-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .notice-bar {
   display: flex;
   align-items: center;

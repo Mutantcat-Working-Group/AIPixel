@@ -69,6 +69,19 @@ Reject 不当失败调用（不进退避计数）：喂一条 tool_result 让模
 系统提示词是「静态 craft 规则 + 动态 canvas 上下文」两段，见 `crates/agent-core/src/prompt.rs`。静态部分写工作流、像素与动画 craft、
 RLE 编码约定；动态部分由 `pixel_core::context` 按当前激活图层 / 帧实时生成。提示词经三份参照逆向 + 重构而来，不照抄任何一份。
 
+#### MCP 工具服务器
+
+主循环的能力不止三个内置工具。顶栏的插头图标打开「MCP tool servers」面板，可以挂用户自己的 MCP 服务器：stdio（拉起子进程、
+换行分隔 JSON-RPC）和 HTTP（JSON-RPC POST，兼容 SSE 响应）两种传输都支持，协议版本按 2025-06-18 / 2025-03-26 / 2024-11-05
+依次协商。配置落盘在 app config 目录的 `mcp.json`；勾了 Auto 的服务器在启动时自动连接，失败的只记错误、不阻塞启动。
+
+服务器上的工具以 `mcp__<server>__<tool>` 命名空间进入每轮的 tool specs，和内置像素工具并列交给模型。名字过长会被截断并加哈希
+后缀，调用时由 `crates/agent-core/src/mcp.rs` 的 registry 按最长前缀还原到具体服务器。MCP 调用同样过审批闸门：Ask 档位每个
+调用都停在 `approval_request` 上，Chat 档位把写操作挑出来拦；回灌结果和内置工具共用同一条截断预算。
+
+`env` / `headers` 只写在本机 `mcp.json`，界面视图只回键名不回值，凭据不回传 webview。编辑已有服务器时，值留空表示沿用本机旧值，
+整行删掉才清掉这个键。
+
 ### 五、`.aip` 格式
 
 `.aip` 是明文文本：宽高、调色板、图层、帧都在文本里，天然适合版本管理和人工微调。v2 把图层和帧提成一等公民，

@@ -20,8 +20,9 @@ use tokio::sync::oneshot;
 
 use super::models::{
     ActiveContext, AgentEvent, ApprovalDecision, Attachment, ChatRequest, ContentBlock, LlmEvent,
-    Message, ModelConfig, PermissionMode, Role, RunnerConfig,
+    Message, ModelConfig, PermissionMode, Role, RunnerConfig, ToolSpec,
 };
+use super::mcp::{self, McpRegistry};
 use super::prompt;
 use super::providers::{self, LlmProvider};
 use super::tools::{self, ToolOutcome};
@@ -60,6 +61,8 @@ pub struct AgentSession {
     cancelled: AtomicBool,
     /// 当前挂起的审批发送端；None 表示没有调用在等用户。
     approval: Mutex<Option<ApprovalSlot>>,
+    /// 用户自配的 MCP 工具服务器注册表；None 表示这个会话不接外部工具。
+    mcp: Option<Arc<McpRegistry>>,
 }
 
 impl AgentSession {
@@ -76,12 +79,25 @@ impl AgentSession {
             turn: AtomicUsize::new(0),
             cancelled: AtomicBool::new(false),
             approval: Mutex::new(None),
+            mcp: None,
         }
     }
 
     pub fn with_runner_config(mut self, config: RunnerConfig) -> Self {
         *self.runner_config.get_mut().unwrap() = config;
         self
+    }
+
+    /// 挂上 MCP 注册表：会话每轮把它 expose 的工具并进工具清单，
+    /// `mcp__*` 调用分流过去。注册表是共享的，会话换模型不影响连接。
+    pub fn with_mcp_registry(mut self, registry: Arc<McpRegistry>) -> Self {
+        self.mcp = Some(registry);
+        self
+    }
+
+    /// 本会话可见的 MCP 工具规格（没挂注册表就空）。
+    fn mcp_specs(&self) -> Vec<ToolSpec> {
+        self.mcp.as_ref().map(|r| r.specs()).unwrap_or_default()
     }
 
     pub fn id(&self) -> &str {
@@ -326,7 +342,12 @@ impl AgentSession {
                         runner_config.canvas_context_chars,
                     ),
                     messages: self.messages.lock().unwrap().clone(),
-                    tools: tools::specs(),
+                    // MCP 工具追加在内建 pixel_* 之后：模型每轮看到的都是当前真实能力。
+                    tools: {
+                        let mut specs = tools::specs();
+                        specs.extend(self.mcp_specs());
+                        specs
+                    },
                     max_tokens: engine
                         .config
                         .max_tokens
@@ -527,9 +548,32 @@ impl AgentSession {
                         is_error: true,
                     },
                     None => {
+                        let registry = self.mcp.clone();
+                        if call.name.starts_with(mcp::MCP_TOOL_PREFIX) {
+                            // 外部工具：分流到用户自配的 MCP 服务器，不进文档锁。
+                            match registry {
+                                Some(registry) => {
+                                    match registry.dispatch(&call.name, &call.input).await {
+                                        Ok(outcome) => outcome,
+                                        Err(e) => ToolOutcome {
+                                            content: e,
+                                            is_error: true,
+                                        },
+                                    }
+                                }
+                                None => ToolOutcome {
+                                    content: format!(
+                                        "no MCP registry is attached to this session, so {call} cannot run",
+                                        call = call.name
+                                    ),
+                                    is_error: true,
+                                },
+                            }
+                        } else {
                         let mut doc = self.document.lock().unwrap();
                         let active = self.active.lock().unwrap();
                         tools::execute(&mut doc, &active, &call.name, &call.input)
+                        }
                     }
                 };
 
@@ -578,7 +622,8 @@ impl AgentSession {
                 }
 
                 // 读操作不改文档，不推 DocumentUpdated。
-                if call.name != "pixel_read_canvas" {
+                // MCP 工具在文档之外跑（不回推文档事件）；读操作本来也不推。
+                if call.name != "pixel_read_canvas" && !call.name.starts_with(mcp::MCP_TOOL_PREFIX) {
                     let (revision, document) = {
                         let doc = self.document.lock().unwrap();
                         (

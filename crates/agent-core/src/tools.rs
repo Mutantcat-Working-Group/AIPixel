@@ -40,8 +40,8 @@ fn err(content: String) -> ToolOutcome {
 pub fn specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
-            name: "pixel_apply_operations",
-            description: "Apply ONE transaction of typed pixel/layer/frame/palette operations. Structure ops (create/move/delete/duplicate/rename layers and frames, set duration, add palette colors) and tiny precise pixel patches (set_pixels, stamp_grid, draw_shape, bucket_fill, clear_region). Fails atomically if any operation is invalid; the error names the failing operation index.",
+            name: "pixel_apply_operations".into(),
+            description: "Apply ONE transaction of typed pixel/layer/frame/palette operations. Structure ops (create/move/delete/duplicate/rename layers and frames, set duration, add palette colors) and tiny precise pixel patches (set_pixels, stamp_grid, draw_shape, bucket_fill, clear_region). Fails atomically if any operation is invalid; the error names the failing operation index.".into(),
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -82,8 +82,8 @@ pub fn specs() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
-            name: "pixel_read_canvas",
-            description: "Read the current canvas as an RLE grid. Pass {\"overview\": true} for a downsampled whole-canvas map on large canvases, or {\"region\": {x,y,width,height}} (up to 128x128) for an exact window. With no arguments it returns the active-layer window.",
+            name: "pixel_read_canvas".into(),
+            description: "Read the current canvas as an RLE grid. Pass {\"overview\": true} for a downsampled whole-canvas map on large canvases, or {\"region\": {x,y,width,height}} (up to 128x128) for an exact window. With no arguments it returns the active-layer window.".into(),
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -102,8 +102,8 @@ pub fn specs() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
-            name: "pixel_run_shader",
-            description: "Draw by running ONE sandboxed Lua script whose size is independent of the canvas. Supports pset/line/rect/ellipse/circle/flood/stamp/replace/outline/clear and pal/mix/hsv/alpha/hex/noise/rand. Pass animate=true to render every existing frame driven by phase/time. Use this for all artwork.",
+            name: "pixel_run_shader".into(),
+            description: "Draw by running ONE sandboxed Lua script whose size is independent of the canvas. Supports pset/line/rect/ellipse/circle/flood/stamp/replace/outline/clear and pal/mix/hsv/alpha/hex/noise/rand. Pass animate=true to render every existing frame driven by phase/time. Use this for all artwork.".into(),
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -115,8 +115,8 @@ pub fn specs() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
-            name: "pixel_tween_frames",
-            description: "Insert in-between frames between two existing frames. Use it when the user asks for tweening, in-betweens, motion between two poses, or a dissolve/fade between frame A and frame B. mode 'migrate' flips differing pixels in order (pixel-art-correct deformation), 'blend' interpolates colors, 'copy' is a placeholder holding the start frame.",
+            name: "pixel_tween_frames".into(),
+            description: "Insert in-between frames between two existing frames. Use it when the user asks for tweening, in-betweens, motion between two poses, or a dissolve/fade between frame A and frame B. mode 'migrate' flips differing pixels in order (pixel-art-correct deformation), 'blend' interpolates colors, 'copy' is a placeholder holding the start frame.".into(),
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -133,8 +133,8 @@ pub fn specs() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
-            name: "pixel_pixelize_image",
-            description: "Turn a bitmap (base64 PNG/JPEG, typically the output of an image-generation model) into indexed pixels on the target cel. Quantizes onto the canvas palette, reusing colors that are already close instead of bloating it. Use this to land a generated image onto the grid rather than describing it pixel by pixel.",
+            name: "pixel_pixelize_image".into(),
+            description: "Turn a bitmap (base64 PNG/JPEG, typically the output of an image-generation model) into indexed pixels on the target cel. Quantizes onto the canvas palette, reusing colors that are already close instead of bloating it. Use this to land a generated image onto the grid rather than describing it pixel by pixel.".into(),
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -717,7 +717,7 @@ mod tests {
                 spec.name
             );
             let handled = matches!(
-                spec.name,
+                spec.name.as_ref(),
                 "pixel_apply_operations"
                     | "pixel_read_canvas"
                     | "pixel_run_shader"

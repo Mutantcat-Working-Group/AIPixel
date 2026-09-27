@@ -102,6 +102,49 @@ export interface ActiveContext {
   color?: string | null;
 }
 
+/** MCP 传输的脱敏视图：env / headers 只有键名，明文凭据不回 webview。 */
+export interface McpTransportView {
+  kind: "stdio" | "http";
+  command: string;
+  args: string[];
+  env_keys: string[];
+  url: string;
+  header_keys: string[];
+}
+
+/** 一个 MCP 工具的视图。name 是命名空间后的全名，模型看到的就是它。 */
+export interface McpToolView {
+  name: string;
+  server: string;
+  tool: string;
+  description: string;
+}
+
+export interface McpServerView {
+  name: string;
+  transport: McpTransportView;
+  auto_connect: boolean;
+  connected: boolean;
+  tools: McpToolView[];
+  /** 最近一次连接失败的原因；连上了就是 null。 */
+  last_error: string | null;
+}
+
+export interface McpServersView {
+  entries: McpServerView[];
+}
+
+/** 发给 Rust 的服务器配置。env / headers 只出不进：视图永不回传明文。 */
+export type McpTransportConfig =
+  | { kind: "stdio"; command: string; args: string[]; env: Record<string, string> }
+  | { kind: "http"; url: string; headers: Record<string, string> };
+
+export interface McpServerConfig {
+  name: string;
+  transport: McpTransportConfig;
+  auto_connect: boolean;
+}
+
 export interface SessionInfo {
   id: string;
   model_id: string;

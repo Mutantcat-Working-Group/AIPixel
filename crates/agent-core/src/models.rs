@@ -2,6 +2,7 @@
 //! 全部可序列化，方便跨 Tauri 命令边界与未来的持久化层。
 
 use super::workflows::WorkflowKind;
+use std::borrow::Cow;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -195,8 +196,9 @@ impl Default for ActiveContext {
 /// 工具的对外描述（协议无关）。schema 为 JSON Schema。
 #[derive(Debug, Clone)]
 pub struct ToolSpec {
-    pub name: &'static str,
-    pub description: &'static str,
+    /// 内建工具编译期借用；MCP 工具运行时来自服务器，用 `Cow::Owned`。
+    pub name: Cow<'static, str>,
+    pub description: Cow<'static, str>,
     pub schema: serde_json::Value,
 }
 
