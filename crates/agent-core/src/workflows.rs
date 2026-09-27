@@ -58,81 +58,93 @@ impl WorkflowKind {
     }
 }
 
-/// 一条工作流的展示信息。`&'static str` 让它可以零成本各处传阅。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// 一条工作流的展示信息。字段用 String 而非 &'static str：
+/// 这个结构既要 Serialize（发给前端）也要 Deserialize（测试与将来读回配置），
+/// 借用生命周期过不了 Deserialize。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkflowInfo {
     pub kind: WorkflowKind,
-    pub id: &'static str,
-    pub title: &'static str,
-    pub summary: &'static str,
+    pub id: String,
+    pub title: String,
+    pub summary: String,
     pub needs: Capabilities,
     /// 跑完会得到什么，给 UI 当结果说明。
-    pub output: &'static str,
+    pub output: String,
+}
+
+impl WorkflowInfo {
+    fn new(
+        kind: WorkflowKind,
+        title: &str,
+        summary: &str,
+        needs: Capabilities,
+        output: &str,
+    ) -> Self {
+        WorkflowInfo {
+            kind,
+            id: kind.id().to_string(),
+            title: title.to_string(),
+            summary: summary.to_string(),
+            needs,
+            output: output.to_string(),
+        }
+    }
 }
 
 /// 全部工作流。顺序即 UI 展示顺序：常用的在前。
 pub fn catalog() -> Vec<WorkflowInfo> {
     vec![
-        WorkflowInfo {
-            kind: WorkflowKind::Agent,
-            id: "agent",
-            title: "Agent Draw",
-            summary: "Chat to draw. Runs one sandboxed Lua script per edit.",
-            needs: Capabilities::default(),
-            output: "Edited canvas document",
-        },
-        WorkflowInfo {
-            kind: WorkflowKind::ImageGen,
-            id: "image_gen",
-            title: "Image Generate",
-            summary: "Model renders a bitmap, then it is quantized onto the canvas grid.",
-            needs: Capabilities {
-                vision: false,
+        WorkflowInfo::new(
+            WorkflowKind::Agent,
+            "Agent Draw",
+            "Chat to draw. Runs one sandboxed Lua script per edit.",
+            Capabilities::default(),
+            "Edited canvas document",
+        ),
+        WorkflowInfo::new(
+            WorkflowKind::ImageGen,
+            "Image Generate",
+            "Model renders a bitmap, then it is quantized onto the canvas grid.",
+            Capabilities {
                 image_gen: true,
-                video: false,
+                ..Default::default()
             },
-            output: "One new cel of pixelized art",
-        },
-        WorkflowInfo {
-            kind: WorkflowKind::VisionBrief,
-            id: "vision_brief",
-            title: "Reference Brief",
-            summary: "A vision model reads your reference into a structured brief, then draws.",
-            needs: Capabilities {
+            "One new cel of pixelized art",
+        ),
+        WorkflowInfo::new(
+            WorkflowKind::VisionBrief,
+            "Reference Brief",
+            "A vision model reads your reference into a structured brief, then draws.",
+            Capabilities {
                 vision: true,
-                image_gen: false,
-                video: false,
+                ..Default::default()
             },
-            output: "Brief text plus a drawn canvas",
-        },
-        WorkflowInfo {
-            kind: WorkflowKind::VideoFrames,
-            id: "video_frames",
-            title: "Video Frames",
-            summary: "Pull key frames out of a clip, then draw each one on its own frame.",
-            needs: Capabilities {
-                vision: false,
-                image_gen: false,
+            "Brief text plus a drawn canvas",
+        ),
+        WorkflowInfo::new(
+            WorkflowKind::VideoFrames,
+            "Video Frames",
+            "Pull key frames out of a clip, then draw each one on its own frame.",
+            Capabilities {
                 video: true,
+                ..Default::default()
             },
-            output: "A frame sequence drawn from video stills",
-        },
-        WorkflowInfo {
-            kind: WorkflowKind::FrameTween,
-            id: "frame_tween",
-            title: "In-between",
-            summary: "Generate tween frames between two existing frames, on this machine.",
-            needs: Capabilities::default(),
-            output: "New frames inserted before the end frame",
-        },
-        WorkflowInfo {
-            kind: WorkflowKind::PromptRefine,
-            id: "prompt_refine",
-            title: "Prompt Refine",
-            summary: "Turn a plain sentence into a structured pixel-art prompt you can edit.",
-            needs: Capabilities::default(),
-            output: "A refined prompt you can send or keep editing",
-        },
+            "A frame sequence drawn from video stills",
+        ),
+        WorkflowInfo::new(
+            WorkflowKind::FrameTween,
+            "In-between",
+            "Generate tween frames between two existing frames, on this machine.",
+            Capabilities::default(),
+            "New frames inserted before the end frame",
+        ),
+        WorkflowInfo::new(
+            WorkflowKind::PromptRefine,
+            "Prompt Refine",
+            "Turn a plain sentence into a structured pixel-art prompt you can edit.",
+            Capabilities::default(),
+            "A refined prompt you can send or keep editing",
+        ),
     ]
 }
 
@@ -148,13 +160,15 @@ pub fn info(kind: WorkflowKind) -> WorkflowInfo {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum Readiness {
     Ready,
-    Blocked {
-        missing: Vec<&'static str>,
-    },
+    Blocked { missing: Vec<String> },
 }
 
 pub fn readiness(kind: WorkflowKind, caps: &Capabilities) -> Readiness {
-    let missing = caps.missing_for(kind);
+    let missing: Vec<String> = caps
+        .missing_for(kind)
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect();
     if missing.is_empty() {
         Readiness::Ready
     } else {
@@ -192,9 +206,18 @@ mod tests {
     #[test]
     fn each_model_backed_workflow_names_exactly_what_it_needs() {
         let none = Capabilities::default();
-        assert_eq!(none.missing_for(WorkflowKind::ImageGen), vec!["image_gen"]);
-        assert_eq!(none.missing_for(WorkflowKind::VisionBrief), vec!["vision"]);
-        assert_eq!(none.missing_for(WorkflowKind::VideoFrames), vec!["video"]);
+        assert_eq!(
+            none.missing_for(WorkflowKind::ImageGen),
+            vec!["image_gen".to_string()]
+        );
+        assert_eq!(
+            none.missing_for(WorkflowKind::VisionBrief),
+            vec!["vision".to_string()]
+        );
+        assert_eq!(
+            none.missing_for(WorkflowKind::VideoFrames),
+            vec!["video".to_string()]
+        );
 
         let all = Capabilities {
             vision: true,
@@ -213,7 +236,7 @@ mod tests {
     #[test]
     fn a_bare_model_still_gets_the_three_always_on_workflows() {
         let list = available(&Capabilities::default());
-        let ids: Vec<&str> = list.iter().map(|w| w.id).collect();
+        let ids: Vec<&str> = list.iter().map(|w| w.id.as_str()).collect();
         assert_eq!(ids, vec!["agent", "frame_tween", "prompt_refine"]);
     }
 
@@ -259,9 +282,12 @@ mod tests {
         assert_eq!(
             r,
             Readiness::Blocked {
-                missing: vec!["image_gen"]
+                missing: vec!["image_gen".to_string()]
             }
         );
-        assert_eq!(readiness(WorkflowKind::Agent, &Capabilities::default()), Readiness::Ready);
+        assert_eq!(
+            readiness(WorkflowKind::Agent, &Capabilities::default()),
+            Readiness::Ready
+        );
     }
 }

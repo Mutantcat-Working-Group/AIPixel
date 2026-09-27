@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use agent_core::{AgentSession, ModelConfig, Protocol};
+use agent_core::{AgentSession, Capabilities, ModelConfig, Protocol};
 use pixel_core::document::Document;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
@@ -35,6 +35,8 @@ pub struct ModelView {
     pub model: String,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
+    /// 用户勾选的能力；只透出布尔，不涉及任何凭证。
+    pub capabilities: Capabilities,
     pub has_api_key: bool,
 }
 
@@ -111,6 +113,7 @@ impl AppState {
                     model: m.model.clone(),
                     max_tokens: m.max_tokens,
                     temperature: m.temperature,
+                    capabilities: m.capabilities,
                     has_api_key: !m.api_key.trim().is_empty(),
                 })
                 .collect(),
@@ -132,6 +135,7 @@ impl AppState {
             model: String::new(),
             max_tokens: None,
             temperature: None,
+            capabilities: Capabilities::default(),
         }
     }
 

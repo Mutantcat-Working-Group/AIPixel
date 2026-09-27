@@ -1,6 +1,7 @@
 //! agent 数据模型：会话消息、Provider 配置、工具规格、运行事件。
 //! 全部可序列化，方便跨 Tauri 命令边界与未来的持久化层。
 
+use super::workflows::WorkflowKind;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +111,47 @@ pub struct ModelConfig {
     pub max_tokens: Option<u32>,
     #[serde(default)]
     pub temperature: Option<f32>,
+    /// 用户声明的模型能力，决定哪些工作流可跑（见 workflows.rs）。
+    #[serde(default)]
+    pub capabilities: Capabilities,
+}
+
+/// 用户模型的能力勾选。跟着模型配置一起持久化。
+///
+/// 刻意不做自动探测：探测要靠猜端点的返回，容易把「模型不支持」误判成「网络坏了」，
+/// 而且会让能力随对方服务端的静默变更而漂移。由用户声明，错了也能立刻自己改。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Capabilities {
+    /// 能读参考图（多模态输入）。
+    #[serde(default)]
+    pub vision: bool,
+    /// 能直接产出位图（images/generations 或 modalities 带 image）。
+    #[serde(default)]
+    pub image_gen: bool,
+    /// 能吃视频输入。
+    #[serde(default)]
+    pub video: bool,
+}
+
+impl Capabilities {
+    pub fn any(self) -> bool {
+        self.vision || self.image_gen || self.video
+    }
+
+    /// 这个工作流需要但当前模型没有的能力名，空列表表示齐了。
+    pub fn missing_for(self, kind: WorkflowKind) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        if kind.needs_vision() && !self.vision {
+            out.push("vision");
+        }
+        if kind.needs_image_gen() && !self.image_gen {
+            out.push("image_gen");
+        }
+        if kind.needs_video() && !self.video {
+            out.push("video");
+        }
+        out
+    }
 }
 
 /// 权限模式：Auto 直接执行；Chat/Ask 需要审批（工作台阶段接交互，主循环预留）。
