@@ -187,36 +187,6 @@ fn unparsed_brief(text: &str) -> VideoBrief {
     }
 }
 
-/// 把简报渲染成一段可注入系统提示词的文字。
-/// 空字段直接省略，避免 agent 读到 "motion: " 这种空头炮。
-pub fn render_for_prompt(brief: &VideoBrief) -> String {
-    let mut out =
-        String::from("MOTION BRIEF (from the user's video clip, read by a video model):\n");
-    let line = |out: &mut String, key: &str, value: &str| {
-        if !value.trim().is_empty() {
-            out.push_str(&format!("- {key}: {value}\n"));
-        }
-    };
-    line(&mut out, "subject", &brief.subject);
-    line(&mut out, "motion", &brief.motion);
-    if !brief.key_poses.is_empty() {
-        out.push_str(&format!(
-            "- key poses (in order): {}\n",
-            brief.key_poses.join(" | ")
-        ));
-    }
-    line(&mut out, "timing", &brief.timing);
-    if !brief.palette.is_empty() {
-        out.push_str(&format!(
-            "- palette (light to dark): {}\n",
-            brief.palette.join(", ")
-        ));
-    }
-    line(&mut out, "craft notes", &brief.craft_notes);
-    out.push_str("Follow the brief, but the canvas grid remains the authority: animate with pixel_run_shader, frame by frame, keeping the palette tight.\n");
-    out
-}
-
 /// 简报在 agent 工作流里要用的最小请求构造，单独拆出来便于测试。
 pub fn brief_request(
     frames: &[Attachment],
@@ -318,22 +288,6 @@ mod tests {
     }
 
     #[test]
-    fn render_skips_empty_fields_so_the_agent_does_not_read_blanks() {
-        let brief = VideoBrief {
-            subject: "a sword raise".into(),
-            key_poses: vec!["wind up".into(), "hold".into()],
-            ..Default::default()
-        };
-        let text = render_for_prompt(&brief);
-        assert!(text.contains("- subject: a sword raise"));
-        assert!(text.contains("- key poses (in order): wind up | hold"));
-        assert!(!text.contains("- motion:"), "{text}");
-        assert!(!text.contains("- timing:"), "{text}");
-        assert!(!text.contains("- palette"), "{text}");
-        assert!(text.contains("the canvas grid remains the authority"));
-    }
-
-    #[test]
     fn the_request_carries_the_frame_count_and_canvas_in_the_system_prompt() {
         let req = brief_request(&frames(3), 48, 32, None);
         assert!(req.system.contains("48x32"));
@@ -382,12 +336,8 @@ mod tests {
         assert_eq!(brief.craft_notes, "I think something moves, maybe.");
         assert_eq!(brief.raw, brief.craft_notes);
         assert_eq!(brief.key_poses, vec!["(unparsed reply)".to_string()]);
-        // 兜底出来的东西也得能渲染，不能是半成品。
-        let text = render_for_prompt(&brief);
-        assert!(
-            text.contains("- key poses (in order): (unparsed reply)"),
-            "{text}"
-        );
+        // 动作序列不能空：空 key_poses 会让简报读起来像张静止图。
+        assert!(!brief.key_poses.is_empty());
     }
 
     #[test]

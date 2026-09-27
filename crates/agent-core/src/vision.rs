@@ -108,32 +108,6 @@ pub async fn brief_reference(
     })
 }
 
-/// 把简报渲染成一段可注入系统提示词的文字。
-/// 空字段直接省略，避免 agent 读到 "subject: " 这种空头炮。
-pub fn render_for_prompt(brief: &VisionBrief) -> String {
-    let mut out = String::from(
-        "REFERENCE BRIEF (from the user's reference image, read by a vision model):\n",
-    );
-    let line = |out: &mut String, key: &str, value: &str| {
-        if !value.trim().is_empty() {
-            out.push_str(&format!("- {key}: {value}\n"));
-        }
-    };
-    line(&mut out, "subject", &brief.subject);
-    line(&mut out, "silhouette", &brief.silhouette);
-    if !brief.palette.is_empty() {
-        out.push_str(&format!(
-            "- palette (light to dark): {}\n",
-            brief.palette.join(", ")
-        ));
-    }
-    line(&mut out, "pose", &brief.pose_notes);
-    line(&mut out, "proportions", &brief.proportions);
-    line(&mut out, "craft notes", &brief.craft_notes);
-    out.push_str("Follow the brief, but the canvas grid remains the authority: draw with pixel_run_shader or pixel_apply_operations.\n");
-    out
-}
-
 /// 简报在 agent 工作流里要用的最小请求构造，单独拆出来便于测试。
 pub fn brief_request(attachment: &Attachment, width: u32, height: u32) -> ChatRequest {
     ChatRequest {
@@ -222,21 +196,6 @@ mod tests {
         };
         let err = brief_reference(&config, &snap, 32, 32).await.unwrap_err();
         assert!(err.to_string().contains("reference image"), "{err}");
-    }
-
-    #[test]
-    fn render_skips_empty_fields_so_the_agent_does_not_read_blanks() {
-        let brief = VisionBrief {
-            subject: "a knight".into(),
-            palette: vec!["#ffffff".into(), "#222222".into()],
-            ..Default::default()
-        };
-        let text = render_for_prompt(&brief);
-        assert!(text.contains("- subject: a knight"));
-        assert!(text.contains("- palette (light to dark): #ffffff, #222222"));
-        assert!(!text.contains("- silhouette:"), "{text}");
-        assert!(!text.contains("- pose:"), "{text}");
-        assert!(text.contains("the canvas grid remains the authority"));
     }
 
     #[test]

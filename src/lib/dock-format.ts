@@ -3,7 +3,11 @@
 
 import type { ProbeSource, VideoBrief, VideoProbe, VisionBrief } from "./types";
 
-/** 视觉简报压成一段提示词：标签用 snake_case，模型比中文标签更买账。 */
+/**
+ * 视觉简报压成一段提示词：标签用 snake_case，模型比中文标签更买账。
+ * palette 是生成简报时被要求「由亮到暗」排的，但收这段话的 agent 不知道，
+ * 不标注它就会把顺序当成随意罗列，丢掉明暗信息。
+ */
 export function briefToText(brief: VisionBrief): string {
   const rows: [string, string][] = [
     ["subject", brief.subject],
@@ -15,7 +19,9 @@ export function briefToText(brief: VisionBrief): string {
   const lines = rows
     .filter(([, text]) => text.trim() !== "")
     .map(([label, text]) => `${label}: ${text}`);
-  if (brief.palette.length > 0) lines.push(`palette: ${brief.palette.join(", ")}`);
+  if (brief.palette.length > 0) {
+    lines.push(`palette (light to dark): ${brief.palette.join(", ")}`);
+  }
   return lines.join("\n");
 }
 
@@ -34,7 +40,9 @@ export function videoBriefToText(brief: VideoBrief): string {
   const lines = rows
     .filter(([, text]) => text.trim() !== "")
     .map(([label, text]) => `${label}: ${text}`);
-  if (brief.palette.length > 0) lines.push(`palette: ${brief.palette.join(", ")}`);
+  if (brief.palette.length > 0) {
+    lines.push(`palette (light to dark): ${brief.palette.join(", ")}`);
+  }
   return lines.join("\n");
 }
 

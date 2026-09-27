@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 
 pub use super::models::Capabilities;
 
-/// 七条工作流。前五条覆盖「不同模型怎么做同一件事」，后两条是纯本地的编辑助手。
+/// 七条工作流。三条吃模型专有能力（生图、读图、读视频），其余只要有会话模型就能跑；
+/// 其中视频抽帧与补间是纯本机的，量化同理，不在能力目录里、单独挂在坞的末尾。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowKind {
@@ -20,7 +21,7 @@ pub enum WorkflowKind {
     ImageGen,
     /// 读图模型把参考图读成结构化简报，再交给 agent 主循环。
     VisionBrief,
-    /// 读视频模型/抽帧得到关键帧序列，逐帧量化或作为参考。
+    /// 抽帧得到关键帧序列，逐帧量化。纯本机，不请求模型。
     VideoFrames,
     /// 读视频模型把一段视频读成结构化运动简报，再交给 agent 主循环。
     VideoBrief,
@@ -40,12 +41,15 @@ impl WorkflowKind {
     }
 
     pub fn needs_video(self) -> bool {
-        matches!(self, WorkflowKind::VideoFrames | WorkflowKind::VideoBrief)
+        // 只有「模型真的要看视频」才算。video_frames 是 ffprobe 抽帧后逐帧量化，
+        // 全程在本机，把它挂在 capabilities.video 上会让没有读视频模型的用户
+        // 白丢一条能用的工作流，还会收到「去设置里开启读视频」这种错建议。
+        matches!(self, WorkflowKind::VideoBrief)
     }
 
     /// 纯本机、不请求模型的工作流。
     pub fn is_local(self) -> bool {
-        matches!(self, WorkflowKind::FrameTween)
+        matches!(self, WorkflowKind::FrameTween | WorkflowKind::VideoFrames)
     }
 
     pub fn id(self) -> &'static str {
@@ -127,11 +131,8 @@ pub fn catalog() -> Vec<WorkflowInfo> {
         WorkflowInfo::new(
             WorkflowKind::VideoFrames,
             "Video Frames",
-            "Pull key frames out of a clip, then draw each one on its own frame.",
-            Capabilities {
-                video: true,
-                ..Default::default()
-            },
+            "Pull key frames out of a clip and quantize each one onto its own frame.",
+            Capabilities::default(),
             "A frame sequence drawn from video stills",
         ),
         WorkflowInfo::new(
@@ -202,11 +203,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn agent_tween_and_refine_need_nothing() {
+    fn local_and_chat_workflows_need_nothing() {
         for kind in [
             WorkflowKind::Agent,
             WorkflowKind::FrameTween,
             WorkflowKind::PromptRefine,
+            WorkflowKind::VideoFrames,
         ] {
             assert_eq!(
                 Capabilities::default().missing_for(kind),
@@ -228,10 +230,6 @@ mod tests {
             vec!["vision".to_string()]
         );
         assert_eq!(
-            none.missing_for(WorkflowKind::VideoFrames),
-            vec!["video".to_string()]
-        );
-        assert_eq!(
             none.missing_for(WorkflowKind::VideoBrief),
             vec!["video".to_string()]
         );
@@ -244,7 +242,6 @@ mod tests {
         for kind in [
             WorkflowKind::ImageGen,
             WorkflowKind::VisionBrief,
-            WorkflowKind::VideoFrames,
             WorkflowKind::VideoBrief,
         ] {
             assert!(all.missing_for(kind).is_empty(), "{kind:?} should be ready");
@@ -252,10 +249,13 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_model_still_gets_the_three_always_on_workflows() {
+    fn a_bare_model_still_gets_every_workflow_that_needs_no_model_skill() {
         let list = available(&Capabilities::default());
         let ids: Vec<&str> = list.iter().map(|w| w.id.as_str()).collect();
-        assert_eq!(ids, vec!["agent", "frame_tween", "prompt_refine"]);
+        assert_eq!(
+            ids,
+            vec!["agent", "video_frames", "frame_tween", "prompt_refine"]
+        );
     }
 
     #[test]
@@ -271,10 +271,12 @@ mod tests {
     }
 
     #[test]
-    fn only_tween_is_local() {
+    fn only_the_on_machine_workflows_count_as_local() {
         assert!(WorkflowKind::FrameTween.is_local());
+        assert!(WorkflowKind::VideoFrames.is_local());
         assert!(!WorkflowKind::Agent.is_local());
         assert!(!WorkflowKind::ImageGen.is_local());
+        assert!(!WorkflowKind::VideoBrief.is_local());
     }
 
     #[test]
