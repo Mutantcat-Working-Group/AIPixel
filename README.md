@@ -25,9 +25,16 @@ Agent 会话与工作台都已落地：会话负责产出，工作台负责盯�
 用户气泡带附件条、助手消息带流式光标、工具调用可展开看 JSON 入参、推理片段折叠在 `<details>` 里；右侧 `src/ui/DocumentPanel.tsx` 把
 document 渲染成画布，图层 / 帧 / 调色板各一行，还能切到 `.aip` 原文。
 
-画布上方是 Brush / Fill 切换与撤销；帧那一行右边是新建、复制、删除、前后挪帧。落地逻辑在
-`src/lib/store.ts`：画笔的笔迹先在 `DocumentPanel` 的透明画布上增量预览，抬笔才整笔发给 Rust，
-改动统一经 `document_updated` 回到前端，画布只有一条刷新路径。
+画布上方是 Brush / Fill 切换与撤销，旁边是播放与洋葱皮；帧那一行右边是新建、复制、删除、前后挪帧。
+逐帧工具生成了帧却看不到动画是说不通的，所以播放用一个轻量 `setTimeout` 循环，帧号在前端本地走，
+不每帧打一次 IPC；洋葱皮把上一帧按 24% 透明度垫在当前帧底下，逐帧对位才有依据。
+面板底部把整个动画导出：GIF（无限循环，帧延时取文档自己的 `duration_ms`，短于 20ms 会被抬上去——
+GIF 的延时单位是厘秒，不少查看器把 0 当成立刻切帧）或 PNG 精灵表。编码全在 Rust 侧，
+合成的原料是调色板索引而不是位图像素，所以导出来的和画布上看到的是同一份东西。
+
+落地逻辑在 `src/lib/store.ts`：画笔的笔迹先在 `DocumentPanel` 的透明画布上增量预览，抬笔才整笔发给 Rust，
+改动统一经 `document_updated` 回到前端，画布只有一条刷新路径。单帧合成在 `src/lib/render.ts`，
+与 Rust 侧 `pixel_core::png::composite_pixel` 逐位对齐，两侧画出来的东西不会岔开。
 
 顶栏依次是当前会话绑定的模型、权限档位（Auto / Chat / Ask，决定每次工具调用要不要先问）、打开与另存 `.aip`、挂参考图、模型设置。
 没有配过模型时，`src/ui/StarterGate.tsx` 会把应用收成一张引导页。
@@ -50,7 +57,7 @@ document 渲染成画布，图层 / 帧 / 调色板各一行，还能切到 `.ai
 | --- | --- | --- |
 | Rust 壳 | `src-tauri/` | 应用状态托管、命令注册、`agent-event` 事件广播。只做桌面装配，没有业务逻辑；`src-tauri/src/editor.rs` 是工作台编辑器命令层（画笔 / 油漆桶 / 结构操作），与主循环共用同一把文档锁 |
 | Agent 主循环 | `crates/agent-core/` | prompt 组装、provider 流式、`tool_use` 抽取、工具执行、结果回填、续轮 |
-| 像素文档模型 | `crates/pixel-core/` | document 模型、类型化操作、RLE 上下文编码、`.aip` v2、Lua 沙箱着色器、PNG 导出 |
+| 像素文档模型 | `crates/pixel-core/` | document 模型、类型化操作、RLE 上下文编码、`.aip` v2、Lua 沙箱着色器、PNG / GIF / 精灵表导出 |
 | 前端 | `src/` | React + antd + zustand，只做渲染和输入；`src/lib/bridge.ts` 是唯一的 invoke / event 出口 |
 
 agent-core 不依赖 Tauri，是纯 Rust。它通过一个 `tokio::sync::mpsc` 通道向外吐 `AgentEvent`，由 Tauri 壳转成事件广播，
@@ -144,7 +151,7 @@ python3 img2aip_converter.py refer_img/banana_shadow.png
 ### 八、路线图
 
 - Agent 会话（已落地）：会话、对话流、六个工具、`.aip` 读写、BYOM 配置
-- 工作台（已落地）：Auto / Chat / Ask 三档审批、画笔与油漆桶（调色板选透明格即擦）、帧的新建 / 复制 / 删除 / 挪位、仅限直接编辑的撤销栈
+- 工作台（已落地）：Auto / Chat / Ask 三档审批、画笔与油漆桶（调色板选透明格即擦）、帧的新建 / 复制 / 删除 / 挪位、仅限直接编辑的撤销栈、播放预览、洋葱皮、GIF 与精灵表导出
 - 下一步：图层行的直接操作（显隐 / 透明度 / 排序）、批量与脚本化流程
 
 ### 参照与致谢

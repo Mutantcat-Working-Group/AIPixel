@@ -7,6 +7,7 @@ use pixel_core::document::{Document, Rgba};
 use pixel_core::ops::{self, PixelOperation};
 use pixel_core::rle;
 use pixel_core::shader::{self, ShaderBudget};
+use pixel_core::sheet;
 
 fn blank() -> Document {
     Document::new("test", 16, 16).expect("16x16 within limits")
@@ -391,4 +392,100 @@ fn document_json_round_trips_across_the_tauri_boundary() {
 #[test]
 fn document_rejects_oversized_canvas() {
     assert!(Document::new("huge", 2048, 16).is_err());
+}
+
+#[test]
+fn exported_animation_lands_on_disk_and_reads_back() {
+    use image::AnimationDecoder;
+    use std::io::Cursor;
+
+    // 两帧、两种颜色：导出的东西必须同时带对帧数和像素，只带对一样都不算能用。
+    let mut doc = blank();
+    ops::apply_one(
+        &mut doc,
+        &PixelOperation::CreateFrame {
+            after: None,
+            duration_ms: 90,
+            id: None,
+        },
+    )
+    .unwrap();
+    ops::apply_one(
+        &mut doc,
+        &PixelOperation::AddPaletteColors {
+            colors: vec!["#FF004D".into(), "#29ADFF".into()],
+        },
+    )
+    .unwrap();
+    // id 先取出来：&mut doc 之后不能再借 doc 读字段。
+    let layer = doc.layers[0].id.clone();
+    let first = doc.frames[0].id.clone();
+    let second = doc.frames[1].id.clone();
+    ops::apply_one(
+        &mut doc,
+        &PixelOperation::SetPixels {
+            layer: layer.clone(),
+            frame: first,
+            cells: vec![ops::PixelCell {
+                x: 0,
+                y: 0,
+                color: "#FF004D".into(),
+            }],
+        },
+    )
+    .unwrap();
+    ops::apply_one(
+        &mut doc,
+        &PixelOperation::SetPixels {
+            layer,
+            frame: second,
+            cells: vec![ops::PixelCell {
+                x: 0,
+                y: 0,
+                color: "#29ADFF".into(),
+            }],
+        },
+    )
+    .unwrap();
+    assert_ne!(doc.frames[0].id, doc.frames[1].id, "两帧必须是不同帧");
+
+    // 走真实的写入路径：命令层就是 std::fs::write(bytes)，这里不能绕过。
+    let path = std::env::temp_dir().join(format!("aipixel-flow-{}.gif", std::process::id()));
+    let bytes = sheet::encode_gif(&doc).expect("gif encodes");
+    std::fs::write(&path, &bytes).expect("gif lands on disk");
+
+    let from_disk = std::fs::read(&path).expect("gif reads back");
+    std::fs::remove_file(&path).ok();
+
+    let decoder = image::codecs::gif::GifDecoder::new(Cursor::new(from_disk)).expect("valid gif");
+    let frames = decoder
+        .into_frames()
+        .collect_frames()
+        .expect("frames decode");
+    assert_eq!(frames.len(), 2);
+    assert_eq!(
+        frames[0].buffer().get_pixel(0, 0).0,
+        [0xFF, 0x00, 0x4D, 0xFF]
+    );
+    assert_eq!(
+        frames[1].buffer().get_pixel(0, 0).0,
+        [0x29, 0xAD, 0xFF, 0xFF]
+    );
+
+    // 精灵表同理：落盘、回读、按行找回原来的帧。
+    let sheet_path = std::env::temp_dir().join(format!("aipixel-sheet-{}.png", std::process::id()));
+    let sheet_bytes =
+        pixel_core::png::encode_png(&sheet::spritesheet(&doc, 1)).expect("sheet encodes");
+    std::fs::write(&sheet_path, &sheet_bytes).expect("sheet lands on disk");
+    let loaded = image::load_from_memory(&sheet_bytes).expect("sheet parses");
+    assert_eq!(loaded.to_rgba8().dimensions(), (16, 32));
+    assert_eq!(
+        loaded.to_rgba8().get_pixel(0, 0).0,
+        [0xFF, 0x00, 0x4D, 0xFF]
+    );
+    assert_eq!(
+        loaded.to_rgba8().get_pixel(0, 16).0,
+        [0x29, 0xAD, 0xFF, 0xFF]
+    );
+    std::fs::remove_file(&sheet_path).ok();
 }
