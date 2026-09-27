@@ -11,9 +11,10 @@ use serde::{Deserialize, Serialize};
 
 /// 微调出来的提示词是给哪条链路用的。两条链路要的东西不一样：
 /// 写 Lua 脚本的 agent 要的是「结构与配色」；生图模型要的是「主体与镜头」。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RefineTarget {
+    #[default]
     Shader,
     ImageGen,
 }
