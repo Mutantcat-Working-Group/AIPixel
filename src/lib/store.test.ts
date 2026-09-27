@@ -45,7 +45,7 @@ describe("briefToText", () => {
         "subject: a fox blacksmith",
         "silhouette: round ears over a square apron",
         "pose: leaning forward, hammer raised",
-        "palette: #2b1d18, #c9603a, #f2d3a8",
+        "palette (light to dark): #2b1d18, #c9603a, #f2d3a8",
       ].join("\n"),
     );
   });
@@ -111,7 +111,7 @@ describe("videoBriefToText", () => {
         "key_poses: crouched, weight forward | wings half open | fully airborne",
         "timing: hop on 1, lift on 3, full wing on 5",
         "craft: hard edges, no motion blur",
-        "palette: #1b1b22, #3d4a6b, #e8e2d0",
+        "palette (light to dark): #1b1b22, #3d4a6b, #e8e2d0",
       ].join("\n"),
     );
   });

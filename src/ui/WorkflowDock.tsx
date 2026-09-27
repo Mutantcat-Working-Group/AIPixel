@@ -2,6 +2,7 @@
 // 目录跟着会话绑的模型算 readiness；被能力挡住的条目照样列出来，只是禁用并写清缺什么，
 // 不然用户只看到灰按钮，不知道为什么。
 // quantize 不在能力目录里（它不需要模型），但确实是常用的一条，所以单独挂在末尾。
+// 抽帧同理：它和补帧一样全程在本机，没有读视频模型也该跑得动。
 
 import { useMemo, type ReactNode } from "react";
 import { Alert, Button, Input, InputNumber, Segmented, Select, Slider, Switch, Tooltip } from "antd";
@@ -313,7 +314,8 @@ export default function WorkflowDock() {
   const active = rows.find((row) => row.key === kind) ?? rows[rows.length - 1];
   const missing = active.readiness.state === "blocked" ? active.readiness.missing : null;
   const missingText = missing ? missing.map((name) => missingLabel(name, t)).join(listSep(lang)) : "";
-  // quantize 纯本机，目录没取回来也跑得动；其余六条要等 readiness 说话。
+  // quantize、抽帧、补间都是纯本机的，不会因为缺能力被挡住；但 readiness 的消息
+  // 来自目录，所以目录没取回来之前照样要点不了。
   const pending = kind !== "quantize" && !catalogReady;
   const gated = busy || missing !== null || pending;
   const frameCount = document?.frames.length ?? 0;
