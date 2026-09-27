@@ -14,6 +14,16 @@ export interface Rgba {
   a: number;
 }
 
+/** 用户勾选的模型能力：决定哪些工作流跑得动（见 agent-core workflows.rs）。 */
+export interface Capabilities {
+  /** 能吃参考图（多模态输入）。 */
+  vision: boolean;
+  /** 能直接产出位图。 */
+  image_gen: boolean;
+  /** 能吃视频输入。 */
+  video: boolean;
+}
+
 export interface Layer {
   id: string;
   name: string;
@@ -65,6 +75,7 @@ export interface ModelConfig {
   model: string;
   max_tokens: number | null;
   temperature: number | null;
+  capabilities: Capabilities;
 }
 
 /** 回给前端的模型视图：只剩 has_api_key 标志，密钥不离开 Rust。 */
@@ -76,6 +87,7 @@ export interface ModelView {
   model: string;
   max_tokens: number | null;
   temperature: number | null;
+  capabilities: Capabilities;
   has_api_key: boolean;
 }
 
@@ -151,3 +163,173 @@ export type TranscriptEntry =
   | { key: string; kind: "notice"; text: string; isError: boolean };
 
 export type ToolName = "pixel_apply_operations" | "pixel_read_canvas" | "pixel_run_shader";
+
+// ---------- 工作流 ----------
+
+/** 六条工作流。前四条覆盖「不同模型怎么做同一件事」，后两条是编辑助手。 */
+export type WorkflowKind =
+  | "agent"
+  | "image_gen"
+  | "vision_brief"
+  | "video_frames"
+  | "frame_tween"
+  | "prompt_refine";
+
+/**
+ * 面板里可选的条目。比 WorkflowKind 多一个 quantize：把一张现成位图量化到画布上，
+ * 纯本机、不吃模型能力，所以它不进能力目录，但确实是常用的一条。
+ */
+export type DockKind = WorkflowKind | "quantize";
+
+export interface WorkflowInfo {
+  kind: WorkflowKind;
+  id: string;
+  title: string;
+  summary: string;
+  needs: Capabilities;
+  /** 跑完会得到什么，给 UI 当结果说明。 */
+  output: string;
+}
+
+/** 目录项：WorkflowInfo 在 Rust 侧是 #[serde(flatten)]，所以前台看到的是同一层字段。 */
+export interface WorkflowEntry extends WorkflowInfo {
+  readiness: Readiness;
+}
+
+/** 当前会话绑的模型跑不跑得动。 */
+export type Readiness =
+  | { state: "ready" }
+  | { state: "blocked"; missing: string[] };
+
+/** 位图落点：盖在当前 cel 上，还是新建一帧。 */
+export type LandSpot = "active_cel" | "new_frame";
+
+/** 提示词微调的用途：给 Lua shader 还是给生图模型。 */
+export type RefineTarget = "shader" | "image_gen";
+
+export type FitMode = "contain" | "stretch";
+
+export type TweenMode = "copy" | "blend" | "migrate";
+
+export type MigrateOrder = "scan" | "radial" | "scatter";
+
+export interface PixelizeOptions {
+  /** 从位图里最多提取多少种主色。 */
+  max_colors: number;
+  /** 命中画布已有调色板的容差。 */
+  snap_tolerance: number;
+  /** 允许为找不到近似色的主色新增调色板项。 */
+  expand_palette: boolean;
+  /** 有序抖动（Bayer 4x4）。 */
+  dither: boolean;
+  /** alpha 低于该值的像素视为透明（索引 0）。 */
+  alpha_threshold: number;
+  fit: FitMode;
+}
+
+export interface RefinedPrompt {
+  /** 微调后的提示词，用户要逐行改的就是这段。 */
+  prompt: string;
+  /** 模型原文，解析不全时留个痕迹。 */
+  raw: string;
+}
+
+export interface VisionBrief {
+  subject: string;
+  silhouette: string;
+  /** 主色到暗色的有序色板，hex。 */
+  palette: string[];
+  pose_notes: string;
+  proportions: string;
+  craft_notes: string;
+  raw: string;
+}
+
+export interface VideoProbe {
+  width: number | null;
+  height: number | null;
+  duration_s: number | null;
+  fps: number | null;
+  frame_count: number | null;
+  codec: string | null;
+  has_audio: boolean;
+}
+
+/** 信息是从哪儿来的：目录来源没有 fps / duration 可言，文案要跟着改。 */
+export type ProbeSource = "ffprobe" | "directory" | "none";
+
+export interface VideoProbeResult {
+  probe: VideoProbe;
+  source: ProbeSource;
+}
+
+export interface TweenParams {
+  from_frame: string;
+  to_frame: string;
+  count?: number;
+  mode?: TweenMode;
+  order?: MigrateOrder;
+  ease?: boolean;
+  duration_ms?: number;
+  layer?: string | null;
+}
+
+export interface PixelizeParams {
+  image_base64: string;
+  /** 裸 base64 时必须给；带 data: 前缀时忽略。 */
+  media_type?: string | null;
+  options?: PixelizeOptions | null;
+  layer?: string | null;
+  frame?: string | null;
+}
+
+export interface ImageGenParams {
+  prompt: string;
+  /** 形如 "1024x1024"，只有 chat modalities 传输认这个。 */
+  size?: string | null;
+  /** 垫图路径：拿一张图让模型照着改。 */
+  reference_path?: string | null;
+  options?: PixelizeOptions | null;
+  spot?: LandSpot;
+  duration_ms?: number;
+}
+
+export interface VideoFramesParams {
+  path: string;
+  /** 0 表示「全都要」。 */
+  count?: number;
+  options?: PixelizeOptions | null;
+  duration_ms?: number;
+}
+
+export interface WorkflowOutcome {
+  revision: number;
+  summary: string;
+  detail?: Record<string, unknown> | null;
+}
+
+/**
+ * 工作流坞七条面板共用的表单草稿。
+ * 放 store 里而不是坞组件里：切到画布看一眼调色板再切回来，刚敲的提示词不该丢。
+ */
+export interface DockDraft {
+  prompt: string;
+  /** 形如 "1024x1024"，只有 chat modalities 传输认这个。 */
+  size: string;
+  genPath: string | null;
+  spot: LandSpot;
+  durationMs: number;
+  options: PixelizeOptions;
+  idea: string;
+  visionPath: string | null;
+  videoPath: string | null;
+  /** 0 = 全都要，上限由 Rust 的 MAX_EXTRACT_FRAMES 管。 */
+  videoCount: number;
+  quantizePath: string | null;
+  tweenFrom: string;
+  tweenTo: string;
+  tweenCount: number;
+  tweenMode: TweenMode;
+  tweenOrder: MigrateOrder;
+  tweenEase: boolean;
+}

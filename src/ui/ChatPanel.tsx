@@ -109,12 +109,20 @@ export default function ChatPanel() {
   const attachments = useStore((s) => s.attachments);
   const [draft, setDraft] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
+  const compose = useStore((s) => s.composeRequest);
 
   useEffect(() => {
     const node = scrollRef.current;
     if (!node) return;
     node.scrollTop = node.scrollHeight;
   }, [entries]);
+
+  // 工作流坞「Send to chat」：已经有内容就追加，别把用户正写的半句吃掉。
+  useEffect(() => {
+    if (!compose) return;
+    const text = compose.text;
+    setDraft((prev) => (prev.trim() === "" ? text : `${prev}\n\n${text}`));
+  }, [compose]);
 
   async function pickReferenceImages() {
     const picked = await open({ multiple: true, filters: IMAGE_FILTER });

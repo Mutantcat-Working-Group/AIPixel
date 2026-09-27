@@ -7,6 +7,7 @@ import * as bridge from "./bridge";
 import {
   emptyTranscript,
   historyToTranscript,
+  pushNotice,
   pushUserMessage,
   reduceEvent,
   sealTranscript,
@@ -15,12 +16,25 @@ import type {
   ActiveContext,
   Attachment,
   AgentEvent,
+  DockKind,
+  DockDraft,
+  ImageGenParams,
   ModelConfig,
   ModelsView,
+  PixelizeParams,
   PendingAttachment,
   PermissionMode,
   PixelDocument,
+  PixelizeOptions,
+  RefinedPrompt,
+  RefineTarget,
   SessionInfo,
+  TweenParams,
+  VideoFramesParams,
+  VideoProbeResult,
+  VisionBrief,
+  WorkflowEntry,
+  WorkflowOutcome,
   TranscriptEntry,
   Usage,
 } from "./types";
@@ -34,7 +48,32 @@ export interface DocumentSnapshot {
   frameIndex: number;
 }
 
-interface StoreState extends DocumentSnapshot {
+/** 工作流面板的状态。目录跟着会话走：会话换绑模型，能力就变。 */
+export interface WorkflowState {
+  workflows: WorkflowEntry[];
+  /** 目录没取回来之前不让点 Run，否则用户以为工具坏了。 */
+  catalogReady: boolean;
+  kind: DockKind;
+  workflowBusy: boolean;
+  /** 最近一次跑完的回执；同时投一条 notice 进对话流。 */
+  outcome: WorkflowOutcome | null;
+  outcomeError: string | null;
+  /** 微调出来的提示词，要留着让用户逐行改。 */
+  refined: RefinedPrompt | null;
+  refineTarget: RefineTarget;
+  vision: VisionBrief | null;
+  probe: VideoProbeResult | null;
+  /** 微调结果的可编辑副本；用户改的就是这段，refined.prompt 留作原文对照。 */
+  refinedDraft: string;
+  dockDraft: DockDraft;
+  /** 交给聊天输入框的文本。带 nonce，同一句话发两次也能触发。 */
+  composeRequest: { text: string; nonce: number } | null;
+}
+
+/** 会动文档的四条工作流入参。image_gen / frame_tween / video_frames 走 runWorkflow。 */
+export type WorkflowParams = TweenParams | PixelizeParams | ImageGenParams | VideoFramesParams;
+
+interface StoreState extends DocumentSnapshot, WorkflowState {
   booted: boolean;
   models: ModelsView;
   sessions: SessionInfo[];
@@ -77,9 +116,60 @@ export interface StoreActions {
   clearNotice: () => void;
   openSettings: () => void;
   closeSettings: () => void;
+  refreshWorkflows: () => Promise<void>;
+  setKind: (kind: DockKind) => void;
+  setRefineTarget: (target: RefineTarget) => void;
+  runWorkflow: (
+    kind: DockKind,
+    params: WorkflowParams,
+  ) => Promise<WorkflowOutcome | null>;
+  runPixelize: (params: PixelizeParams) => Promise<WorkflowOutcome | null>;
+  refinePrompt: (idea: string) => Promise<void>;
+  briefReference: (path: string) => Promise<void>;
+  probeVideo: (path: string) => Promise<void>;
+  clearWorkflowResult: () => void;
+  patchDraft: (patch: Partial<DockDraft>) => void;
+  setRefinedPrompt: (text: string) => void;
+  /** 坞里的本机失败（读文件、解析）没法包成 Tauri 错误，从这里进回执和对话流。 */
+  surfaceError: (message: string) => void;
+  /** 把一段文本塞进聊天输入框；不让用户手动复制粘贴。 */
+  requestCompose: (text: string) => void;
+  /** 「用这条提示词生图」：写进生图面板并切过去。 */
+  usePromptInGen: (prompt: string) => void;
 }
 
 const EMPTY_MODELS: ModelsView = { active_id: "", entries: [] };
+
+/** 与 Rust `PixelizeOptions::default()` 一致；改了 Rust 要同步这里。 */
+const DEFAULT_OPTIONS: PixelizeOptions = {
+  max_colors: 32,
+  snap_tolerance: 12,
+  expand_palette: true,
+  dither: false,
+  alpha_threshold: 128,
+  fit: "contain",
+};
+
+const INITIAL_DOCK_DRAFT: DockDraft = {
+  prompt: "",
+  size: "1024x1024",
+  genPath: null,
+  spot: "new_frame",
+  durationMs: 83,
+  options: DEFAULT_OPTIONS,
+  idea: "",
+  visionPath: null,
+  videoPath: null,
+  videoCount: 4,
+  quantizePath: null,
+  // 帧 id 由文档决定，loadDocument 之后由坞按真实帧校正。
+  tweenFrom: "",
+  tweenTo: "",
+  tweenCount: 4,
+  tweenMode: "migrate",
+  tweenOrder: "scan",
+  tweenEase: true,
+};
 
 function dataUrl(mediaType: string, dataBase64: string): string {
   return `data:${mediaType};base64,${dataBase64}`;
@@ -94,6 +184,30 @@ function stripDataUrl(url: string): { mediaType: string; data: string } {
 function baseName(path: string): string {
   const parts = path.split(/[/\\]/);
   return parts[parts.length - 1] || path;
+}
+
+/** kind -> 命令。vision_brief / prompt_refine 不落文档，走各自的动作。 */
+function dispatchWorkflow(
+  id: string,
+  kind: DockKind,
+  params: WorkflowParams,
+): Promise<WorkflowOutcome> {
+  switch (kind) {
+    case "image_gen":
+      return bridge.workflowImageGen(id, params as ImageGenParams);
+    case "frame_tween":
+      return bridge.workflowTween(id, params as TweenParams);
+    case "video_frames":
+      return bridge.workflowVideoFrames(id, params as VideoFramesParams);
+    default:
+      return Promise.reject(new Error(`workflow ${kind} has no direct runner`));
+  }
+}
+
+/** Tauri 的 invoke 拒绝时给的是字符串而不是 Error，统一成一句能看的话。 */
+function workflowError(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return String(error);
 }
 
 let unlisten: (() => void) | null = null;
@@ -137,6 +251,16 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
   }
 
   async function loadDocument(id: string) {
+    // 换会话就把工作流面板的中间产物倒掉：上一条会话的提示词不属于这一条。
+    setState({
+      refined: null,
+      vision: null,
+      probe: null,
+      outcome: null,
+      outcomeError: null,
+      catalogReady: false,
+      refinedDraft: "",
+    });
     try {
       const messages = await bridge.agentHistory(id);
       setState({ entries: historyToTranscript(messages) });
@@ -160,6 +284,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     setState({ active });
     await bridge.setActive(id, active);
     await getState().refreshPng();
+    await getState().refreshWorkflows();
   }
 
   return {
@@ -181,6 +306,19 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     busy: false,
     notice: null,
     settingsOpen: false,
+    workflows: [],
+    catalogReady: false,
+    kind: "image_gen",
+    workflowBusy: false,
+    outcome: null,
+    outcomeError: null,
+    refined: null,
+    refineTarget: "image_gen",
+    vision: null,
+    probe: null,
+    refinedDraft: "",
+    dockDraft: INITIAL_DOCK_DRAFT,
+    composeRequest: null,
 
     boot: async () => {
       if (booting) return booting;
@@ -262,6 +400,8 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       setState({
         sessions: getState().sessions.map((s) => (s.id === id ? info : s)),
       });
+      // 能力跟着会话绑的模型走，换绑之后哪些工作流跑得动就变了。
+      await getState().refreshWorkflows();
     },
 
     setPermissionMode: async (mode) => {
@@ -311,6 +451,11 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     upsertModel: async (config) => {
       const models = await bridge.upsertModel(config);
       setState({ models });
+      // 改的是当前会话绑的那个模型，能力勾选就得重新反映到目录上。
+      const bound = getState().sessions.find((s) => s.id === getState().activeId);
+      if (!bound || bound.model_id === config.id) {
+        await getState().refreshWorkflows();
+      }
     },
 
     removeModel: async (id) => {
@@ -470,6 +615,172 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     openSettings: () => setState({ settingsOpen: true }),
 
     closeSettings: () => setState({ settingsOpen: false }),
+
+    refreshWorkflows: async () => {
+      const id = getState().activeId;
+      if (!id) {
+        setState({ workflows: [], catalogReady: false });
+        return;
+      }
+      try {
+        const workflows = await bridge.workflowCatalog(id);
+        setState({ workflows, catalogReady: true });
+      } catch {
+        // 会话刚建、模型还没绑好时会失败。不弹通知栏：每次切会话都弹就成噪音了。
+        setState({ workflows: [], catalogReady: false });
+      }
+    },
+
+    setKind: (kind) => {
+      // 换工作流就作废上一条回执：不同 kind 的 detail 字段含义不一样，混着看会误读。
+      setState({ kind, outcome: null, outcomeError: null });
+    },
+
+    setRefineTarget: (target) => setState({ refineTarget: target }),
+
+    runWorkflow: async (kind, params) => {
+      const id = getState().activeId;
+      if (!id) {
+        fail("还没有会话");
+        return null;
+      }
+      setState({ workflowBusy: true, outcomeError: null });
+      try {
+        const outcome = await dispatchWorkflow(id, kind, params);
+        setState({
+          outcome,
+          outcomeError: null,
+          entries: pushNotice(getState().entries, outcome.summary, false),
+        });
+        return outcome;
+      } catch (error) {
+        const message = workflowError(error);
+        setState({
+          outcome: null,
+          outcomeError: message,
+          entries: pushNotice(getState().entries, message, true),
+        });
+        return null;
+      } finally {
+        setState({ workflowBusy: false });
+      }
+    },
+
+    runPixelize: async (params) => {
+      const id = getState().activeId;
+      if (!id) {
+        fail("还没有会话");
+        return null;
+      }
+      setState({ workflowBusy: true, outcomeError: null });
+      try {
+        const outcome = await bridge.workflowPixelize(id, params);
+        setState({
+          outcome,
+          outcomeError: null,
+          entries: pushNotice(getState().entries, outcome.summary, false),
+        });
+        return outcome;
+      } catch (error) {
+        const message = workflowError(error);
+        setState({
+          outcome: null,
+          outcomeError: message,
+          entries: pushNotice(getState().entries, message, true),
+        });
+        return null;
+      } finally {
+        setState({ workflowBusy: false });
+      }
+    },
+
+    refinePrompt: async (idea) => {
+      const id = getState().activeId;
+      if (!id) {
+        fail("还没有会话");
+        return;
+      }
+      if (idea.trim() === "") {
+        fail("先写一句想法");
+        return;
+      }
+      setState({ workflowBusy: true, outcomeError: null, refined: null });
+      try {
+        // 宽高传 0：Rust 会拿画布的真实尺寸补，提示词里的比例才和画布对得上。
+        const refined = await bridge.promptRefine(
+          id,
+          idea,
+          0,
+          0,
+        getState().refineTarget,
+      );
+      setState({ refined, refinedDraft: refined.prompt, outcomeError: null });
+      } catch (error) {
+        setState({ outcomeError: workflowError(error) });
+      } finally {
+        setState({ workflowBusy: false });
+      }
+    },
+
+    briefReference: async (path) => {
+      const id = getState().activeId;
+      if (!id) {
+        fail("还没有会话");
+        return;
+      }
+      setState({ workflowBusy: true, outcomeError: null, vision: null });
+      try {
+        const vision = await bridge.visionBrief(id, path);
+        setState({ vision, outcomeError: null });
+      } catch (error) {
+        setState({ outcomeError: workflowError(error) });
+      } finally {
+        setState({ workflowBusy: false });
+      }
+    },
+
+    probeVideo: async (path) => {
+      setState({ workflowBusy: true, outcomeError: null, probe: null });
+      try {
+        const probe = await bridge.videoProbe(path);
+        setState({ probe, outcomeError: null });
+      } catch (error) {
+        setState({ outcomeError: workflowError(error) });
+      } finally {
+        setState({ workflowBusy: false });
+      }
+    },
+
+    clearWorkflowResult: () =>
+      setState({
+        outcome: null,
+        outcomeError: null,
+        refined: null,
+        vision: null,
+        probe: null,
+        refinedDraft: "",
+      }),
+
+    patchDraft: (patch) => setState({ dockDraft: { ...getState().dockDraft, ...patch } }),
+
+    setRefinedPrompt: (text) => setState({ refinedDraft: text }),
+
+    surfaceError: (message) =>
+      setState({
+        outcomeError: message,
+        entries: pushNotice(getState().entries, message, true),
+      }),
+
+    requestCompose: (text) =>
+      setState({ composeRequest: { text, nonce: Date.now() } }),
+
+    usePromptInGen: (prompt) =>
+      setState({
+        kind: "image_gen",
+        outcome: null,
+        outcomeError: null,
+        dockDraft: { ...getState().dockDraft, prompt },
+      }),
 
     refreshSessions: async () => {
       try {
