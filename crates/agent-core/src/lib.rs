@@ -17,6 +17,7 @@ pub mod prompt;
 pub mod providers;
 pub mod runner;
 pub mod tools;
+pub mod video;
 pub mod vision;
 pub mod workflows;
 
@@ -26,5 +27,6 @@ pub use models::{
 };
 pub use providers::{build_provider, EventStream, LlmProvider, ProviderError};
 pub use runner::AgentSession;
+pub use video::{extract_frames, probe, ProbeSource, VideoProbe};
 pub use vision::{brief_reference, render_for_prompt, VisionBrief};
 pub use workflows::{available, catalog, info, readiness, Readiness, WorkflowInfo, WorkflowKind};
