@@ -2,6 +2,7 @@
 //! 主循环在 agent-core，文档模型在 pixel-core，这里只做桌面端装配。
 
 mod commands;
+mod editor;
 mod state;
 mod workflow;
 
@@ -22,6 +23,7 @@ pub fn run() {
             commands::agent_document,
             commands::agent_history,
             commands::agent_interrupt,
+            commands::agent_resolve_approval,
             commands::agent_list_models,
             commands::agent_send_message,
             commands::agent_set_active,
@@ -47,6 +49,9 @@ pub fn run() {
             workflow::workflow_pixelize,
             workflow::workflow_tween,
             workflow::workflow_video_frames,
+            editor::editor_apply_ops,
+            editor::editor_fill,
+            editor::editor_paint_stroke,
         ])
         .run(tauri::generate_context!())
         .expect("error while running AIPixel");

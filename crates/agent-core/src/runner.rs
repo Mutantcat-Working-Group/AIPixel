@@ -16,10 +16,11 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::oneshot;
 
 use super::models::{
-    ActiveContext, AgentEvent, Attachment, ChatRequest, ContentBlock, LlmEvent, Message,
-    ModelConfig, PermissionMode, Role, RunnerConfig,
+    ActiveContext, AgentEvent, ApprovalDecision, Attachment, ChatRequest, ContentBlock, LlmEvent,
+    Message, ModelConfig, PermissionMode, Role, RunnerConfig,
 };
 use super::prompt;
 use super::providers::{self, LlmProvider};
@@ -32,6 +33,12 @@ struct PlannedCall {
     name: String,
     input: Value,
     parse_error: Option<String>,
+}
+
+/// 挂起中的审批。一个 turn 顺序执行工具，同时最多挂一条，所以单槽就够。
+struct ApprovalSlot {
+    call_id: String,
+    tx: oneshot::Sender<ApprovalDecision>,
 }
 
 /// 单个 agent 会话：持有文档（权威状态）、消息历史与 provider。
@@ -51,6 +58,8 @@ pub struct AgentSession {
     active: Mutex<ActiveContext>,
     turn: AtomicUsize,
     cancelled: AtomicBool,
+    /// 当前挂起的审批发送端；None 表示没有调用在等用户。
+    approval: Mutex<Option<ApprovalSlot>>,
 }
 
 impl AgentSession {
@@ -66,6 +75,7 @@ impl AgentSession {
             active: Mutex::new(active),
             turn: AtomicUsize::new(0),
             cancelled: AtomicBool::new(false),
+            approval: Mutex::new(None),
         }
     }
 
@@ -126,6 +136,24 @@ impl AgentSession {
         self.runner_config.lock().unwrap().permission = permission;
     }
 
+    /// 用户对一条挂起的工具调用给出决定。call_id 对不上说明这是过期决定
+    /// （新 turn 已经开始），直接拒绝而不是把它送进死队列。
+    pub fn resolve_approval(
+        &self,
+        call_id: &str,
+        decision: ApprovalDecision,
+    ) -> Result<(), String> {
+        let slot = self.approval.lock().unwrap().take();
+        match slot {
+            Some(pending) if pending.call_id == call_id => {
+                let _ = pending.tx.send(decision);
+                Ok(())
+            }
+            Some(_) => Err("approval request is stale".into()),
+            None => Err("no approval is pending".into()),
+        }
+    }
+
     pub fn history(&self) -> Vec<Message> {
         self.messages.lock().unwrap().clone()
     }
@@ -166,10 +194,49 @@ impl AgentSession {
 
     pub fn interrupt(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
+        // 有审批挂着的话，发送端一掉，等待中的主循环立刻收手，不会和用户赌手感。
+        self.approval.lock().unwrap().take();
     }
 
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
+    }
+
+    /// 挂起一条审批并等待用户决定。等待期间照样本轮询取消标志，
+    /// 所以中断不会把这一笔调用彻底卡死。Err(()) = 没人再会给这一笔发决定。
+    async fn await_approval(
+        &self,
+        tx: &UnboundedSender<AgentEvent>,
+        call: &PlannedCall,
+    ) -> Result<ApprovalDecision, ()> {
+        let (sender, mut receiver) = oneshot::channel();
+        {
+            // 上一轮的挂起没清掉就顶掉：turn 顺序执行，出现即异常，顶掉保证不死等。
+            let mut slot = self.approval.lock().unwrap();
+            *slot = Some(ApprovalSlot {
+                call_id: call.id.clone(),
+                tx: sender,
+            });
+        }
+        emit(
+            tx,
+            AgentEvent::ApprovalRequest {
+                call_id: call.id.clone(),
+                name: call.name.clone(),
+                input: call.input.clone(),
+            },
+        );
+        let mut tick = tokio::time::interval(Duration::from_millis(120));
+        loop {
+            tokio::select! {
+                decision = &mut receiver => return decision.map_err(|_| ()),
+                _ = tick.tick() => {
+                    if self.is_cancelled() {
+                        return Err(());
+                    }
+                }
+            }
+        }
     }
 
     /// 跑一个 turn：发一条用户消息，驱动模型通过工具改画布，直到它不再调工具。
@@ -216,7 +283,8 @@ impl AgentSession {
         });
 
         // 进入 turn 时快照一份预算，避免中途改设置导致行为漂移。
-        let runner_config = self.runner_config();
+        // mut：Ask 模式下用户点「本次放行」会把它降级成 Auto，只影响本 turn。
+        let mut runner_config = self.runner_config();
         let mut steps = 0usize;
         let mut last_failure: Option<(String, String)> = None;
         let mut failure_streak = 0usize;
@@ -401,18 +469,6 @@ impl AgentSession {
                 return;
             }
 
-            if runner_config.permission != PermissionMode::Auto {
-                emit(
-                    &tx,
-                    AgentEvent::Status {
-                        message: format!(
-                            "permission mode {:?} is not wired to an approval prompt yet; tools are executing directly",
-                            runner_config.permission
-                        ),
-                    },
-                );
-            }
-
             for call in calls {
                 if self.is_cancelled() {
                     emit(&tx, AgentEvent::Interrupted);
@@ -428,6 +484,40 @@ impl AgentSession {
                     return;
                 }
                 steps += 1;
+
+                // 权限门：放行之后才动文档。否掉不当失败调用（不进退避计数），
+                // 喂一条 tool_result 让模型换方向，对话继续。
+                if needs_approval(runner_config.permission, &call.name) {
+                    match self.await_approval(&tx, &call).await {
+                        Ok(ApprovalDecision::Approve) => {}
+                        Ok(ApprovalDecision::ApproveAll) => {
+                            // 「这次别烦了」只降级本 turn；会话配置不动。
+                            runner_config.permission = PermissionMode::Auto;
+                        }
+                        Ok(ApprovalDecision::Reject) => {
+                            emit(
+                                &tx,
+                                AgentEvent::ToolResult {
+                                    id: call.id.clone(),
+                                    name: call.name.clone(),
+                                    summary: "rejected by user".into(),
+                                    is_error: false,
+                                },
+                            );
+                            self.messages.lock().unwrap().push(Message::tool_result(
+                                call.id.clone(),
+                                "the user rejected this tool call. Do not retry it as-is; explain what you were about to do and ask how you should proceed.",
+                                false,
+                            ));
+                            continue;
+                        }
+                        // 没人再会给这一笔发决定（中断，或挂起被新 turn 顶掉）。
+                        Err(()) => {
+                            emit(&tx, AgentEvent::Interrupted);
+                            return;
+                        }
+                    }
+                }
 
                 let outcome: ToolOutcome = match &call.parse_error {
                     Some(e) => ToolOutcome {
@@ -511,6 +601,16 @@ fn doc_has_frame(doc: &Document, id: &str) -> bool {
     doc.frames.iter().any(|f| f.id == id)
 }
 
+/// 这次调用要不要审批。Auto 全放行；Ask 每个调用都问；Chat 放行只读的读回
+/// （读网格不改文档），写操作一律过问——用户要盯的是「模型在改我的画」。
+fn needs_approval(mode: PermissionMode, name: &str) -> bool {
+    match mode {
+        PermissionMode::Auto => false,
+        PermissionMode::Ask => true,
+        PermissionMode::Chat => name != "pixel_read_canvas",
+    }
+}
+
 fn emit(tx: &UnboundedSender<AgentEvent>, event: AgentEvent) {
     let _ = tx.send(event);
 }
@@ -528,4 +628,74 @@ fn summarize(content: &str) -> String {
     let mut out: String = first.chars().take(180).collect();
     out.push_str("...");
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pixel_core::document::Document;
+
+    fn session() -> AgentSession {
+        AgentSession::new("s1", ModelConfig {
+            id: "m1".into(),
+            label: "m1".into(),
+            protocol: super::super::models::Protocol::Anthropic,
+            base_url: "https://example.invalid".into(),
+            api_key: String::new(),
+            model: "test".into(),
+            max_tokens: None,
+            temperature: None,
+            capabilities: Default::default(),
+        }, Document::new("t", 8, 8).unwrap())
+    }
+
+    #[test]
+    fn auto_lets_everything_through_ask_gates_everything() {
+        assert!(!needs_approval(PermissionMode::Auto, "pixel_apply_operations"));
+        assert!(!needs_approval(PermissionMode::Auto, "pixel_run_shader"));
+        assert!(needs_approval(PermissionMode::Ask, "pixel_apply_operations"));
+        assert!(needs_approval(PermissionMode::Ask, "pixel_read_canvas"));
+    }
+
+    #[test]
+    fn chat_gates_writes_and_lets_reads_pass() {
+        assert!(needs_approval(PermissionMode::Chat, "pixel_apply_operations"));
+        assert!(needs_approval(PermissionMode::Chat, "pixel_run_shader"));
+        assert!(!needs_approval(PermissionMode::Chat, "pixel_read_canvas"));
+    }
+
+    #[tokio::test]
+    async fn resolving_without_a_pending_request_is_an_error() {
+        let s = session();
+        assert!(s.resolve_approval("nope", ApprovalDecision::Approve).is_err());
+    }
+
+    #[tokio::test]
+    async fn interrupt_clears_a_pending_approval_so_the_wait_unblocks() {
+        let s = session();
+        let (tx, mut rx) = oneshot::channel();
+        *s.approval.lock().unwrap() = Some(ApprovalSlot {
+            call_id: "call-1".into(),
+            tx,
+        });
+        s.interrupt();
+        // 发送端被 take 掉，等待端收到的是「通道关闭」，也就是取消，不是放行。
+        assert!(rx.try_recv().is_err());
+        assert!(s.is_cancelled());
+        assert!(s.resolve_approval("call-1", ApprovalDecision::Approve).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_decision_reaches_the_waiting_turn() {
+        let s = session();
+        let (tx, rx) = oneshot::channel();
+        *s.approval.lock().unwrap() = Some(ApprovalSlot {
+            call_id: "call-1".into(),
+            tx,
+        });
+        assert!(s.resolve_approval("call-1", ApprovalDecision::ApproveAll).is_ok());
+        assert_eq!(rx.await.unwrap(), ApprovalDecision::ApproveAll);
+        // 槽已空，同一笔再解决一次就是「没有挂起的审批」。
+        assert!(s.resolve_approval("call-1", ApprovalDecision::Approve).is_err());
+    }
 }

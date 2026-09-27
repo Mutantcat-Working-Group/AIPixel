@@ -2,19 +2,22 @@ import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Button, Input, Tooltip } from "antd";
 import {
   Camera,
+  Check,
+  CheckCheck,
   ChevronDown,
   ChevronRight,
   CircleStop,
   ImagePlus,
   MessageSquare,
   Send,
+  ShieldQuestion,
   Sparkles,
   X,
 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 
 import { useStore } from "../lib/store";
-import type { PendingAttachment, TranscriptEntry } from "../lib/types";
+import type { ApprovalDecision, PendingAttachment, TranscriptEntry } from "../lib/types";
 
 const IMAGE_FILTER = [{ name: "image", extensions: ["png", "jpg", "jpeg", "webp", "gif"] }];
 
@@ -32,10 +35,13 @@ function ToolEntry({
   entry,
   expanded,
   onToggle,
+  awaiting,
 }: {
   entry: Extract<TranscriptEntry, { kind: "tool" }>;
   expanded: boolean;
   onToggle: () => void;
+  /** 这一条正是主循环停下来等决定的那条，状态文案要换。 */
+  awaiting: boolean;
 }) {
   const pending = entry.summary === null;
   const body = expanded ? (
@@ -49,7 +55,7 @@ function ToolEntry({
         {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
         <span className="tool-name">{entry.name}</span>
         <span className="tool-summary">
-          {pending ? "running..." : entry.summary}
+          {awaiting ? "waiting for approval" : pending ? "running..." : entry.summary}
         </span>
       </button>
       {body}
@@ -57,8 +63,43 @@ function ToolEntry({
   );
 }
 
+/** 审批卡：主循环停在一条工具调用上，只有这里能让它继续走。 */
+function ApprovalCard() {
+  const pending = useStore((s) => s.pendingApproval);
+  if (!pending) return null;
+  const resolve = (decision: ApprovalDecision) => () => {
+    void useStore.getState().resolveApproval(decision);
+  };
+  return (
+    <div className="approval-card">
+      <div className="approval-head">
+        <ShieldQuestion size={13} />
+        <span className="approval-name">{pending.name}</span>
+        <span className="approval-tag">awaiting approval</span>
+      </div>
+      <details className="approval-input">
+        <summary>Tool input</summary>
+        <pre>{JSON.stringify(pending.input, null, 2)}</pre>
+      </details>
+      <div className="approval-actions">
+        <Button size="small" type="primary" icon={<Check size={13} />} onClick={resolve("approve")}>
+          Approve
+        </Button>
+        <Button size="small" icon={<CheckCheck size={13} />} onClick={resolve("approve_all")}>
+          Approve all
+        </Button>
+        <Button size="small" danger icon={<X size={13} />} onClick={resolve("reject")}>
+          Reject
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function EntryRow({ entry }: { entry: TranscriptEntry }) {
   const [expanded, setExpanded] = useState(false);
+  // 等待审批的调用要在对话流里标出来，否则用户不知道停在哪一条。
+  const awaitingId = useStore((s) => s.pendingApproval?.callId ?? null);
   const toggle = () => setExpanded((v) => !v);
 
   if (entry.kind === "user") {
@@ -90,7 +131,14 @@ function EntryRow({ entry }: { entry: TranscriptEntry }) {
     );
   }
   if (entry.kind === "tool") {
-    return <ToolEntry entry={entry} expanded={expanded} onToggle={toggle} />;
+    return (
+      <ToolEntry
+        entry={entry}
+        expanded={expanded}
+        onToggle={toggle}
+        awaiting={awaitingId === entry.id}
+      />
+    );
   }
   if (entry.kind === "reasoning") {
     return (
@@ -164,6 +212,7 @@ export default function ChatPanel() {
       </div>
 
       <div className="composer">
+        <ApprovalCard />
         {attachments.length > 0 ? (
           <div className="composer-pending">
             {attachments.map((item) => (

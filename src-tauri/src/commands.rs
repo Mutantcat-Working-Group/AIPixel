@@ -2,8 +2,8 @@
 //! 事件统一走 `agent-event` 通道，`AgentEvent` 自带 kind tag，前端按 kind 分派。
 
 use agent_core::{
-    ActiveContext, AgentEvent, AgentSession, Attachment, AttachmentRole, Message, ModelConfig,
-    PermissionMode,
+    ActiveContext, AgentEvent, AgentSession, ApprovalDecision, Attachment, AttachmentRole, Message,
+    ModelConfig, PermissionMode,
 };
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, State};
@@ -178,6 +178,18 @@ pub fn agent_send_message(
 pub fn agent_interrupt(state: State<'_, AppState>, id: String) -> Result<(), String> {
     state.session(&id)?.interrupt();
     Ok(())
+}
+
+/// 用户对一条挂起的工具调用给出决定。call_id 对不上（新一轮已经开始）会报错，
+/// 前端的审批卡片据此自己收起来，不会把一次过期点击当成放行。
+#[tauri::command]
+pub fn agent_resolve_approval(
+    state: State<'_, AppState>,
+    id: String,
+    call_id: String,
+    decision: ApprovalDecision,
+) -> Result<(), String> {
+    state.session(&id)?.resolve_approval(&call_id, decision)
 }
 
 /// 前端整体同步文档（打开 .aip、撤销、或工作台编辑后回灌），返回新 revision。

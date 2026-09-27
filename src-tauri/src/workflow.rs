@@ -522,7 +522,7 @@ pub fn workflow_pixelize(
 
 /// 文档被工作流改过之后，把新文档推回前端。和主循环的 DocumentUpdated 同一个通道，
 /// 前端因此只有一条刷新路径，不需要区分「这次是谁改的」。
-fn emit_document(app: &AppHandle, session: &AgentSession) -> u64 {
+pub(crate) fn emit_document(app: &AppHandle, session: &AgentSession) -> u64 {
     let revision = session.revision();
     let document = session.document_json();
     let _ = app.emit(

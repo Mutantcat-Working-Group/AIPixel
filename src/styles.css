@@ -1203,3 +1203,105 @@ body {
   grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
   gap: 4px 10px;
 }
+
+/* ---------- 工作台编辑器与审批 ---------- */
+
+/* 画布上方一行：工具切换 + 撤销。 */
+.canvas-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.tool-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+}
+
+/* 图片、笔迹画布、指针捕获面三层叠在同一尺寸上。 */
+.canvas-stack {
+  position: relative;
+  display: block;
+  line-height: 0;
+}
+
+.paint-layer,
+.canvas-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.paint-layer {
+  pointer-events: none;
+  image-rendering: pixelated;
+}
+
+.canvas-overlay {
+  cursor: crosshair;
+  /* 触屏上拖笔就是拖笔，别滚我的画布。 */
+  touch-action: none;
+}
+
+/* 审批卡：主循环停下来等决定，得比 composer 更抓眼。 */
+.approval-card {
+  border: 1px solid rgba(240, 166, 60, 0.45);
+  border-radius: var(--radius);
+  background: rgba(240, 166, 60, 0.08);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.approval-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--warm);
+  font-size: 12px;
+}
+
+.approval-name {
+  font-family: var(--mono);
+  color: var(--text);
+}
+
+.approval-tag {
+  margin-left: auto;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.approval-input {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.approval-input summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.approval-input pre {
+  margin: 6px 0 0;
+  padding: 7px 8px;
+  max-height: 140px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-panel-2);
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.approval-actions {
+  display: flex;
+  gap: 6px;
+}

@@ -19,13 +19,17 @@ AIPixel 把生图路径收窄成三条类型化工具，模型的自由度放到
 
 ### 二、界面
 
-Agent 会话优先，工作台随后。
+Agent 会话与工作台都已落地：会话负责产出，工作台负责盯着它、以及在画布上直接动手。
 
 左侧 `src/ui/SessionSidebar.tsx` 是会话列表，支持空白新建和带 WxH 的新建；中间 `src/ui/ChatPanel.tsx` 是对话流：
 用户气泡带附件条、助手消息带流式光标、工具调用可展开看 JSON 入参、推理片段折叠在 `<details>` 里；右侧 `src/ui/DocumentPanel.tsx` 把
 document 渲染成画布，图层 / 帧 / 调色板各一行，还能切到 `.aip` 原文。
 
-顶栏依次是当前会话绑定的模型、权限档位（Auto / Chat / Ask，后两档为工作台阶段预留审批）、打开与另存 `.aip`、挂参考图、模型设置。
+画布上方是 Brush / Fill 切换与撤销；帧那一行右边是新建、复制、删除、前后挪帧。落地逻辑在
+`src/lib/store.ts`：画笔的笔迹先在 `DocumentPanel` 的透明画布上增量预览，抬笔才整笔发给 Rust，
+改动统一经 `document_updated` 回到前端，画布只有一条刷新路径。
+
+顶栏依次是当前会话绑定的模型、权限档位（Auto / Chat / Ask，决定每次工具调用要不要先问）、打开与另存 `.aip`、挂参考图、模型设置。
 没有配过模型时，`src/ui/StarterGate.tsx` 会把应用收成一张引导页。
 
 ### 三、架构
@@ -34,7 +38,7 @@ document 渲染成画布，图层 / 帧 / 调色板各一行，还能切到 `.ai
 
 | 层 | 位置 | 职责 |
 | --- | --- | --- |
-| Rust 壳 | `src-tauri/` | 应用状态托管、命令注册、`agent-event` 事件广播。只做桌面装配，没有业务逻辑 |
+| Rust 壳 | `src-tauri/` | 应用状态托管、命令注册、`agent-event` 事件广播。只做桌面装配，没有业务逻辑；`src-tauri/src/editor.rs` 是工作台编辑器命令层（画笔 / 油漆桶 / 结构操作），与主循环共用同一把文档锁 |
 | Agent 主循环 | `crates/agent-core/` | prompt 组装、provider 流式、`tool_use` 抽取、工具执行、结果回填、续轮 |
 | 像素文档模型 | `crates/pixel-core/` | document 模型、类型化操作、RLE 上下文编码、`.aip` v2、Lua 沙箱着色器、PNG 导出 |
 | 前端 | `src/` | React + antd + zustand，只做渲染和输入；`src/lib/bridge.ts` 是唯一的 invoke / event 出口 |
@@ -47,7 +51,7 @@ agent-core 不依赖 Tauri，是纯 Rust。它通过一个 `tokio::sync::mpsc` �
 一次发送的流程：`prompt admission -> provider 流式输出 -> tool_use -> 工具执行 -> 结果回填 -> 续轮`。
 每轮都重新组装系统提示词，因为上一轮的工具可能已经改过 canvas。模型能用的工具只有三个：
 
-- `pixel_apply_operations`：一次事务里做一坨类型化操作。图层 / 帧 / 调色板的结构改动走这里，也可以用 `set_pixels`、`stamp_grid`、`draw_shape`、`bucket_fill`、`clear_region` 打小补丁。任一操作非法则整事务回滚，错误信息会指出失败的操作下标
+- `pixel_apply_operations`：一次事务里做一坨类型化操作。图层 / 帧 / 调色板的结构改动走这里（建、复制、挪、删、改名、设时长），也可以用 `set_pixels`、`stamp_grid`、`draw_shape`、`bucket_fill`、`clear_region` 打小补丁。任一操作非法则整事务回滚，错误信息会指出失败的操作下标
 - `pixel_run_shader`：一段 Lua 脚本，配一次事务的绘制与动画。带 Loops 与 palette helpers，`animate=true` 时按 `phase`（0..1）驱动每一帧
 - `pixel_read_canvas`：读回当前网格，`overview=true` 时给降采样地图，最多读 128x128 的精确窗口
 
@@ -55,6 +59,12 @@ agent-core 不依赖 Tauri，是纯 Rust。它通过一个 `tokio::sync::mpsc` �
 
 预算与退避保护同样在主循环里：`max_tool_steps`（单 turn 工具步数，默认 24）、`max_turns`（续轮次数，默认 12）、
 `max_tool_result_bytes`（回灌截断，默认 6000 字符），外加同一个失败调用连续 3 次的退避。流式期间按 120ms 轮询取消标志，`interrupt()` 立刻收尾。
+
+审批闸门是权限档位的落点，见 `crates/agent-core/src/runner.rs` 的 `await_approval`：Auto 每个调用直接执行；
+Ask 每个调用都停在 `approval_request` 上等用户；Chat 只拦写操作，`pixel_read_canvas` 这种只读回放直接过。
+一个 turn 顺序执行工具，同时最多挂一条等票；等待期间照样本轮询取消标志，所以中断不会把后半场卡死。
+Approve all 只把当前 turn 降级成 Auto，不写回会话配置——「这次别烦我」不是「以后都别问」。
+Reject 不当失败调用（不进退避计数）：喂一条 tool_result 让模型解释它想干什么、换方向，对话继续。
 
 系统提示词是「静态 craft 规则 + 动态 canvas 上下文」两段，见 `crates/agent-core/src/prompt.rs`。静态部分写工作流、像素与动画 craft、
 RLE 编码约定；动态部分由 `pixel_core::context` 按当前激活图层 / 帧实时生成。提示词与工具契约按本项目自己的约束重做。
@@ -103,8 +113,9 @@ python3 img2aip_converter.py refer_img/banana_shadow.png
 
 ### 八、路线图
 
-- Agent 会话（当前）：会话、对话流、三个工具、`.aip` 读写、BYOM 配置
-- 工作台（随后）：Chat / Ask 审批档落地、画笔与调色板的直接操作、帧时间轴、批量与脚本化流程
+- Agent 会话（已落地）：会话、对话流、三个工具、`.aip` 读写、BYOM 配置
+- 工作台（已落地）：Auto / Chat / Ask 三档审批、画笔与油漆桶（调色板选透明格即擦）、帧的新建 / 复制 / 删除 / 挪位、仅限直接编辑的撤销栈
+- 下一步：图层行的直接操作（显隐 / 透明度 / 排序）、批量与脚本化流程
 
 ### 参照与致谢
 

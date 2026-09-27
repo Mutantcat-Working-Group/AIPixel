@@ -154,13 +154,23 @@ impl Capabilities {
     }
 }
 
-/// 权限模式：Auto 直接执行；Chat/Ask 需要审批（工作台阶段接交互，主循环预留）。
+/// 权限模式：Auto 直接执行；Ask 每个调用都问；Chat 只拦写操作（读回网格直接放行）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionMode {
     Auto,
     Chat,
     Ask,
+}
+
+/// 一条待审批工具调用的用户决定。ApproveAll 只把当前 turn 降级成 Auto，
+/// 不写回会话：用户说的是「这次别烦我」，不是「以后都别问」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalDecision {
+    Approve,
+    Reject,
+    ApproveAll,
 }
 
 /// 编辑器当前激活的图层 / 帧 / 笔刷颜色，注入提示词与工具调用。
@@ -281,6 +291,12 @@ pub enum AgentEvent {
     /// 一次工具调用已定型（含完整入参）。
     ToolCall {
         id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+    /// 权限模式要求审批：主循环停在这一步，等 `resolve_approval` 给决定。
+    ApprovalRequest {
+        call_id: String,
         name: String,
         input: serde_json::Value,
     },

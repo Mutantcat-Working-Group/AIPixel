@@ -23,8 +23,9 @@ pub mod vision;
 pub mod workflows;
 
 pub use models::{
-    ActiveContext, AgentEvent, Attachment, AttachmentRole, Capabilities, ChatRequest, ContentBlock,
-    LlmEvent, Message, ModelConfig, PermissionMode, Protocol, Role, RunnerConfig, ToolSpec,
+    ActiveContext, AgentEvent, ApprovalDecision, Attachment, AttachmentRole, Capabilities,
+    ChatRequest, ContentBlock, LlmEvent, Message, ModelConfig, PermissionMode, Protocol, Role,
+    RunnerConfig, ToolSpec,
 };
 pub use providers::{build_provider, EventStream, LlmProvider, ProviderError};
 pub use refine::{refine, RefineRequest, RefineTarget, RefinedPrompt};
