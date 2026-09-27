@@ -105,6 +105,10 @@ pnpm test           # vitest
 # 桌面端
 pnpm tauri dev      # 完整桌面调试
 
+`pnpm tauri dev` 自己会再拉一个 vite。要是 1420 已经被 `pnpm dev` 占着，先关掉那个再跑，
+否则前端会热更新到新代码、Rust 侧却还是上一个二进制，界面就会出现「Command xxx not found」
+这种前后端版本错位的报错。
+
 # Rust 侧
 cargo test --workspace
 ```
