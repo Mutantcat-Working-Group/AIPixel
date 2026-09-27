@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"AIPixel 主窗口权限：自带模型直连、本地文件读写、窗口能力。","local":true,"windows":["main"],"permissions":["core:default","core:window:allow-start-dragging","core:window:allow-set-title","opener:default","dialog:default"]}}

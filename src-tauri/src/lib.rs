@@ -1,0 +1,44 @@
+//! AIPixel 的 Tauri 外壳：应用状态托管、命令注册与事件桥。
+//! 主循环在 agent-core，文档模型在 pixel-core，这里只做桌面端装配。
+
+mod commands;
+mod state;
+
+use tauri::Manager;
+
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
+        .manage(state::AppState::default())
+        .setup(|app| {
+            let handle = app.handle().clone();
+            let app_state = handle.state::<state::AppState>();
+            app_state.bootstrap(&handle)?;
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            commands::agent_document,
+            commands::agent_history,
+            commands::agent_interrupt,
+            commands::agent_list_models,
+            commands::agent_send_message,
+            commands::agent_set_active,
+            commands::agent_set_permission,
+            commands::agent_sync_document,
+            commands::aip_load,
+            commands::aip_save,
+            commands::aip_text,
+            commands::document_png_url,
+            commands::model_remove,
+            commands::model_set_active,
+            commands::model_upsert,
+            commands::read_image_context,
+            commands::session_bind_model,
+            commands::session_create,
+            commands::session_drop,
+            commands::session_list,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running AIPixel");
+}
