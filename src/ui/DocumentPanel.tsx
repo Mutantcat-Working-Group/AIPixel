@@ -700,7 +700,6 @@ export default function DocumentPanel() {
               >
                 <ColorPicker
                   format="hex"
-                  disabledAlpha
                   allowClear
                   showText={false}
                   value={draftColor ?? customColor ?? undefined}
