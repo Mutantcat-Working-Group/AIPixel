@@ -175,6 +175,9 @@ Windows：NSIS 安装包走 [`src-tauri/nsis/installer.nsi`](src-tauri/nsis/inst
 
 模板基线是 Tauri 官方默认 `installer.nsi`（tag `tauri-v2.12.0`），只改了 `BrandingText` 一行。
 升级 Tauri 后重新对齐一次官方模板，免得新配置项在这里缺占位符。
+模板拿本地 `makensis` 干编译过：占位符按真实构建的数据填充（`installMode=perMachine`、
+`languages=SimpChinese`），Windows 专有的 `nsis_tauri_utils` 插件调用打桩，能一路编到输出
+安装包退出码 0。没在真机 Windows 上跑过安装流程。
 
 ### 七、`example/`：遗留工具链与样例数据
 

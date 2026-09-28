@@ -1,16 +1,18 @@
 ; ============================================================================
-  AIPixel Windows NSIS 安装程序脚本（挂到 tauri.conf.json 的 nsis.template）
-  基线是 Tauri 官方默认模板 crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi
-  （tag tauri-v2.12.0），原样沿用；本文件只保留一处差异：
+;   AIPixel Windows NSIS 安装程序脚本（挂到 tauri.conf.json 的 nsis.template）
+;   基线是 Tauri 官方默认模板 crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi
+;   （tag tauri-v2.12.0），原样沿用；本文件只保留一处差异：
 
-    BrandingText 从版权串改成「产品名 + 版本号」，
-    让安装界面左下角显示 AIPixel v0.1.0，而不是默认的 NullSoft Install System。
+;     BrandingText 从版权串改成「产品名 + 版本号」，
+;     让安装界面左下角显示 AIPixel v0.1.0，而不是默认的 NullSoft Install System。
 
-  其余字段由 tauri-bundler 在编译安装包时用 handlebars 注入（本文件里成对出现、
-  里面是变量名的占位符就是它们）。升级 Tauri 之后建议重新对齐一次官方模板，
-  免得新增的配置项在这里缺占位符。
-  Tauri 以 Apache-2.0 / MIT 双授权发布，本文件随该授权继承。
-  ============================================================================
+;   其余字段由 tauri-bundler 在编译安装包时用 handlebars 注入（本文件里成对出现、
+;   里面是变量名的占位符就是它们）。升级 Tauri 之后建议重新对齐一次官方模板，
+;   免得新增的配置项在这里缺占位符。
+;   Tauri 以 Apache-2.0 / MIT 双授权发布，本文件随该授权继承。
+; ============================================================================
+Unicode true
+ManifestDPIAware true
 ; Add in `dpiAwareness` `PerMonitorV2` to manifest for Windows 10 1607+ (note this should not affect lower versions since they should be able to ignore this and pick up `dpiAware` `true` set by `ManifestDPIAware true`)
 ; Currently undocumented on NSIS's website but is in the Docs folder of source tree, see
 ; https://github.com/kichik/nsis/blob/5fc0b87b819a9eec006df4967d08e522ddd651c9/Docs/src/attributes.but#L286-L300
