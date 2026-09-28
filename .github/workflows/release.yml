@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  python:
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
@@ -26,7 +26,7 @@ jobs:
           python -m pip install --upgrade pip build
           mkdir -p release
           (cd example && python -m build --outdir dist)
-          cp example/dist/*.whl example/dist/*.tar.gz release/
+          cp -- example/dist/*.whl example/dist/*.tar.gz release/
 
       - name: Build source tar
         run: |
@@ -49,22 +49,116 @@ jobs:
             -C . .
           mv "/tmp/aipixel-${VERSION}-source.tar.gz" "release/"
           cd release
-          sha256sum * > ../checksums.txt
-          md5sum * > ../checksums-md5.txt
-          sha1sum * > ../checksums-sha1.txt
+          sha256sum -- * > ../checksums.txt
+          md5sum -- * > ../checksums-md5.txt
+          sha1sum -- * > ../checksums-sha1.txt
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: aipixel
+          name: python
           path: |
             release/*
             checksums.txt
             checksums-md5.txt
             checksums-sha1.txt
 
+  # 桌面安装包全部由 CI 出：mac 出 universal dmg，win 出 NSIS，
+  # linux 出 AppImage + deb。签名、语言、管理员权限都写在 tauri.conf.json
+  # 和自定义 NSIS 模板里，CI 只是照配置编，不额外传参。
+  desktop:
+    name: desktop ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos
+            os: macos-14
+          - name: windows
+            os: windows-latest
+          - name: linux
+            os: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      # 与 ci.yml 的 rust job 同一份依赖清单：纯净 runner 上不装就死在 glib-sys
+      - name: Install Tauri Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config patchelf \
+            libglib2.0-dev \
+            libgtk-3-dev libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev libwebkit2gtk-4.1-dev \
+            libxdo-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # GitHub 已经不再发布 Intel mac 镜像，x86_64 只能留在 arm64 runner 上交叉。
+      # 补一个 target 直接出 universal 包：一份 dmg 同时吃 Apple Silicon 和 Intel，
+      # 比出两份原生包省掉一整套 Rust 编译。
+      - name: Add Intel target for the universal macOS bundle
+        if: runner.os == 'macOS'
+        run: rustup target add x86_64-apple-darwin
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build installers
+        env:
+          # 没有苹果开发者证书，走 ad-hoc 签名；Gatekeeper 会提示用户右键打开
+          APPLE_SIGNING_IDENTITY: "-"
+          # appimagetool 自身是个 AppImage，缺 libfuse 的 runner 上靠这个跑起来
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          if [ "${RUNNER_OS}" = "macOS" ]; then
+            pnpm tauri build --target universal-apple-darwin
+          else
+            pnpm tauri build
+          fi
+
+      # bundle 的落点会随 --target 在 target/release 与 target/<triple>/release
+      # 之间漂，所以不写死路径：按后缀从 bundle 底下把安装包捞出来摊到一层，
+      # 顺带把 bundle/macos 里的 .app 这类中间产物挡在 artifact 外头。
+      - name: Collect installers
+        run: |
+          mkdir -p installer-out
+          find src-tauri/target -type f -path '*/bundle/*' \
+            \( -name '*.dmg' -o -name '*-setup.exe' -o -name '*.AppImage' -o -name '*.deb' \) \
+            -exec cp -n {} installer-out/ \;
+          ls -l installer-out
+          [ -n "$(ls -A installer-out)" ]
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.name }}
+          path: installer-out/*
+          if-no-files-found: error
+
   publish:
-    needs: build
+    needs: [python, desktop]
     runs-on: ubuntu-22.04
     steps:
       - name: Download artifacts
@@ -78,7 +172,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${GITHUB_REF_NAME}"
-          # build 里打进来的是「release/ 下的包 + 仓库根目录的 checksums」，
+          # python 那边传进来的是「release/ 下的包 + 仓库根目录的 checksums」，
           # download-artifact 会照原样还原这层目录，glob 展开后 release/ 本身
           # 也排在列表里，gh 就把它当资产上传并报「is a directory」。先把子目录
           # 里的文件提到最上一层，再删掉空目录，保证传上去的全是文件。

@@ -65,6 +65,9 @@ target/
 *.rpm
 *.AppImage
 
+# release workflow 里 desktop job 的安装包暂存目录
+installer-out/
+
 # ---------- 系统与编辑器 ----------
 .DS_Store
 ._*
