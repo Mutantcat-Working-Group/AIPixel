@@ -17,6 +17,10 @@ import { useStore } from "../lib/store";
 import { maxTokensForModel, maxTokensHint } from "../lib/model-limits";
 import { LANG_OPTIONS, type Lang } from "../lib/i18n";
 import { useT } from "../lib/t";
+
+/** 「关于」里摆出去的站点与源码仓库地址。 */
+const PUBLISHER_SITE = "https://mutantcat.org";
+const REPO_URL = "https://github.com/Mutantcat-Working-Group/AIPixel";
 import type {
   Capabilities,
   ModelConfig,
@@ -450,6 +454,31 @@ export default function ModelSettingsModal() {
               </Button>
             </>
           ) : null}
+        </div>
+
+        <ModelFragment title={t("about.title")} />
+        <div className="about-block">
+          <p className="about-blurb">{t("about.blurb")}</p>
+          <div className="about-row">
+            <span className="about-key">{t("about.publisher")}</span>
+            <span className="about-val">{t("about.publisher_value")}</span>
+          </div>
+          <div className="about-row">
+            <span className="about-key">{t("about.site")}</span>
+            <a className="about-val" href={PUBLISHER_SITE} target="_blank" rel="noreferrer">
+              mutantcat.org
+            </a>
+          </div>
+          <div className="about-row">
+            <span className="about-key">{t("about.repo")}</span>
+            <a className="about-val" href={REPO_URL} target="_blank" rel="noreferrer">
+              {REPO_URL.replace("https://", "")}
+            </a>
+          </div>
+          <div className="about-row">
+            <span className="about-key">{t("about.version")}</span>
+            <span className="about-val">{__APP_VERSION__}</span>
+          </div>
         </div>
       </div>
     </Modal>

@@ -192,6 +192,13 @@ export const zh = {
   "settings.no_key_stored": "尚未存储密钥",
   "settings.set_active": "设为激活",
   "settings.delete": "删除",
+  "about.title": "关于",
+  "about.version": "版本",
+  "about.publisher": "发行者",
+  "about.publisher_value": "异猫工作群",
+  "about.site": "网站",
+  "about.repo": "源码仓库",
+  "about.blurb": "像素资产生成的桌面智能体：模型自带 Provider，本机运行，无登录无计费。",
 
   // ---------- MCP 面板 ----------
   "mcp.title": "MCP 工具服务器",
@@ -645,6 +652,13 @@ export const en: Record<TKey, string> = {
   "settings.no_key_stored": "no key stored",
   "settings.set_active": "Set active",
   "settings.delete": "Delete",
+  "about.title": "About",
+  "about.version": "Version",
+  "about.publisher": "Publisher",
+  "about.publisher_value": "Mutantcat Working Group",
+  "about.site": "Website",
+  "about.repo": "Source repository",
+  "about.blurb": "A desktop agent for pixel assets: bring your own provider, everything runs on this machine, no sign-in, no billing.",
 
   "mcp.title": "MCP tool servers",
   "mcp.close": "Close",

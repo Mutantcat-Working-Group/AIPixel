@@ -1358,6 +1358,43 @@ body {
   font-size: 11.5px;
 }
 
+.about-block {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.about-blurb {
+  margin: 0 0 6px;
+  color: var(--text-faint);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.about-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11.5px;
+}
+
+.about-key {
+  width: 62px;
+  flex: none;
+  color: var(--text-faint);
+}
+
+.about-val {
+  color: var(--text);
+  word-break: break-all;
+}
+
+a.about-val {
+  color: var(--accent);
+}
+
 .gate-icons {
   display: flex;
   gap: 10px;
