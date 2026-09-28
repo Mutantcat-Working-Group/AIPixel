@@ -134,7 +134,8 @@ RLE 编码约定；动态部分由 `pixel_core::context` 按当前激活图层 /
 
 ### 六、开发
 
-需要 Node 20+ 与 Rust stable，包管理器用 pnpm。
+需要 Node 20+、Rust stable 与 pnpm 12，包管理器用 pnpm。esbuild 的 postinstall 需要放行，
+白名单写在根目录 [pnpm-workspace.yaml](pnpm-workspace.yaml) 里，漏了它全新克隆 `pnpm install` 会失败。
 
 ```bash
 # 前端
@@ -155,6 +156,24 @@ cargo test --workspace
 ```
 
 模型配置在应用内「设置」里填，落盘在 app config 目录的 `models.json`，`api_key` 只留在本机、不回传 webview。
+
+#### 打包（`pnpm tauri build`）
+
+`targets` 里三个目标都配好了：macOS 出 `.app` + `.dmg`，Windows 出 NSIS 安装包。
+
+macOS：没有开发者证书也能打，[`tauri.conf.json`](src-tauri/tauri.conf.json) 里 `bundle.macOS.signingIdentity`
+取 `"-"`，签名走 ad-hoc（`codesign -s -`）。自签的 `.app` 在 Finder 里能直接打开，不会被当成无名无姓的
+未签名产物。`.dmg` 里除了 `.app` 还带一个指向 `/Applications` 的拖拽安装快捷方式，卷图标用根目录的
+`icon.png` 转出来的 `.icns`。打 DMG 的机器要同意 Xcode 命令行工具许可，缺了会死在 `SetFile` 那句上。
+
+Windows：NSIS 安装包走 [`src-tauri/nsis/installer.nsi`](src-tauri/nsis/installer.nsi) 这套模板。三处配置：
+
+- `installMode: "perMachine"`：安装时弹 UAC 申请管理员权限，默认装到 `Program Files\AIPixel`，注册表落 HKLM
+- `languages: ["SimpChinese"]`：安装界面整站简体中文（连 WebView2 缺失提示也是中文，用 Tauri 自带的 `SimpChinese.nsh`）
+- `template: "nsis/installer.nsi"`：左下角不再是 `NullSoft Install System v3.xx`，显示 `AIPixel v0.1.0` 这样的产品名加版本号
+
+模板基线是 Tauri 官方默认 `installer.nsi`（tag `tauri-v2.12.0`），只改了 `BrandingText` 一行。
+升级 Tauri 后重新对齐一次官方模板，免得新配置项在这里缺占位符。
 
 ### 七、`example/`：遗留工具链与样例数据
 

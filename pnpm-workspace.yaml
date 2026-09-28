@@ -1,0 +1,4 @@
+# pnpm 12 的构建脚本白名单放这里：esbuild 的 postinstall 要放行，
+# 否则全新克隆的 `pnpm install` 会以 ERR_PNPM_IGNORED_BUILDS 失败。
+allowBuilds:
+  esbuild: true
