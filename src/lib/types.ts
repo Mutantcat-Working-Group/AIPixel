@@ -477,3 +477,51 @@ export interface DockDraft {
   tweenOrder: MigrateOrder;
   tweenEase: boolean;
 }
+
+// ---------- 批量工作台 ----------
+// 纯本机批处理：一个文件夹进、一个文件夹出，不吃模型，与 agent 会话互补。
+
+export type BatchKind = "quantize" | "export";
+
+export type ExportFormat = "png" | "gif";
+
+/** 可序列化的批量脚本。字段与 Rust 侧 `BatchRecipe` 逐字对齐（camelCase 由 Tauri 转换）。 */
+export interface BatchRecipe {
+  kind: BatchKind;
+  input_dir: string;
+  output_dir: string;
+  options: PixelizeOptions;
+  match_source_size: boolean;
+  target_w: number;
+  target_h: number;
+  export_format: ExportFormat;
+}
+
+export interface BatchScan {
+  kind: BatchKind;
+  dir: string;
+  count: number;
+  truncated: boolean;
+  files: string[];
+}
+
+export type BatchItemState = "ok" | "skipped" | "error";
+
+export type BatchEvent =
+  | { kind: "started"; total: number }
+  | {
+      kind: "progress";
+      index: number;
+      total: number;
+      file: string;
+      state: BatchItemState;
+      note: string;
+    }
+  | {
+      kind: "done";
+      batch_kind: BatchKind;
+      ok: number;
+      skipped: number;
+      failed: number;
+      output_dir: string;
+    };

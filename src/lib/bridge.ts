@@ -9,6 +9,10 @@ import type {
   AgentEvent,
   Attachment,
   ApprovalDecision,
+  BatchEvent,
+  BatchKind,
+  BatchRecipe,
+  BatchScan,
   EditorOperation,
   InkColor,
  Message,
@@ -35,6 +39,8 @@ import type {
 } from "./types";
 
 export const AGENT_EVENT_CHANNEL = "agent-event";
+
+export const BATCH_EVENT_CHANNEL = "batch-event";
 
 export function listModels(): Promise<ModelsView> {
   return invoke<ModelsView>("agent_list_models");
@@ -215,6 +221,20 @@ export function videoBrief(
 
 export function listenAgentEvents(handler: (event: AgentEvent) => void): Promise<UnlistenFn> {
   return listen<AgentEvent>(AGENT_EVENT_CHANNEL, (event) => handler(event.payload));
+}
+
+/** 扫一个文件夹，数清有几份对口素材。只读。 */
+export function scanBatch(inputDir: string, kind: BatchKind): Promise<BatchScan> {
+  return invoke<BatchScan>("batch_scan", { inputDir, kind });
+}
+
+/** 起一次批量。命令立即返回，过程走 batch-event。 */
+export function runBatch(recipe: BatchRecipe): Promise<void> {
+  return invoke("batch_run", { recipe });
+}
+
+export function listenBatchEvents(handler: (event: BatchEvent) => void): Promise<UnlistenFn> {
+  return listen<BatchEvent>(BATCH_EVENT_CHANNEL, (event) => handler(event.payload));
 }
 
 // ---------- 工作台编辑器与审批 ----------

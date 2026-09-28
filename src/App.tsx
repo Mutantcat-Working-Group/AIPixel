@@ -5,6 +5,7 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 
 import ChatPanel from "./ui/ChatPanel";
 import DocumentPanel from "./ui/DocumentPanel";
+import BatchPanel from "./ui/BatchPanel";
 import ModelSettingsModal from "./ui/ModelSettingsModal";
 import McpPanel from "./ui/McpPanel";
 import SessionSidebar from "./ui/SessionSidebar";
@@ -20,10 +21,11 @@ export default function App() {
 
   const t = useT();
 
-  /** 右栏两个视图：画布看结果，工作流跑流程。 */
+  /** 右栏三个视图：画布看结果，工作流跑流程，批量跑文件夹。 */
   const railOptions = [
     { label: t("rail.canvas"), value: "canvas" },
     { label: t("rail.workflows"), value: "workflows" },
+    { label: t("rail.batch"), value: "batch" },
   ];
 
   /** 审批档位。文案要让用户一眼看出「问不问」的差别，所以每档都带 tooltip。 */
@@ -182,7 +184,9 @@ export default function App() {
               onChange={(next) => setRail(next as string)}
             />
           </div>
-          {rail === "canvas" ? <DocumentPanel /> : <WorkflowDock />}
+          {rail === "canvas" ? <DocumentPanel /> : null}
+          {rail === "workflows" ? <WorkflowDock /> : null}
+          {rail === "batch" ? <BatchPanel /> : null}
         </div>
       </div>
 

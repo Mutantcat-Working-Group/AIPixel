@@ -1451,6 +1451,81 @@ body {
   font-size: 11.5px;
 }
 
+/* ---------- 批量工作台 ---------- */
+
+/* 目标尺寸一栏：两个数字加中间的 x，窄栏里谁都不许把谁挤没。 */
+.batch-dims {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.batch-dims > .ant-input-number {
+  flex: 1;
+  min-width: 0;
+}
+
+.batch-dims-x {
+  flex: none;
+  color: var(--text-faint);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+/* 逐文件明细：跑多少都只占固定高度，剩下的自己滚。 */
+.batch-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 176px;
+  padding: 6px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-panel-2);
+}
+
+.batch-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) minmax(0, 40%);
+  align-items: baseline;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.batch-row-state {
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+.batch-row.ok .batch-row-state {
+  color: var(--ok);
+}
+
+.batch-row.skipped .batch-row-state {
+  color: var(--warm);
+}
+
+.batch-row.error .batch-row-state {
+  color: var(--danger);
+}
+
+.batch-row-name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.batch-row-note {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--text-faint);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 /* ---------- 模型能力勾选 ---------- */
 
 .cap-grid {
