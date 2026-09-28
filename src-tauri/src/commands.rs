@@ -417,7 +417,10 @@ mod tests {
             });
         }))
         .is_err();
-        assert!(panicked, "bare tokio::spawn must refuse to run off a runtime context");
+        assert!(
+            panicked,
+            "bare tokio::spawn must refuse to run off a runtime context"
+        );
         assert!(rx.try_recv().is_err(), "nothing should have been scheduled");
 
         let (tx, rx) = mpsc::sync_channel(1);
@@ -425,7 +428,8 @@ mod tests {
             let _ = tx.send("tauri::async_runtime::spawn ran");
         });
         assert_eq!(
-            rx.recv_timeout(Duration::from_secs(10)).expect("task must run"),
+            rx.recv_timeout(Duration::from_secs(10))
+                .expect("task must run"),
             "tauri::async_runtime::spawn ran"
         );
     }

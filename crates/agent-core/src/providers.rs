@@ -160,7 +160,10 @@ mod tests {
     #[test]
     fn reads_the_anthropic_list_shape() {
         let body = r#"{"data":[{"type":"model","id":"claude-sonnet-4-5","display_name":"Claude Sonnet 4.5"}],"has_more":false}"#;
-        assert_eq!(extract_model_ids(body), vec!["claude-sonnet-4-5".to_string()]);
+        assert_eq!(
+            extract_model_ids(body),
+            vec!["claude-sonnet-4-5".to_string()]
+        );
     }
 
     /// 中转偶尔会把同一个模型在不同端点各报一次，去重排序后再给用户挑。
