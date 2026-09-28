@@ -231,7 +231,9 @@ jobs:
             echo "::error::no disk image to verify"
             exit 1
           fi
-          codesign --verify --verbose=2 "${images[0]}"
+          # 镜像本体不验：tauri 的 bundler 只给里面的 .app 签名，DMG 镜像是裸的，
+          # codesign --verify 打在镜像上必然报 "code object is not signed at all"。
+          # 该验的是挂载后的 app 和 /Applications 快捷方式，往下走。
           MOUNT="$(mktemp -d)"
           hdiutil attach "${images[0]}" -nobrowse -readonly -mountpoint "${MOUNT}" >/dev/null
           trap 'hdiutil detach "${MOUNT}" >/dev/null || true' EXIT
