@@ -47,6 +47,14 @@ export function QuantizeFields({
           onChange={(next) => onChange({ ...value, alpha_threshold: next })}
         />
       </Field>
+      <Field label={t("dock.snap_tolerance", { count: value.snap_tolerance })}>
+        <Slider
+          min={0}
+          max={128}
+          value={value.snap_tolerance}
+          onChange={(next) => onChange({ ...value, snap_tolerance: next })}
+        />
+      </Field>
       <div className="dock-flag">
         <Switch
           size="small"

@@ -23,9 +23,11 @@ import {
 import { open } from "@tauri-apps/plugin-dialog";
 
 import { Field, QuantizeFields } from "./QuantizeFields";
+import FramePicker from "./FramePicker";
 import * as bridge from "../lib/bridge";
 import { briefToText, probeSummary, videoBriefToText } from "../lib/dock-format";
 import { isModelBacked, servedLineText, type ServedBy } from "../lib/dock-served";
+import { resolveFrameId } from "../lib/frame-pick";
 import { renderUiText, translate, translateText, type Lang } from "../lib/i18n";
 import { useStore } from "../lib/store";
 import { useT, type T } from "../lib/t";
@@ -480,9 +482,11 @@ function ImageGenPanel({ gated }: { gated: boolean }) {
 
   // 帧 id 属于文档，换会话后旧选择会失效：直接推导合法值，不做同步 effect。
   const frameIds = (document?.frames ?? []).map((frame) => frame.id);
-  const referenceFrame = frameIds.includes(draft.genFrame)
-    ? draft.genFrame
-    : active.frame || frameIds[0] || "";
+  const referenceFrame = resolveFrameId(
+    frameIds,
+    draft.genFrame,
+    active.frame || frameIds[0] || null,
+  );
 
   return (
     <>
@@ -520,10 +524,9 @@ function ImageGenPanel({ gated }: { gated: boolean }) {
       </Field>
       {draft.genSource === "frame" ? (
         <Field label={t("dock.reference_frame")}>
-          <Select
-            size="small"
+          <FramePicker
+            document={document}
             value={referenceFrame}
-            options={frameIds.map((id) => ({ label: id, value: id }))}
             onChange={(next) => patchDraft({ genFrame: next })}
           />
         </Field>
@@ -801,12 +804,16 @@ function TweenPanel({ gated, frameCount }: { gated: boolean; frameCount: number 
 
   // 帧 id 属于文档，换文档后旧选择会失效：直接推导合法值，不做同步 effect。
   const frameIds = (document?.frames ?? []).map((frame) => frame.id);
-  const from = frameIds.includes(draft.tweenFrom)
-    ? draft.tweenFrom
-    : frameIds[frameIds.length - 2] ?? "";
-  const to = frameIds.includes(draft.tweenTo)
-    ? draft.tweenTo
-    : frameIds[frameIds.length - 1] ?? "";
+  const from = resolveFrameId(
+    frameIds,
+    draft.tweenFrom,
+    frameIds[frameIds.length - 2] ?? null,
+  );
+  const to = resolveFrameId(
+    frameIds,
+    draft.tweenTo,
+    frameIds[frameIds.length - 1] ?? null,
+  );
   const sameEnd = from === "" || from === to;
 
   if (frameCount < 2) {
@@ -820,20 +827,16 @@ function TweenPanel({ gated, frameCount }: { gated: boolean; frameCount: number 
   return (
     <>
       <Field label={t("dock.from")}>
-        <Segmented
-          size="small"
-          block
+        <FramePicker
+          document={document}
           value={from}
-          options={frameIds.map((id) => ({ label: id, value: id }))}
           onChange={(next) => patchDraft({ tweenFrom: next })}
         />
       </Field>
       <Field label={t("dock.to")}>
-        <Segmented
-          size="small"
-          block
+        <FramePicker
+          document={document}
           value={to}
-          options={frameIds.map((id) => ({ label: id, value: id }))}
           onChange={(next) => patchDraft({ tweenTo: next })}
         />
       </Field>

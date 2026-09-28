@@ -7,6 +7,10 @@ import type { PixelDocument } from "../lib/types";
 const THUMB_MAX_WIDTH = 46;
 const THUMB_MAX_HEIGHT = 34;
 
+/** 缩略图盒子的另一档尺寸：窄容器（比如工作流坞）里用，格子才不会被内容顶宽。 */
+const THUMB_COMPACT_WIDTH = 30;
+const THUMB_COMPACT_HEIGHT = 22;
+
 /**
  * 帧条里的一格缩略图。画在文档尺寸的画布上，缩放交给 CSS 的 pixelated：
  * 文档多大都不糊，也不必给每种尺寸各算一套放大倍率。
@@ -15,12 +19,17 @@ const THUMB_MAX_HEIGHT = 34;
 export default function FrameThumb({
   document: doc,
   index,
+  compact = false,
 }: {
   document: PixelDocument;
   index: number;
+  /** 窄容器里改用小盒子；比例照旧按文档最长边算，缩略图永远和导出的帧同源。 */
+  compact?: boolean;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const ratio = Math.min(THUMB_MAX_WIDTH / doc.width, THUMB_MAX_HEIGHT / doc.height);
+  const maxWidth = compact ? THUMB_COMPACT_WIDTH : THUMB_MAX_WIDTH;
+  const maxHeight = compact ? THUMB_COMPACT_HEIGHT : THUMB_MAX_HEIGHT;
+  const ratio = Math.min(maxWidth / doc.width, maxHeight / doc.height);
   // 极小文档也留个巴掌大的盒子，拇指点得到。
   const cssWidth = Math.max(12, Math.round(doc.width * ratio));
   const cssHeight = Math.max(12, Math.round(doc.height * ratio));

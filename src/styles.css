@@ -758,6 +758,46 @@ body {
   border-radius: 3px;
 }
 
+/* 坞里的帧选择：横向一条，帧再多也只占一行高，剩下靠滚。 */
+.frame-picker {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 2px;
+}
+
+.frame-pick {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  width: 36px;
+  padding: 3px 2px 2px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-panel-2);
+  color: var(--text-faint);
+  cursor: pointer;
+}
+
+.frame-pick:hover {
+  border-color: rgba(62, 155, 255, 0.35);
+}
+
+.frame-pick.active {
+  border-color: rgba(62, 155, 255, 0.5);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.frame-pick-id {
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.2;
+}
+
 .palette-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, 18px);
