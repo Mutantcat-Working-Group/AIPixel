@@ -156,7 +156,11 @@ export default function ModelSettingsModal() {
     // 手动改过的字段不抢：同一个模型下值 != 记下的自动值，就当用户自己在管。
     if (autoMax && autoMax.model === name && maxWatch !== autoMax.value) return;
     form.setFieldsValue({ max_tokens: hint });
-    setAutoMax({ model: name, value: hint });
+    // 值没变就得把原对象交回去：每次渲染都造一个新对象，下游 useEffect 的依赖
+    // 永远在变，自己会无限重跑下去。
+    setAutoMax((prev) =>
+      prev && prev.model === name && prev.value === hint ? prev : { model: name, value: hint },
+    );
   }, [open, modelWatch, maxWatch, autoMax, form]);
 
   // 拉一份 provider 的模型清单。API key 留空时后端会用这个模型已存的密钥，所以不强制重填。
