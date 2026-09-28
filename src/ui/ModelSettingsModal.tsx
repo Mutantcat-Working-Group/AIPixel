@@ -11,9 +11,10 @@ import {
   Segmented,
   Tooltip,
 } from "antd";
-import { KeyRound, Plus, Star, Trash2 } from "lucide-react";
+import { KeyRound, Plus, RefreshCw, Star, Trash2 } from "lucide-react";
 
 import { useStore } from "../lib/store";
+import { maxTokensForModel, maxTokensHint } from "../lib/model-limits";
 import { LANG_OPTIONS, type Lang } from "../lib/i18n";
 import { useT } from "../lib/t";
 import type {
@@ -66,7 +67,8 @@ function toForm(model: ModelView | null): FormShape {
     base_url: model.base_url,
     api_key: "",
     model: model.model,
-    max_tokens: model.max_tokens,
+    // 老配置没存 max_tokens 时，先按模型名给个常用上限，别让字段空着。
+    max_tokens: model.max_tokens ?? maxTokensForModel(model.model),
     temperature: model.temperature,
     capabilities: { ...model.capabilities },
   };
@@ -92,6 +94,7 @@ export default function ModelSettingsModal() {
   const upsertModel = useStore((s) => s.upsertModel);
   const removeModel = useStore((s) => s.removeModel);
   const activateModel = useStore((s) => s.activateModel);
+  const fetchProviderModels = useStore((s) => s.fetchProviderModels);
   // 分工按会话走：读的是当前会话的分工快照，改的也是当前会话。
   const activeSessionId = useStore((s) => s.activeId);
   const sessions = useStore((s) => s.sessions);
@@ -102,6 +105,15 @@ export default function ModelSettingsModal() {
   const [form] = Form.useForm<FormShape>();
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [fetching, setFetching] = useState(false);
+  const [fetched, setFetched] = useState<string[]>([]);
+  const [note, setNote] = useState<string | null>(null);
+
+  const modelWatch = Form.useWatch<string>("model", form) ?? "";
+  const maxWatch = Form.useWatch<number | null>("max_tokens", form) ?? null;
+  const autoHint = maxTokensHint(modelWatch.trim());
+  // 自动填过的记录：用户手动改过就不再抢，换模型才重新接手。
+  const [autoMax, setAutoMax] = useState<{ model: string; value: number } | null>(null);
 
   const selected: ModelView | null = models.find((m) => m.id === selectedId) ?? null;
   const activeSession = sessions.find((s) => s.id === activeSessionId) ?? null;
@@ -133,6 +145,51 @@ export default function ModelSettingsModal() {
   useEffect(() => {
     form.setFieldsValue(toForm(selected));
   }, [form, selected]);
+
+  // 模型名一填好就把 Max tokens 顶到常用上限；手动敲过的字段不碰。
+  useEffect(() => {
+    if (!open) return;
+    const name = modelWatch.trim();
+    if (!name) return;
+    const hint = maxTokensHint(name);
+    if (!hint) return;
+    // 手动改过的字段不抢：同一个模型下值 != 记下的自动值，就当用户自己在管。
+    if (autoMax && autoMax.model === name && maxWatch !== autoMax.value) return;
+    form.setFieldsValue({ max_tokens: hint });
+    setAutoMax({ model: name, value: hint });
+  }, [open, modelWatch, maxWatch, autoMax, form]);
+
+  // 拉一份 provider 的模型清单。API key 留空时后端会用这个模型已存的密钥，所以不强制重填。
+  async function fetchModels() {
+    const values = form.getFieldsValue(true);
+    const baseUrl = (values.base_url ?? "").trim();
+    if (!baseUrl) {
+      setFetched([]);
+      setNote(t("settings.fetch_need_key"));
+      return;
+    }
+    setFetching(true);
+    setNote(null);
+    try {
+      const ids = await fetchProviderModels({
+        id: selected?.id ?? null,
+        baseUrl,
+        apiKey: values.api_key ?? "",
+        protocol: values.protocol ?? "anthropic",
+      });
+      setFetched(ids);
+      setNote(
+        ids.length > 0
+          ? t("settings.model_count", { count: ids.length })
+          : t("settings.fetch_empty"),
+      );
+    } catch (cause) {
+      setFetched([]);
+      setNote(t("settings.fetch_failed", { error: String(cause) }));
+    } finally {
+      setFetching(false);
+    }
+  }
 
   async function save() {
     const values = await form.validateFields();
@@ -203,7 +260,7 @@ export default function ModelSettingsModal() {
           icon={<Plus size={13} />}
           onClick={() => setSelectedId(null)}
         >
-          New
+          {t("settings.new")}
         </Button>
       </div>
 
@@ -245,7 +302,6 @@ export default function ModelSettingsModal() {
           >
             <Input placeholder={t("settings.model_placeholder")} spellCheck={false} />
           </Form.Item>
-
           <Form.Item name="api_key" label={t("settings.api_key")}>
             <Input.Password
               placeholder={
@@ -258,9 +314,48 @@ export default function ModelSettingsModal() {
             />
           </Form.Item>
 
+          <Form.Item
+            name="model"
+            label={t("settings.model")}
+            rules={[{ required: true, message: t("settings.model_required") }]}
+          >
+            <Input placeholder={t("settings.model_placeholder")} spellCheck={false} />
+          </Form.Item>
+          <div className="model-fetch">
+            <Button
+              size="small"
+              loading={fetching}
+              icon={<RefreshCw size={13} />}
+              onClick={() => void fetchModels()}
+            >
+              {fetching ? t("settings.fetching") : t("settings.fetch")}
+            </Button>
+            {fetched.length > 0 ? (
+              <Select
+                size="small"
+                className="model-fetch-picker"
+                value={undefined}
+                options={fetched.map((id) => ({ label: id, value: id }))}
+                placeholder={t("settings.pick_model")}
+                onChange={(value: string) => {
+                  form.setFieldsValue({ model: value });
+                }}
+              />
+            ) : null}
+            {note ? <span className="model-fetch-note">{note}</span> : null}
+          </div>
+
           <ModelFragment title={t("settings.sampling")} />
-          <Form.Item name="max_tokens" label={t("settings.max_tokens")}>
-            <InputNumber min={256} max={64000} step={256} style={{ width: "100%" }} />
+          <Form.Item
+            name="max_tokens"
+            label={t("settings.max_tokens")}
+            extra={
+              autoHint && maxWatch === autoHint
+                ? t("settings.max_tokens_auto", { model: modelWatch.trim() })
+                : undefined
+            }
+          >
+            <InputNumber min={256} max={200000} step={256} style={{ width: "100%" }} />
           </Form.Item>
           <Form.Item name="temperature" label={t("settings.temperature")}>
             <InputNumber min={0} max={2} step={0.1} style={{ width: "100%" }} />

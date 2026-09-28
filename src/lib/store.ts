@@ -37,7 +37,8 @@ import type {
   PixelizeParams,
   PendingAttachment,
   PendingApproval,
-  PermissionMode,
+ PermissionMode,
+  Protocol,
   PixelDocument,
   PixelizeOptions,
   RefinedPrompt,
@@ -169,6 +170,13 @@ export interface StoreActions {
   upsertModel: (config: ModelConfig) => Promise<void>;
   removeModel: (id: string) => Promise<void>;
   activateModel: (id: string) => Promise<void>;
+  /** 拉 provider 的模型清单，供设置界面挑一个填入；失败把原文抛回界面。 */
+  fetchProviderModels: (params: {
+    id?: string | null;
+    baseUrl: string;
+    apiKey: string;
+    protocol: Protocol;
+  }) => Promise<string[]>;
   refreshMcp: () => Promise<void>;
   openMcp: () => void;
   closeMcp: () => void;
@@ -752,8 +760,14 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     upsertModel: async (config) => {
       const models = await bridge.upsertModel(config);
       setState({ models });
-      // 改的是当前会话绑的那个模型，能力勾选就得重新反映到目录上。
       const bound = getState().sessions.find((s) => s.id === getState().activeId);
+      // 会话还挂在「未设置」上（没配模型就开了会话，或者模型被删了）：补绑到刚存好的定义，
+      // 不然用户存完还得回顶栏手动挑一次，而挑之前发消息只会拿到 provider 的报错。
+      if (bound && !models.entries.some((m) => m.id === bound.model_id)) {
+        await getState().bindSessionModel(config.id);
+        return;
+      }
+      // 改的是当前会话绑的那个模型，能力勾选就得重新反映到目录上。
       if (!bound || bound.model_id === config.id) {
         await getState().refreshWorkflows();
       }
@@ -768,6 +782,8 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       const models = await bridge.setActiveModel(id);
       setState({ models });
     },
+
+    fetchProviderModels: async (params) => bridge.fetchModelList(params),
 
     refreshMcp: async () => {
       try {

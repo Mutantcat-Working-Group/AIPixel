@@ -238,7 +238,8 @@ pub fn batch_run(app: AppHandle, recipe: BatchRecipe) -> Result<(), String> {
         return Err(format!("cannot create output folder: {e}"));
     }
 
-    tokio::task::spawn_blocking(move || {
+    // 同 agent_send_message：同步命令在主线程上执行，那里没有 tokio 运行时上下文。
+    tauri::async_runtime::spawn_blocking(move || {
         run_batch(&app, &recipe, &files, &out_dir);
     });
     Ok(())

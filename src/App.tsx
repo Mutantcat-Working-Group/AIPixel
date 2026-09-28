@@ -9,7 +9,6 @@ import BatchPanel from "./ui/BatchPanel";
 import ModelSettingsModal from "./ui/ModelSettingsModal";
 import McpPanel from "./ui/McpPanel";
 import SessionSidebar from "./ui/SessionSidebar";
-import StarterGate from "./ui/StarterGate";
 import WorkflowDock from "./ui/WorkflowDock";
 import { useStore } from "./lib/store";
 import { useT } from "./lib/t";
@@ -18,6 +17,13 @@ import type { ExportFormat } from "./lib/bridge";
 
 // 图标取 icon.png 抠掉白背景的版本；像素画素材声明成 URL，别让构建器给它改尺寸。
 import brandIcon from "./assets/brand-icon.png";
+
+/**
+ * 顶栏模型选择器的「没绑模型」占位值。
+ * 会话没配上模型时 Rust 给的 model_id 是 "unset"，用一个查不到的 id + 一条同名选项，
+ * 选择器就能把「未设置模型」当选中项显示出来，而不是显示一串内部字面量。
+ */
+const UNSET_MODEL = "__unset__";
 
 export default function App() {
   const store = useStore();
@@ -56,12 +62,16 @@ export default function App() {
     );
   }
 
-  if (store.models.entries.length === 0) {
-    return <StarterGate />;
-  }
-
   const activeSession = store.sessions.find((s) => s.id === store.activeId) ?? null;
+  // 一条模型都没配，或者会话还挂在已删掉的模型上：两种情况下顶栏都得显示「未设置模型」。
+  const boundModelId =
+    activeSession && store.models.entries.some((m) => m.id === activeSession.model_id)
+      ? activeSession.model_id
+      : UNSET_MODEL;
   const documentName = store.document?.name ?? "untitled";
+  // 没配模型不该把整个界面关掉：会话能建、画布能画，只是发消息没人接。
+  // 给一条指向设置的横幅，比把用户挡在一页说明书前面强。
+  const unbound = boundModelId === UNSET_MODEL;
 
   async function pickAndOpenAip() {
     const picked = await open({ multiple: false, filters: aipFilter });
@@ -159,11 +169,16 @@ export default function App() {
             <Select
               size="small"
               style={{ width: 210 }}
-              value={activeSession?.model_id ?? undefined}
-              options={store.models.entries.map((m) => ({
-                label: `${m.label} · ${m.model}`,
-                value: m.id,
-              }))}
+              value={boundModelId}
+              options={[
+                ...(unbound
+                  ? [{ label: t("topbar.model_unset"), value: UNSET_MODEL, disabled: true }]
+                  : []),
+                ...store.models.entries.map((m) => ({
+                  label: `${m.label} · ${m.model}`,
+                  value: m.id,
+                })),
+              ]}
               onChange={(value: string) => void store.bindSessionModel(value)}
               placeholder={t("topbar.select_model")}
             />
@@ -240,6 +255,15 @@ export default function App() {
           </Tooltip>
         </div>
       </header>
+
+      {unbound ? (
+        <div className="notice-bar">
+          <span className="grow">{t("store.no_model")}</span>
+          <Button size="small" type="link" onClick={store.openSettings}>
+            {t("gate.add_first")}
+          </Button>
+        </div>
+      ) : null}
 
       {store.notice ? (
         <div className={`notice-bar ${store.notice.isError ? "error" : ""}`}>

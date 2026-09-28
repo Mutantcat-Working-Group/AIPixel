@@ -58,6 +58,151 @@ fn trim_trailing_slash(s: &str) -> String {
     s.trim_end_matches('/').to_string()
 }
 
+/// 拉一份 provider 的模型清单，给设置界面让用户挑着填。
+///
+/// 只认 `GET {base_url}/models`：Anthropic 走 `x-api-key`，OpenAI 兼容走 `Bearer`。
+/// base_url 里带不带 `/v1` 都试一遍——不少中转只挂在裸域名上，写死一段路径就 404。
+pub async fn list_models(config: &ModelConfig) -> Result<Vec<String>, ProviderError> {
+    if config.api_key.trim().is_empty() {
+        return Err(ProviderError::Config("missing api key".into()));
+    }
+    let base = trim_trailing_slash(config.base_url.trim());
+    if base.is_empty() {
+        return Err(ProviderError::Config("missing base url".into()));
+    }
+    let client = reqwest::Client::new();
+    let mut last_err: Option<ProviderError> = None;
+    for url in model_list_urls(&base) {
+        let mut req = client.get(&url);
+        req = match config.protocol {
+            Protocol::Anthropic => req
+                .header("x-api-key", &config.api_key)
+                .header("anthropic-version", "2023-06-01"),
+            Protocol::OpenAiCompat => {
+                req.header("authorization", format!("Bearer {}", config.api_key))
+            }
+        };
+        let resp = match req.send().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                last_err = Some(ProviderError::Network(e.to_string()));
+                continue;
+            }
+        };
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            last_err = Some(ProviderError::Http {
+                status: status.as_u16(),
+                body,
+            });
+            continue;
+        }
+        return Ok(extract_model_ids(&body));
+    }
+    Err(last_err.unwrap_or_else(|| ProviderError::Config("no model list endpoint".into())))
+}
+
+/// 模型列表端点候选：先按用户填的 base_url 试，域名不同再退回裸域名试一次。
+pub(crate) fn model_list_urls(base: &str) -> Vec<String> {
+    let mut out = vec![format!("{base}/models")];
+    if let Some(origin) = origin_of(base) {
+        let candidate = format!("{origin}/models");
+        if !out.contains(&candidate) {
+            out.push(candidate);
+        }
+    }
+    out
+}
+
+fn origin_of(base: &str) -> Option<String> {
+    let (scheme, rest) = base.split_once("://")?;
+    let host = rest.split('/').next().filter(|h| !h.is_empty())?;
+    Some(format!("{scheme}://{host}"))
+}
+
+/// 从 `GET /models` 的响应里抠出 id 列表，去重排序。
+/// Anthropic 和 OpenAI 两边的字段名都是 `data[].id`，所以一份解析吃两头。
+fn extract_model_ids(body: &str) -> Vec<String> {
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return Vec::new();
+    };
+    let mut ids: Vec<String> = value
+        .get("data")
+        .and_then(|d| d.as_array())
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| row.get("id").and_then(|id| id.as_str()))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 拿得出一份 OpenAI 兼容的清单。
+    #[test]
+    fn reads_the_openai_list_shape() {
+        let body = r#"{"object":"list","data":[{"id":"gpt-4o-mini"},{"id":"gpt-4o"}]}"#;
+        assert_eq!(
+            extract_model_ids(body),
+            vec!["gpt-4o".to_string(), "gpt-4o-mini".to_string()]
+        );
+    }
+
+    /// Anthropic 多一个 display_name，字段位置不一样但不影响取 id。
+    #[test]
+    fn reads_the_anthropic_list_shape() {
+        let body = r#"{"data":[{"type":"model","id":"claude-sonnet-4-5","display_name":"Claude Sonnet 4.5"}],"has_more":false}"#;
+        assert_eq!(extract_model_ids(body), vec!["claude-sonnet-4-5".to_string()]);
+    }
+
+    /// 中转偶尔会把同一个模型在不同端点各报一次，去重排序后再给用户挑。
+    #[test]
+    fn dedups_and_sorts_ids() {
+        let body = r#"{"data":[{"id":"qwen-plus"},{"id":"deepseek-chat"},{"id":"qwen-plus"}]}"#;
+        assert_eq!(
+            extract_model_ids(body),
+            vec!["deepseek-chat".to_string(), "qwen-plus".to_string()]
+        );
+    }
+
+    /// 端点通了但不是模型清单（比如返回了一页 HTML），就当没拉到，别把噪声当选项。
+    #[test]
+    fn returns_nothing_when_the_payload_is_not_a_model_list() {
+        assert!(extract_model_ids("<html>login</html>").is_empty());
+        assert!(extract_model_ids(r#"{"object":"list"}"#).is_empty());
+        assert!(extract_model_ids(r#"{"data":[]}"#).is_empty());
+    }
+
+    /// base_url 带路径时补一个裸域名候选，让只认域名的中转也能通。
+    #[test]
+    fn offers_a_bare_origin_candidate_when_the_base_url_has_a_path() {
+        assert_eq!(
+            model_list_urls("https://api.example.com/v1"),
+            vec![
+                "https://api.example.com/v1/models".to_string(),
+                "https://api.example.com/models".to_string(),
+            ]
+        );
+    }
+
+    /// 裸域名只试一次，别把同一个地址请求两遍。
+    #[test]
+    fn keeps_one_candidate_when_the_base_url_is_bare() {
+        assert_eq!(
+            model_list_urls("https://api.example.com"),
+            vec!["https://api.example.com/models".to_string()]
+        );
+    }
+}
+
 // ---------------- SSE ----------------
 
 /// 原始 SSE 流，产出每个 event 的 `data:` 载荷（String）。

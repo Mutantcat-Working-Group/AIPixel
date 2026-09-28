@@ -902,29 +902,110 @@ body {
   color: var(--text-dim);
 }
 
-.gate-points {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin: 2px 0 0;
+/* 崩溃兜底的重载按钮：不用 antd，挂掉时连 Provider 都不一定还活着。 */
+.crash-reload {
+  align-self: flex-start;
+  height: 26px;
+  padding: 0 14px;
+  font-size: 12px;
+  color: #fff;
+  background: var(--accent);
+  border: 1px solid transparent;
+  border-radius: 5px;
+  cursor: pointer;
 }
 
-.gate-point {
+.crash-reload:hover {
+  filter: brightness(1.08);
+}
+
+.size-modal .ant-modal-body {
   display: flex;
-  gap: 8px;
-  align-items: flex-start;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.size-modal-body {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.size-preview {
+  height: 96px;
+  max-width: 100%;
+  flex: 0 1 auto;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background-color: #161a24;
+  background-image: linear-gradient(45deg, rgba(255, 255, 255, 0.06) 25%, transparent 25%, transparent 75%, rgba(255, 255, 255, 0.06) 75%),
+    linear-gradient(45deg, rgba(255, 255, 255, 0.06) 25%, transparent 25%, transparent 75%, rgba(255, 255, 255, 0.06) 75%);
+  background-size: 12px 12px;
+  background-position: 0 0, 6px 6px;
+}
+
+.size-fields {
+  display: flex;
+  flex: 1 1 0;
+  min-width: 0;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.size-field .k {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 11px;
   color: var(--text-dim);
 }
 
-.gate-point .k {
-  color: var(--accent);
+.size-field .ant-input-number {
+  width: 100%;
+}
+
+.size-times {
+  align-self: center;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.size-readout {
   font-family: var(--mono);
   font-size: 11px;
-  border: 1px solid var(--border-strong);
-  border-radius: 4px;
-  padding: 0 5px;
-  flex: none;
-  line-height: 18px;
+  color: var(--text-dim);
+}
+
+.size-presets-label {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.size-preset-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.size-hint {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.model-fetch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: -4px 0 4px;
+}
+
+.model-fetch-picker {
+  min-width: 180px;
+}
+
+.model-fetch-note {
+  font-size: 11px;
+  color: var(--text-dim);
 }
 
 .model-modal .ant-modal-body {
@@ -1603,9 +1684,10 @@ body {
 /* ---------- 模型能力勾选 ---------- */
 
 .cap-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
-  gap: 4px 10px;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  gap: 4px 18px;
 }
 
 /* ---------- 会话模型分工 ---------- */

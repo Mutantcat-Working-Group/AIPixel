@@ -23,6 +23,7 @@ import type {
   ModelsView,
   ModelRole,
  PermissionMode,
+  Protocol,
   PixelDocument,
   RecipeImportReport,
   SessionInfo,
@@ -59,6 +60,21 @@ export function removeModel(id: string): Promise<ModelsView> {
 
 export function setActiveModel(id: string): Promise<ModelsView> {
   return invoke<ModelsView>("model_set_active", { id });
+}
+
+/** 拉 provider 的模型清单。id 只为「沿用本机已存密钥」而传，不参与请求本身。 */
+export function fetchModelList(params: {
+  id?: string | null;
+  baseUrl: string;
+  apiKey: string;
+  protocol: Protocol;
+}): Promise<string[]> {
+  return invoke<string[]>("model_fetch_models", {
+    id: params.id ?? undefined,
+    baseUrl: params.baseUrl,
+    apiKey: params.apiKey,
+    protocol: params.protocol,
+  });
 }
 
 export function listMcpServers(): Promise<McpServersView> {

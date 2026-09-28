@@ -2,8 +2,8 @@
 //! 事件统一走 `agent-event` 通道，`AgentEvent` 自带 kind tag，前端按 kind 分派。
 
 use agent_core::{
-    ActiveContext, AgentEvent, AgentSession, ApprovalDecision, Attachment, AttachmentRole, Message,
-    ModelConfig, ModelRole, PermissionMode,
+    ActiveContext, AgentEvent, AgentSession, ApprovalDecision, Attachment, AttachmentRole,
+    Capabilities, Message, ModelConfig, ModelRole, PermissionMode, Protocol,
 };
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, State};
@@ -15,6 +15,39 @@ use crate::state::{default_document, AppState, ModelsView};
 #[tauri::command]
 pub fn agent_list_models(state: State<'_, AppState>) -> ModelsView {
     state.models_view()
+}
+
+/// 拉 provider 的模型清单，供设置里「获取」后挑一个填入。
+/// api_key 留空表示沿用本机已存密钥：改已有定义时用户不用把密钥再贴一遍。
+#[tauri::command]
+pub async fn model_fetch_models(
+    state: State<'_, AppState>,
+    id: Option<String>,
+    base_url: String,
+    api_key: String,
+    protocol: Protocol,
+) -> Result<Vec<String>, String> {
+    let api_key = if api_key.trim().is_empty() {
+        id.as_deref()
+            .and_then(|id| state.stored_api_key(id))
+            .unwrap_or_default()
+    } else {
+        api_key
+    };
+    let config = ModelConfig {
+        id: id.unwrap_or_else(|| "fetch".into()),
+        label: String::new(),
+        protocol,
+        base_url,
+        api_key,
+        model: String::new(),
+        max_tokens: None,
+        temperature: None,
+        capabilities: Capabilities::default(),
+    };
+    agent_core::providers::list_models(&config)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// 新增/更新一个模型。api_key 留空表示沿用本机已存密钥。
@@ -198,13 +231,15 @@ pub fn agent_send_message(
     let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
     // 转发任务：把主循环事件搬上 Tauri 事件总线，流式期间不阻塞 UI。
     let forwarder = app.clone();
-    tokio::spawn(async move {
+    // 同步命令跑在主线程（WebView 的 IPC 回调线程），那里没有 tokio 运行时上下文，
+    // 直接 tokio::spawn 会 panic 并把整个进程带崩；必须走 Tauri 自己的异步运行时。
+    tauri::async_runtime::spawn(async move {
         while let Some(event) = rx.recv().await {
             let _ = forwarder.emit("agent-event", event);
         }
     });
     // 主循环跑在独立任务里，命令拿到的是「已受理」而非「已跑完」。
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         session.run_turn(text, attachments, tx).await;
     });
     Ok(())
@@ -362,4 +397,36 @@ pub fn aip_load(path: String) -> Result<Value, String> {
     let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {path}: {e}"))?;
     let doc = pixel_core::aip::import_any(&text).map_err(|e| e.to_string())?;
     serde_json::to_value(&doc).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::panic::AssertUnwindSafe;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    /// 回归：同步命令的执行线程（macOS 上是 WebView 的 IPC 回调线程）没有 tokio
+    /// 运行时上下文，裸 `tokio::spawn` 会直接 panic 并把进程带崩 —— 用户一按回车
+    /// 应用就消失。所以 agent_send_message / batch_run 一律走 tauri::async_runtime。
+    #[test]
+    fn spawning_off_the_runtime_context() {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let panicked = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            tokio::spawn(async move {
+                let _ = tx.send("bare tokio::spawn ran");
+            });
+        }))
+        .is_err();
+        assert!(panicked, "bare tokio::spawn must refuse to run off a runtime context");
+        assert!(rx.try_recv().is_err(), "nothing should have been scheduled");
+
+        let (tx, rx) = mpsc::sync_channel(1);
+        tauri::async_runtime::spawn(async move {
+            let _ = tx.send("tauri::async_runtime::spawn ran");
+        });
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(10)).expect("task must run"),
+            "tauri::async_runtime::spawn ran"
+        );
+    }
 }
