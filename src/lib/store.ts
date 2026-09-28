@@ -200,8 +200,12 @@ export interface StoreActions {
   surfaceError: (message: string) => void;
   /** 把一段文本塞进聊天输入框；不让用户手动复制粘贴。 */
   requestCompose: (text: string) => void;
-  /** 「用这条提示词生图」：写进生图面板并切过去。 */
-  usePromptInGen: (prompt: string) => void;
+  /**
+   * 「用这条提示词生图」：写进生图面板并切过去。
+   * referencePath 是「图也一起带过去」：识图读过的示例图垫到生图面板当参考图，
+   * 模型既看得见描述、也看得见原图；不给就只搬提示词，不动垫图设置。
+   */
+  usePromptInGen: (prompt: string, referencePath?: string | null) => void;
   /** 对挂起的工具调用给出决定；Approve all 只降级本 turn。 */
   resolveApproval: (decision: ApprovalDecision) => Promise<void>;
   /** 落一笔：抬笔时整笔发送，颜色取当前调色板选择（null = 擦除）。 */
@@ -1115,12 +1119,18 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     requestCompose: (text) =>
       setState({ composeRequest: { text, nonce: Date.now() } }),
 
-    usePromptInGen: (prompt) =>
+    usePromptInGen: (prompt, referencePath) =>
       setState({
         kind: "image_gen",
         outcome: null,
         outcomeError: null,
-        dockDraft: { ...getState().dockDraft, prompt },
+        dockDraft: {
+          ...getState().dockDraft,
+          prompt,
+          // 带了参考图就把垫图源切到这张磁盘图：生图面板直接看得见它。
+          // 图是空的就不动用户原来选好的垫图方式。
+          ...(referencePath ? { genSource: "file", genPath: referencePath } : {}),
+        },
       }),
 
     resolveApproval: async (decision) => {

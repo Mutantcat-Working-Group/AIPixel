@@ -610,7 +610,8 @@ function VisionPanel({ gated }: { gated: boolean }) {
           icon={<ArrowRight size={13} />}
           disabled={gated || vision === null}
           onClick={() => {
-            if (vision) usePromptInGen(briefToText(vision));
+            // path 是刚才挑给识图的那张示例图：提示词描述它，垫图直接把原图递给模型。
+            if (vision) usePromptInGen(briefToText(vision), path);
           }}
         >
           {t("dock.draw_from_this")}

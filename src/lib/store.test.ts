@@ -317,3 +317,30 @@ describe("videoBriefToText", () => {
     );
   });
 });
+
+describe("把提示词送进生图面板（识图 -> 生图）", () => {
+  it("带着参考图时，垫图源切到这张磁盘图", () => {
+    useStore.getState().patchDraft({ genSource: "none", genPath: null });
+    invokeCalls.length = 0;
+
+    useStore.getState().usePromptInGen("一只乌鸦起飞", "/tmp/crow.png");
+
+    const draft = useStore.getState().dockDraft;
+    expect(useStore.getState().kind).toBe("image_gen");
+    expect(draft.prompt).toBe("一只乌鸦起飞");
+    // 只看过描述等于把原图扔了：垫图必须是刚挑的那张示例图。
+    expect(draft.genSource).toBe("file");
+    expect(draft.genPath).toBe("/tmp/crow.png");
+  });
+
+  it("不带参考图时，原来选好的垫图方式原样留着", () => {
+    useStore.getState().patchDraft({ genSource: "frame", genFrame: "F1", genPath: null });
+
+    useStore.getState().usePromptInGen("把头饰画大一点");
+
+    const draft = useStore.getState().dockDraft;
+    expect(draft.genSource).toBe("frame");
+    expect(draft.genFrame).toBe("F1");
+    expect(draft.genPath).toBeNull();
+  });
+});
