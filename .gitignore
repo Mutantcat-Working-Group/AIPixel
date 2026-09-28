@@ -15,6 +15,9 @@ __pycache__/
 /example/build/
 /example/dist/
 
+# release workflow 的暂存目录：wheel、源码包、校验和都往这里落
+/release/
+
 .venv/
 venv/
 .python-version

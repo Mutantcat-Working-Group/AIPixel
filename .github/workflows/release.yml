@@ -31,7 +31,10 @@ jobs:
       - name: Build source tar
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          tar -czf "release/aipixel-${VERSION}-source.tar.gz" \
+          # 先把包写在被打包的目录外：写进 release/ 的话 tar 一边读一边发现
+          # 自己在长，报「file changed as we read it」就整个 job 挂掉，刚拷
+          # 进来的 wheel 也会跟着被打进源码包。所以排除 release/，压完再挪回去。
+          tar -czf "/tmp/aipixel-${VERSION}-source.tar.gz" \
             --exclude='./.git' \
             --exclude='./.venv' \
             --exclude='./__pycache__' \
@@ -42,7 +45,9 @@ jobs:
             --exclude='./example/dist' \
             --exclude='./example/__pycache__' \
             --exclude='./example/aipixel.egg-info' \
+            --exclude='./release' \
             -C . .
+          mv "/tmp/aipixel-${VERSION}-source.tar.gz" "release/"
           cd release
           sha256sum * > ../checksums.txt
           md5sum * > ../checksums-md5.txt
