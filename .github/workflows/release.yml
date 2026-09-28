@@ -125,6 +125,54 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      # Hosted runner 上没有代码签名证书，现场签一张自签名的，不然 Windows 只能
+      # 出无签名安装包。签名材料和 signtool 路径写进 GITHUB_ENV 给后面用。
+      - name: Mint a self-signed code-signing certificate
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pfx = Join-Path $env:RUNNER_TEMP 'aipixel-code-signing.pfx'
+          $password = 'mutantcat'
+          $cert = New-SelfSignedCertificate `
+            -Subject 'CN=Mutantcat Working Group, O=Mutantcat Working Group, C=CN' `
+            -CertStoreLocation 'Cert:\CurrentUser\My' `
+            -KeyUsage DigitalSignature `
+            -Type CodeSigningCert `
+            -KeyExportPolicy Exportable `
+            -KeyLength 2048 `
+            -HashAlgorithm SHA256 `
+            -NotAfter (Get-Date).AddYears(10)
+          Export-PfxCertificate -Cert $cert -FilePath $pfx -Password (ConvertTo-SecureString -String $password -Force -AsPlainText) | Out-Null
+          "PFX_PATH=$pfx" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "SIGN_PASSWORD=$password" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CERT_THUMBPRINT=$($cert.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+          $signtool = $null
+          foreach ($kit in (Get-ChildItem -Path 'C:\Program Files (x86)\Windows Kits\10\bin' -Directory | Sort-Object Name -Descending)) {
+            $candidate = Join-Path $kit.FullName 'x64\signtool.exe'
+            if (Test-Path $candidate) { $signtool = $candidate; break }
+          }
+          if (-not $signtool) { throw 'signtool.exe not found in the Windows SDK' }
+          "SIGNTOOL_PATH=$signtool" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # bundler 只会原样打包编出来的 exe：Windows 上先编不打包、把 exe 签掉，
+      # 再让 bundler 打 NSIS，不然安装包里嵌的是没签名的本体。
+      - name: Build and self-sign the Windows payload
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          pnpm tauri build --no-bundle
+          $exes = @()
+          foreach ($root in @('target/release', 'src-tauri/target/release')) {
+            if (Test-Path -LiteralPath $root) {
+              $exes += @(Get-ChildItem -Path $root -Filter *.exe -File)
+            }
+          }
+          if ($exes.Count -eq 0) { throw 'no release executable to sign under target/release' }
+          & $env:SIGNTOOL_PATH sign /fd SHA256 /f $env:PFX_PATH /p $env:SIGN_PASSWORD /d 'AIPixel' $exes.FullName
+
       - name: Build installers
         env:
           # 没有苹果开发者证书，走 ad-hoc 签名；Gatekeeper 会提示用户右键打开
@@ -153,6 +201,57 @@ jobs:
           done
           ls -l installer-out
           [ -n "$(ls -A installer-out)" ]
+
+      # 自签证书不在信任链里，所以不断签名链，只确认签名确实落在刚签的那张证书上。
+      - name: Sign and verify the Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setups = @(Get-ChildItem -Path 'installer-out' -Filter '*-setup.exe' -File)
+          if ($setups.Count -eq 0) { throw 'no Windows installer collected to sign' }
+          foreach ($setup in $setups) {
+            & $env:SIGNTOOL_PATH sign /fd SHA256 /f $env:PFX_PATH /p $env:SIGN_PASSWORD /d 'AIPixel Installer' $setup.FullName
+            $signature = Get-AuthenticodeSignature -FilePath $setup.FullName
+            if ($signature.Status -eq 'NotSigned') { throw "installer $($setup.Name) carries no signature" }
+            if ($signature.SignerCertificate.Thumbprint -ne $env:CERT_THUMBPRINT) {
+              throw "installer $($setup.Name) was signed by an unexpected certificate"
+            }
+            Write-Host "installer signed: $($setup.Name) -> $($signature.SignerCertificate.Subject)"
+          }
+
+      # 用户挂载的是 DMG 本体，ad-hoc 签名和 /Applications 快捷方式得在镜像里活着。
+      - name: Verify the macOS disk image
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          shopt -s nullglob
+          images=(installer-out/*.dmg)
+          if [ "${#images[@]}" -eq 0 ]; then
+            echo "::error::no disk image to verify"
+            exit 1
+          fi
+          codesign --verify --verbose=2 "${images[0]}"
+          MOUNT="$(mktemp -d)"
+          hdiutil attach "${images[0]}" -nobrowse -readonly -mountpoint "${MOUNT}" >/dev/null
+          trap 'hdiutil detach "${MOUNT}" >/dev/null || true' EXIT
+          if [ ! -L "${MOUNT}/Applications" ]; then
+            echo "::error::${images[0]} has no /Applications link"
+            exit 1
+          fi
+          echo "/Applications link -> $(readlink "${MOUNT}/Applications")"
+          bundles=("${MOUNT}"/*.app)
+          if [ "${#bundles[@]}" -ne 1 ]; then
+            echo "::error::expected one .app bundle in ${images[0]}, found ${#bundles[@]}"
+            exit 1
+          fi
+          codesign --verify --deep --strict --verbose=2 "${bundles[0]}"
+          if ! codesign -dv "${bundles[0]}" 2>&1 | grep -q 'Signature=adhoc'; then
+            echo "::error::the app inside ${images[0]} is not ad-hoc signed"
+            exit 1
+          fi
+          echo "mounted app is ad-hoc signed: ${bundles[0]}"
+          hdiutil detach "${MOUNT}" >/dev/null
 
       - name: Upload installers
         uses: actions/upload-artifact@v4
