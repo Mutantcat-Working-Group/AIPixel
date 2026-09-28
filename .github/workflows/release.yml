@@ -78,6 +78,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${GITHUB_REF_NAME}"
+          # build 里打进来的是「release/ 下的包 + 仓库根目录的 checksums」，
+          # download-artifact 会照原样还原这层目录，glob 展开后 release/ 本身
+          # 也排在列表里，gh 就把它当资产上传并报「is a directory」。先把子目录
+          # 里的文件提到最上一层，再删掉空目录，保证传上去的全是文件。
+          find release-assets -mindepth 2 -type f -exec mv -n {} release-assets/ \;
+          find release-assets -mindepth 1 -type d -empty -delete
           if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             gh release upload "${TAG}" release-assets/* --repo "${GITHUB_REPOSITORY}" --clobber
           else
