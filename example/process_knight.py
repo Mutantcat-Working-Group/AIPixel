@@ -3,6 +3,8 @@
 from PIL import Image
 import os
 
+from pathlib import Path
+
 def process_knight_to_32x32(input_path, output_path):
     """
     将骑士精灵图处理成32x32的角色帧
@@ -73,7 +75,9 @@ def process_knight_to_32x32(input_path, output_path):
     return new_sprite_sheet
 
 if __name__ == "__main__":
-    input_file = "/Users/tyza66/项目/AIPixel/refer_img/骑士.png"
-    output_file = "/Users/tyza66/项目/AIPixel/refer_img/骑士_32x32.png"
+    # 样例跟着 example/ 走：按自己所在目录找图，换机器也跑得起来。
+    refer_dir = Path(__file__).parent / "refer_img"
+    input_file = str(refer_dir / "骑士.png")
+    output_file = str(refer_dir / "骑士_32x32.png")
 
     process_knight_to_32x32(input_file, output_file)
