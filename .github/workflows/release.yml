@@ -139,14 +139,18 @@ jobs:
           fi
 
       # bundle 的落点会随 --target 在 target/release 与 target/<triple>/release
-      # 之间漂，所以不写死路径：按后缀从 bundle 底下把安装包捞出来摊到一层，
-      # 顺带把 bundle/macos 里的 .app 这类中间产物挡在 artifact 外头。
+      # 之间漂，而且 cargo workspace 的 target 落在仓库根、不在 src-tauri 下，
+      # 所以按后缀从两个位置扫，把安装包捞出来摊到一层，顺带把 bundle/macos
+      # 里的 .app 这类中间产物挡在 artifact 外头。
       - name: Collect installers
         run: |
           mkdir -p installer-out
-          find src-tauri/target -type f -path '*/bundle/*' \
-            \( -name '*.dmg' -o -name '*-setup.exe' -o -name '*.AppImage' -o -name '*.deb' \) \
-            -exec cp -n {} installer-out/ \;
+          for d in target src-tauri/target; do
+            [ -d "$d" ] || continue
+            find "$d" -type f -path '*/bundle/*' \
+              \( -name '*.dmg' -o -name '*-setup.exe' -o -name '*.AppImage' -o -name '*.deb' \) \
+              -exec cp -n {} installer-out/ \;
+          done
           ls -l installer-out
           [ -n "$(ls -A installer-out)" ]
 

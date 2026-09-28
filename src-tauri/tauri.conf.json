@@ -30,7 +30,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["dmg", "app", "nsis"],
+    "targets": ["dmg", "app", "nsis", "appimage", "deb"],
     "category": "DeveloperTool",
     "copyright": "MIT",
     "shortDescription": "Pixel art agent workspace",
