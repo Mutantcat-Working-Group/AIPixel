@@ -25,6 +25,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { Field, QuantizeFields } from "./QuantizeFields";
 import * as bridge from "../lib/bridge";
 import { briefToText, probeSummary, videoBriefToText } from "../lib/dock-format";
+import { isModelBacked, servedLineText, type ServedBy } from "../lib/dock-served";
 import { renderUiText, translate, translateText, type Lang } from "../lib/i18n";
 import { useStore } from "../lib/store";
 import { useT, type T } from "../lib/t";
@@ -56,15 +57,6 @@ const SIZE_OPTIONS = ["512x512", "768x768", "1024x1024", "1024x576", "576x1024"]
 const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "webp", "gif"];
 const VIDEO_EXTENSIONS = ["mp4", "mov", "webm", "mkv", "avi", "m4v"];
 
-/** 有模型在背后跑的四条流程加 agent 主循环；抽帧、补间、量化全程本机，不说谁跑。 */
-const MODEL_BACKED: ReadonlySet<DockKind> = new Set<DockKind>([
-  "agent",
-  "prompt_refine",
-  "image_gen",
-  "vision_brief",
-  "video_brief",
-]);
-
 interface DockRow {
   key: DockKind;
   title: string;
@@ -73,14 +65,7 @@ interface DockRow {
   output: string;
   readiness: { state: "ready" } | { state: "blocked"; missing: string[] };
   /** 这条流程实际由哪个模型跑；纯本机的流程没有，是 null。 */
-  servedBy: { label: string; detached: boolean } | null;
-}
-
-/** 面板里那句「由谁跑」。拿主模型凑的要说清楚是主模型，别让用户以为背后藏了个模型。 */
-function servedText(served: { label: string; detached: boolean }, t: T): string {
-  return t(served.detached ? "roles.served" : "roles.served_fallback", {
-    model: served.label,
-  });
+  servedBy: ServedBy | null;
 }
 
 /** 缺的能力名 -> 界面词。Rust 只给 snake_case 标识，中文要说人话。 */
@@ -311,8 +296,8 @@ export default function WorkflowDock() {
             <strong>{active.title}</strong>
           </div>
           <p className="dock-note">{active.summary}</p>
-          {MODEL_BACKED.has(active.key) && active.servedBy ? (
-            <p className="dock-served">{servedText(active.servedBy, t)}</p>
+          {isModelBacked(active.key) && active.servedBy ? (
+            <p className="dock-served">{servedLineText(active.servedBy, t)}</p>
           ) : null}
 
           {pending ? (
