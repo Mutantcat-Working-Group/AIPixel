@@ -6,7 +6,12 @@ import zhCN from "antd/locale/zh_CN";
 
 import App from "./App";
 import { useStore } from "./lib/store";
+import { installBrowserMock } from "./lib/browser-mock";
 import "./styles.css";
+
+// 在普通浏览器里（没有 Tauri webview）先装一份假后端，否则第一个 invoke 就把页面打崩。
+// 真机上这是一次空调用，读一眼 window 就返回。
+installBrowserMock();
 
 /**
  * 兜底边界：渲染炸了也别让整个窗口变白。WebView 崩了用户只能重开，
