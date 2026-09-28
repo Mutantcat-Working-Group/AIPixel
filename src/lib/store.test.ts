@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { briefToText, probeSummary, videoBriefToText } from "./dock-format";
 import { DEFAULT_BATCH_RECIPE, EMPTY_BATCH_RUN } from "./batch";
-import { blankDocument, useStore } from "./store";
+import { blankDocument, useStore, type WorkflowParams } from "./store";
 import type {
   BatchRecipe,
   BatchRecipeEntry,
@@ -605,5 +605,150 @@ describe("会话模型分工（按角色另绑模型）", () => {
     await useStore.getState().clearSessionRole("vision");
 
     expect(invokeCalls).toEqual([]);
+  });
+});
+
+describe("runWorkflow / runPixelize 派发（kind -> Rust 命令 -> params）", () => {
+  /** translateText 认不出的键回落 fallback，所以这里顺手验证回执原文不带回字典。 */
+  const okOutcome = {
+    revision: 4,
+    summary: { key: "_test.summary", fallback: "done" },
+  };
+
+  /** 每条用例都从同一起点出发：有会话、空对话流、四个命令都回 okOutcome。 */
+  function reset(overrides: Record<string, unknown> = {}): void {
+    for (const cmd of ["workflow_image_gen", "workflow_tween", "workflow_video_frames", "workflow_pixelize"]) {
+      invokeResults[cmd] = okOutcome;
+      delete invokeErrors[cmd];
+    }
+    useStore.setState({
+      activeId: "doc-01",
+      lang: "zh",
+      entries: [],
+      workflowBusy: false,
+      outcome: null,
+      outcomeError: null,
+      notice: null,
+      ...overrides,
+    });
+    invokeCalls.length = 0;
+  }
+
+  it("image_gen 落到 workflow_image_gen，params 一个字段不改", async () => {
+    reset();
+    const params: WorkflowParams = {
+      prompt: "一只乌鸦起飞",
+      size: "1024x1024",
+      reference_frame: "F0",
+      reference_path: null,
+      spot: "new_frame",
+      duration_ms: 120,
+      options: null,
+    };
+
+    const outcome = await useStore.getState().runWorkflow("image_gen", params);
+
+    expect(invokeCalls).toEqual([
+      { cmd: "workflow_image_gen", args: { id: "doc-01", params } },
+    ]);
+    expect(outcome).toEqual(okOutcome);
+    expect(useStore.getState().outcome).toEqual(okOutcome);
+    expect(useStore.getState().outcomeError).toBeNull();
+    expect(useStore.getState().workflowBusy).toBe(false);
+  });
+
+  it("frame_tween 落到 workflow_tween，插值参数照搬", async () => {
+    reset();
+    const params: WorkflowParams = {
+      from_frame: "F0",
+      to_frame: "F1",
+      count: 4,
+      mode: "blend",
+      duration_ms: 90,
+    };
+
+    await useStore.getState().runWorkflow("frame_tween", params);
+
+    expect(invokeCalls).toEqual([{ cmd: "workflow_tween", args: { id: "doc-01", params } }]);
+  });
+
+  it("video_frames 落到 workflow_video_frames，路径与抽帧数原样传", async () => {
+    reset();
+    const params: WorkflowParams = { path: "/tmp/clip.mp4", count: 0, duration_ms: 250 };
+
+    await useStore.getState().runWorkflow("video_frames", params);
+
+    expect(invokeCalls).toEqual([
+      { cmd: "workflow_video_frames", args: { id: "doc-01", params } },
+    ]);
+  });
+
+  it("runPixelize 走 workflow_pixelize，与 runWorkflow 的另一条命令不混", async () => {
+    reset();
+    const params: WorkflowParams = {
+      image_base64: "AAAA",
+      media_type: "image/png",
+      options: {
+        max_colors: 16,
+        snap_tolerance: 32,
+        expand_palette: true,
+        dither: false,
+        alpha_threshold: 128,
+        fit: "contain",
+      },
+    };
+
+    const outcome = await useStore.getState().runPixelize(params);
+
+    expect(invokeCalls).toEqual([
+      { cmd: "workflow_pixelize", args: { id: "doc-01", params } },
+    ]);
+    expect(outcome).toEqual(okOutcome);
+  });
+
+  it("没有直接 runner 的 kind 一条命令都不发，把原因写进 outcomeError", async () => {
+    reset();
+
+    for (const kind of ["quantize", "vision_brief", "video_brief", "prompt_refine"] as const) {
+      const returned = await useStore
+        .getState()
+        .runWorkflow(kind, { prompt: "用不上" } as WorkflowParams);
+
+      expect(returned).toBeNull();
+      expect(useStore.getState().outcome).toBeNull();
+      expect(useStore.getState().outcomeError).toContain("no direct runner");
+      expect(useStore.getState().workflowBusy).toBe(false);
+      const notice = useStore.getState().entries[useStore.getState().entries.length - 1];
+      expect(notice).toMatchObject({ kind: "notice", isError: true });
+    }
+
+    // 这四个 kind 都得在前台自己点别的命令，一个 invoke 都不能漏给 Rust。
+    expect(invokeCalls).toEqual([]);
+  });
+
+  it("后端拒绝时回执清空，原话进 outcomeError，busy 复位", async () => {
+    reset();
+    invokeErrors["workflow_image_gen"] = "生图模型不可用";
+
+    const returned = await useStore
+      .getState()
+      .runWorkflow("image_gen", { prompt: "一只乌鸦起飞" });
+
+    expect(returned).toBeNull();
+    expect(useStore.getState().outcome).toBeNull();
+    expect(useStore.getState().outcomeError).toBe("生图模型不可用");
+    expect(useStore.getState().workflowBusy).toBe(false);
+    const last = useStore.getState().entries[useStore.getState().entries.length - 1];
+    expect(last).toMatchObject({ kind: "notice", isError: true, text: "生图模型不可用" });
+  });
+
+  it("没有会话时不发命令，只留一条报错通知", async () => {
+    reset({ activeId: null });
+
+    await useStore.getState().runWorkflow("image_gen", { prompt: "一只乌鸦起飞" });
+    await useStore.getState().runPixelize({ image_base64: "AAAA" });
+
+    expect(invokeCalls).toEqual([]);
+    expect(useStore.getState().notice).toEqual({ text: "还没有会话", isError: true });
   });
 });
