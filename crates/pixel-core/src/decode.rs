@@ -133,13 +133,12 @@ pub fn decode_base64(text: &str) -> Result<Vec<u8>, String> {
         .map(|c| val(c).ok_or("invalid base64 character"))
         .collect::<Result<_, _>>()?;
     let mut out = Vec::with_capacity(digits.len() / 4 * 3 + 3);
-    let mut chunks = digits.chunks_exact(4);
-    for c in &mut chunks {
+    let (quads, tail) = digits.as_chunks::<4>();
+    for c in quads {
         out.push((c[0] << 2) | (c[1] >> 4));
         out.push((c[1] << 4) | (c[2] >> 2));
         out.push((c[2] << 6) | c[3]);
     }
-    let tail = chunks.remainder();
     match tail.len() {
         0 => {}
         1 => return Err("base64 length is invalid: 1 trailing digit".into()),
