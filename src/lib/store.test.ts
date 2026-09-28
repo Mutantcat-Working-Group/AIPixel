@@ -1,8 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { briefToText, probeSummary, videoBriefToText } from "./dock-format";
+import { DEFAULT_BATCH_RECIPE, EMPTY_BATCH_RUN } from "./batch";
 import { blankDocument, useStore } from "./store";
-import type { Layer, PixelDocument, VideoBrief, VideoProbe, VisionBrief } from "./types";
+import type {
+  BatchRecipe,
+  BatchRecipeEntry,
+  BatchScan,
+  Layer,
+  PixelDocument,
+  VideoBrief,
+  VideoProbe,
+  VisionBrief,
+} from "./types";
 
 // Rust 后端只活在桌面进程里，这里把 invoke 整个接住：桥接层的每个函数最终都落到
 // 这一条命令调用上，所以侧栏那四个编辑动作到底往 Rust 发了什么，看它就行。
@@ -10,11 +20,18 @@ const invokeCalls = vi.hoisted(
   () => [] as Array<{ cmd: string; args: Record<string, unknown> }>,
 );
 
+/** 按命令预制返回值：配方簿的读要走这条，编辑器操作继续吃默认的 1。 */
+const invokeResults = vi.hoisted(() => ({}) as Record<string, unknown>);
+
+/** 按命令预制失败：读不到配方簿那条路要靠它。 */
+const invokeErrors = vi.hoisted(() => ({}) as Record<string, string>);
+
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (cmd: string, args?: Record<string, unknown>) => {
     invokeCalls.push({ cmd, args: args ?? {} });
+    if (invokeErrors[cmd]) return Promise.reject(new Error(invokeErrors[cmd]));
     // 编辑器操作统一回报一个新 revision，真实环境由 Rust 校验 op。
-    return Promise.resolve(1);
+    return Promise.resolve(invokeResults[cmd] ?? 1);
   },
 }));
 
@@ -315,6 +332,123 @@ describe("videoBriefToText", () => {
     expect(text).toBe(
       ["subject: a crow taking off", "craft: hard edges, no motion blur"].join("\n"),
     );
+  });
+});
+
+describe("批量配方簿（存、取、删）", () => {
+  function entry(name: string, recipe: Partial<BatchRecipe> = {}): BatchRecipeEntry {
+    return { name, recipe: { ...DEFAULT_BATCH_RECIPE, ...recipe } };
+  }
+
+  function scanOf(dir: string): BatchScan {
+    return { kind: "quantize", dir, count: 2, truncated: false, files: [] };
+  }
+
+  it("存的是当前 recipe，不是簿子里旧的那份", async () => {
+    invokeResults["batch_recipes_list"] = [entry("旧配方", { target_w: 16 })];
+    useStore.setState({
+      recipe: { ...DEFAULT_BATCH_RECIPE, target_w: 96, kind: "export" },
+      recipeName: "新配方",
+      recipeBook: [],
+    });
+    invokeCalls.length = 0;
+
+    await useStore.getState().saveRecipeAs();
+
+    const saved = invokeCalls.find((call) => call.cmd === "batch_recipe_save");
+    expect(saved?.args.name).toBe("新配方"); // 前后空白已经裁掉
+    expect((saved?.args.recipe as BatchRecipe).target_w).toBe(96);
+    // 存完把输入框清空，簿子里新出现的那一条才是「存好了」的确认。
+    expect(useStore.getState().recipeName).toBe("");
+    expect(useStore.getState().recipeBook[0].name).toBe("旧配方");
+  });
+
+  it("名字不合法时一个命令都不发", async () => {
+    useStore.setState({ recipeName: "   " });
+    invokeCalls.length = 0;
+
+    await useStore.getState().saveRecipeAs();
+
+    expect(invokeCalls.filter((call) => call.cmd === "batch_recipe_save")).toEqual([]);
+  });
+
+  it("挑一条配方盖上来，同时作废旧扫描与旧明细", () => {
+    useStore.setState({
+      recipe: DEFAULT_BATCH_RECIPE,
+      recipeBook: [entry("sword-32", { target_w: 48, match_source_size: false })],
+      recipeName: "",
+      scan: scanOf("/old/input"),
+      run: { ...EMPTY_BATCH_RUN, rows: [{ file: "a.png", state: "ok", note: "" }] },
+    });
+
+    useStore.getState().applyRecipe("sword-32");
+
+    const { recipe, recipeName, scan, run } = useStore.getState();
+    expect(recipe.target_w).toBe(48);
+    expect(recipe.match_source_size).toBe(false);
+    // 选择框要显示刚取的那一条，否则看不出现在用的是谁。
+    expect(recipeName).toBe("sword-32");
+    expect(scan).toBeNull();
+    expect(run).toEqual(EMPTY_BATCH_RUN);
+  });
+
+  it("老配方缺字段时按默认补齐，不让默认值把已有参数盖掉", () => {
+    useStore.setState({
+      recipe: DEFAULT_BATCH_RECIPE,
+      // 早先版本存下的半条配方：只有目录与种类。
+      recipeBook: [
+        {
+          name: "半条",
+          recipe: { kind: "quantize", input_dir: "/old", output_dir: "/out" } as BatchRecipe,
+        },
+      ],
+    });
+
+    useStore.getState().applyRecipe("半条");
+
+    const recipe = useStore.getState().recipe;
+    expect(recipe.input_dir).toBe("/old");
+    expect(recipe.options).toEqual(DEFAULT_BATCH_RECIPE.options);
+    expect(recipe.export_format).toBe("png");
+  });
+
+  it("删配方；删的正是当前这条时把输入框一起清掉", async () => {
+    invokeResults["batch_recipes_list"] = [];
+    useStore.setState({
+      recipeBook: [entry("甲"), entry("乙")],
+      recipeName: "乙",
+    });
+    invokeCalls.length = 0;
+
+    await useStore.getState().removeRecipe("乙");
+
+    expect(
+      invokeCalls.some((call) => call.cmd === "batch_recipe_delete" && call.args.name === "乙"),
+    ).toBe(true);
+    expect(useStore.getState().recipeName).toBe("");
+    expect(useStore.getState().recipeBook).toEqual([]);
+  });
+
+  it("删的是另一条时输入框原样留着", async () => {
+    invokeResults["batch_recipes_list"] = [entry("甲")];
+    useStore.setState({ recipeBook: [entry("甲"), entry("乙")], recipeName: "甲" });
+
+    await useStore.getState().removeRecipe("乙");
+
+    expect(useStore.getState().recipeName).toBe("甲");
+    expect(useStore.getState().recipeBook.map((item) => item.name)).toEqual(["甲"]);
+  });
+
+  it("读不到配方簿只当没有，不给用户弹错误", async () => {
+    invokeErrors["batch_recipes_list"] = "config dir unreadable";
+    useStore.setState({ recipeBook: [entry("甲")], entries: [] });
+
+    await useStore.getState().loadRecipes();
+
+    // 读不到就是没有，别让一条坏配方挡住批量工作台。
+    expect(useStore.getState().recipeBook).toEqual([]);
+    // 但痕迹要留：通知栏多一条，比无声无息什么都没发生好。
+    expect(useStore.getState().notice?.isError).toBe(true);
   });
 });
 

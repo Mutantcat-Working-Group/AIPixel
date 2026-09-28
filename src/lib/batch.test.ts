@@ -6,13 +6,17 @@ import { describe, expect, it } from "vitest";
 import {
   batchPercent,
   canRunBatch,
+  canSaveRecipe,
   DEFAULT_BATCH_RECIPE,
   DEFAULT_PIXELIZE_OPTIONS,
   EMPTY_BATCH_RUN,
+  MAX_RECIPE_NAME_CHARS,
+  MAX_RECIPES,
   reduceBatchEvent,
+  recipeNameProblem,
   scanMatchesKind,
 } from "./batch";
-import type { BatchScan } from "./types";
+import type { BatchRecipeEntry, BatchScan } from "./types";
 
 function scan(over: Partial<BatchScan> = {}): BatchScan {
   return {
@@ -160,5 +164,37 @@ describe("defaults", () => {
     expect(DEFAULT_BATCH_RECIPE.output_dir).toBe("");
     expect(DEFAULT_BATCH_RECIPE.match_source_size).toBe(true);
     expect(DEFAULT_BATCH_RECIPE.export_format).toBe("png");
+  });
+});
+
+describe("配方名（存之前先问一遍）", () => {
+  const book: BatchRecipeEntry[] = [{ name: "sword-32", recipe: DEFAULT_BATCH_RECIPE }];
+
+  it("空名字和只有空格的名字都算没起", () => {
+    expect(recipeNameProblem("", book)).toBe("empty");
+    expect(recipeNameProblem("   ", book)).toBe("empty");
+    expect(canSaveRecipe("  ", book)).toBe(false);
+  });
+
+  it("按字符数算长度，中文名不吃亏", () => {
+    expect(recipeNameProblem("字".repeat(MAX_RECIPE_NAME_CHARS), book)).toBeNull();
+    expect(recipeNameProblem("字".repeat(MAX_RECIPE_NAME_CHARS + 1), book)).toBe("long");
+  });
+
+  it("斜杠和控制字符都拒掉：名字不能看着像路径", () => {
+    expect(recipeNameProblem("a/b", book)).toBe("chars");
+    expect(recipeNameProblem("a\\b", book)).toBe("chars");
+    expect(recipeNameProblem("a\nb", book)).toBe("chars");
+  });
+
+  it("同名永远放行：簿子满了也能改旧配方", () => {
+    const full: BatchRecipeEntry[] = Array.from({ length: MAX_RECIPES }, (_, index) => ({
+      name: `配方${index}`,
+      recipe: DEFAULT_BATCH_RECIPE,
+    }));
+    expect(recipeNameProblem("配方7", full)).toBeNull();
+    expect(recipeNameProblem("新名字", full)).toBe("full");
+    expect(canSaveRecipe("配方7", full)).toBe(true);
+    expect(canSaveRecipe("新名字", full)).toBe(false);
   });
 });

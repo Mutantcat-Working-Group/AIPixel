@@ -3,12 +3,28 @@
 // 所以面板里没有任何模型控件：两个文件夹、一遍扫描、一个开始，就是全部。
 // 过程走 batch-event，逐文件折进行表；跑完的回执带成败计数，失败原因跟在自己那一行上。
 
-import { Alert, Button, InputNumber, Progress, Segmented, Switch } from "antd";
-import { FolderOpen, Layers, Play, ScanSearch, X } from "lucide-react";
+import {
+  Alert,
+  Button,
+  Input,
+  InputNumber,
+  Popconfirm,
+  Progress,
+  Segmented,
+  Select,
+  Switch,
+} from "antd";
+import { FolderOpen, Layers, Play, Save, ScanSearch, Trash2, X } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 
 import { Field, QuantizeFields } from "./QuantizeFields";
-import { batchPercent, canRunBatch, scanMatchesKind } from "../lib/batch";
+import {
+  MAX_RECIPE_NAME_CHARS,
+  batchPercent,
+  canRunBatch,
+  recipeNameProblem,
+  scanMatchesKind,
+} from "../lib/batch";
 import { useStore } from "../lib/store";
 import { useT } from "../lib/t";
 import type { BatchKind, ExportFormat } from "../lib/types";
@@ -65,10 +81,26 @@ export default function BatchPanel() {
   const scanBatchInput = useStore((s) => s.scanBatchInput);
   const runBatch = useStore((s) => s.runBatch);
   const resetBatch = useStore((s) => s.resetBatch);
+  const recipeBook = useStore((s) => s.recipeBook);
+  const recipeName = useStore((s) => s.recipeName);
+  const recipeBusy = useStore((s) => s.recipeBusy);
+  const patchRecipeName = useStore((s) => s.patchRecipeName);
+  const saveRecipeAs = useStore((s) => s.saveRecipeAs);
+  const applyRecipe = useStore((s) => s.applyRecipe);
+  const removeRecipe = useStore((s) => s.removeRecipe);
 
   // store 会在 kind / 目录变化时作废旧扫描，这里再确认一次：清单和 recipe 必须是同一码事。
   const scanned = scan !== null && scanMatchesKind(scan, recipe.kind);
   const canRun = scanned && canRunBatch(scan, run);
+  // 名字合不合法前端先算一遍（Rust 侧还有一道），理由直接摆在按钮旁边。
+  const problem = recipeNameProblem(recipeName, recipeBook);
+  const problemVars =
+    problem === "long"
+      ? { count: MAX_RECIPE_NAME_CHARS }
+      : problem === "full"
+        ? { count: recipeBook.length }
+        : undefined;
+  const savedName = recipeBook.some((entry) => entry.name === recipeName);
 
   async function pickDir(assign: (dir: string) => void) {
     const picked = await open({ directory: true });
@@ -106,6 +138,68 @@ export default function BatchPanel() {
               onChange={(next) => setBatchKind(next as BatchKind)}
             />
           </Field>
+
+          <Field label={t("batch.recipe.name")}>
+            <div className="dock-actions">
+              <Input
+                size="small"
+                style={{ flex: 1, minWidth: 0 }}
+                value={recipeName}
+                maxLength={MAX_RECIPE_NAME_CHARS + 8}
+                placeholder={t("batch.recipe.name_placeholder")}
+                onChange={(event) => patchRecipeName(event.target.value)}
+              />
+              <Button
+                size="small"
+                type="primary"
+                icon={<Save size={12} />}
+                loading={recipeBusy}
+                disabled={problem !== null}
+                onClick={() => void saveRecipeAs()}
+              >
+                {t("batch.recipe.save")}
+              </Button>
+            </div>
+            {problem ? (
+              <p className="dock-note">{t(`batch.recipe.problem.${problem}`, problemVars)}</p>
+            ) : null}
+          </Field>
+
+          {recipeBook.length > 0 ? (
+            <Field label={t("batch.recipe.book")}>
+              <div className="dock-actions">
+                <Select
+                  size="small"
+                  style={{ flex: 1, minWidth: 0 }}
+                  value={savedName ? recipeName : undefined}
+                  placeholder={t("batch.recipe.pick")}
+                  options={recipeBook.map((entry) => ({
+                    value: entry.name,
+                    label: entry.name,
+                  }))}
+                  onChange={(next) => applyRecipe(next)}
+                />
+                <Popconfirm
+                  title={t("batch.recipe.confirm_delete", { name: recipeName })}
+                  okText={t("batch.recipe.delete_ok")}
+                  cancelText={t("batch.recipe.delete_cancel")}
+                  okButtonProps={{ danger: true }}
+                  disabled={!savedName}
+                  onConfirm={() => void removeRecipe(recipeName)}
+                >
+                  <Button
+                    size="small"
+                    type="text"
+                    danger
+                    disabled={!savedName}
+                    icon={<Trash2 size={12} />}
+                  />
+                </Popconfirm>
+              </div>
+            </Field>
+          ) : (
+            <p className="dock-note">{t("batch.recipe.empty")}</p>
+          )}
 
           <DirField
             label={t("batch.input")}

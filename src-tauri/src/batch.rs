@@ -18,7 +18,7 @@ use pixel_core::png;
 use pixel_core::sheet;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 /// 单次扫描/运行列出的文件上限。防呆：用户把整个家目录拖进来时不至于把内存吃穿。
 pub const MAX_BATCH_FILES: usize = 4000;
@@ -93,6 +93,48 @@ impl Default for BatchRecipe {
             export_format: ExportFormat::Png,
         }
     }
+}
+
+/// 一条存下来的配方：名字 + 一份串好的 recipe。名字是主键，同名保存就是覆盖。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BatchRecipeEntry {
+    pub name: String,
+    pub recipe: BatchRecipe,
+}
+
+/// recipes.json 的落盘结构。与 models.json / mcp.json 并列躺在 app config 目录，
+/// 重启后原样恢复。文件坏了只当空簿子：一条坏配方不该挡住整个批量工作台。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct RecipesFile {
+    #[serde(default)]
+    pub entries: Vec<BatchRecipeEntry>,
+}
+
+/// 配方簿容量上限。几十条跑熟的配方够用，又不至于把 json 撑成日志。
+pub const MAX_RECIPES: usize = 50;
+
+/// 配方名长度上限，按字符数算：中文名二十个字左右就到顶，足以描述一个配方。
+pub const MAX_RECIPE_NAME_CHARS: usize = 40;
+
+/// 配方名校验。名字只当 JSON 里的键、不碰文件系统，所以不必防路径穿越，
+/// 但控制字符会让界面标签变形、斜杠会让名字看起来像路径，两头都拒掉。
+pub fn validate_recipe_name(raw: &str) -> Result<String, String> {
+    let name = raw.trim();
+    if name.is_empty() {
+        return Err("give the recipe a name".into());
+    }
+    if name.chars().count() > MAX_RECIPE_NAME_CHARS {
+        return Err(format!(
+            "recipe name is too long (max {MAX_RECIPE_NAME_CHARS} characters)"
+        ));
+    }
+    if name
+        .chars()
+        .any(|c| c.is_control() || c == '/' || c == '\\')
+    {
+        return Err("recipe name cannot contain slashes or control characters".into());
+    }
+    Ok(name.to_string())
 }
 
 /// 只读扫描：这个目录里到底有几份对口素材。
@@ -200,6 +242,74 @@ pub fn batch_run(app: AppHandle, recipe: BatchRecipe) -> Result<(), String> {
         run_batch(&app, &recipe, &files, &out_dir);
     });
     Ok(())
+}
+
+/// app config 目录。配方跟模型配置、MCP 配置躺在同一个地方。
+fn config_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_config_dir()
+        .map_err(|e| format!("cannot resolve config dir: {e}"))
+}
+
+fn load_recipes(app: &AppHandle) -> RecipesFile {
+    let Ok(dir) = config_dir(app) else {
+        return RecipesFile::default();
+    };
+    let Ok(text) = std::fs::read_to_string(dir.join("recipes.json")) else {
+        return RecipesFile::default();
+    };
+    match serde_json::from_str::<RecipesFile>(&text) {
+        Ok(file) => file,
+        Err(e) => {
+            eprintln!("recipes.json is broken, starting with an empty recipe book: {e}");
+            RecipesFile::default()
+        }
+    }
+}
+
+fn save_recipes(app: &AppHandle, file: &RecipesFile) -> Result<(), String> {
+    let dir = config_dir(app)?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create config dir: {e}"))?;
+    let text = serde_json::to_string_pretty(file).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("recipes.json"), text)
+        .map_err(|e| format!("cannot write recipes.json: {e}"))
+}
+
+/// 列配方簿。读失败就当空簿：配方簿不影响别处运行，没读到就是没有。
+#[tauri::command]
+pub fn batch_recipes_list(app: AppHandle) -> Vec<BatchRecipeEntry> {
+    load_recipes(&app).entries
+}
+
+/// 存一条配方。同名覆盖，所以「微调后原样存回」不会悄悄多出一份重名的。
+#[tauri::command]
+pub fn batch_recipe_save(app: AppHandle, name: String, recipe: BatchRecipe) -> Result<(), String> {
+    let name = validate_recipe_name(&name)?;
+    let mut file = load_recipes(&app);
+    if let Some(existing) = file.entries.iter_mut().find(|e| e.name == name) {
+        existing.recipe = recipe;
+    } else {
+        if file.entries.len() >= MAX_RECIPES {
+            return Err(format!(
+                "recipe book is full (max {MAX_RECIPES}), delete one first"
+            ));
+        }
+        file.entries.push(BatchRecipeEntry { name, recipe });
+    }
+    save_recipes(&app, &file)
+}
+
+/// 删一条配方。删不存在的名字不算错误：界面上连点两次和点一次没有区别。
+#[tauri::command]
+pub fn batch_recipe_delete(app: AppHandle, name: String) -> Result<(), String> {
+    let name = validate_recipe_name(&name)?;
+    let mut file = load_recipes(&app);
+    let before = file.entries.len();
+    file.entries.retain(|e| e.name != name);
+    if file.entries.len() == before {
+        return Ok(());
+    }
+    save_recipes(&app, &file)
 }
 
 fn run_batch(app: &AppHandle, recipe: &BatchRecipe, files: &[PathBuf], out_dir: &Path) {
@@ -364,6 +474,45 @@ fn media_type_for(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recipe_names_get_trimmed_and_bad_ones_refused() {
+        assert_eq!(validate_recipe_name("  sword-32  ").unwrap(), "sword-32");
+        assert!(validate_recipe_name("   ").is_err());
+        assert!(validate_recipe_name("sword/32").is_err());
+        assert!(validate_recipe_name("sword\n32").is_err());
+        let too_long = "x".repeat(MAX_RECIPE_NAME_CHARS + 1);
+        assert!(validate_recipe_name(&too_long).is_err());
+        // 中文按字符数算：二十个字到不了上限。
+        assert!(validate_recipe_name("一把长剑的三十二色配方").is_ok());
+    }
+
+    #[test]
+    fn recipe_book_round_trips_as_json_with_defaults_for_missing_fields() {
+        let file = RecipesFile {
+            entries: vec![BatchRecipeEntry {
+                name: "sword".into(),
+                recipe: BatchRecipe::default(),
+            }],
+        };
+        let text = serde_json::to_string_pretty(&file).unwrap();
+        let back: RecipesFile = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, file);
+
+        // 前端早先存下的老配方可能缺新字段：#[serde(default)] 得把它们补齐。
+        let legacy = r#"{"entries":[{"name":"old","recipe":{"kind":"quantize","input_dir":"","output_dir":""}}]}"#;
+        let back: RecipesFile = serde_json::from_str(legacy).unwrap();
+        assert_eq!(back.entries[0].recipe, BatchRecipe::default());
+
+        // 连 options 里单个字段缺了也要补齐：老配方缺一个选项，整本簿子不该跟着报废。
+        let partial = r#"{"entries":[{"name":"old","recipe":{"kind":"quantize","input_dir":"","output_dir":"","options":{"dither":true}}}]}"#;
+        let back: RecipesFile = serde_json::from_str(partial).unwrap();
+        let options = &back.entries[0].recipe.options;
+        assert!(options.dither);
+        assert_eq!(options.max_colors, 32);
+        assert_eq!(options.alpha_threshold, 128);
+        assert_eq!(options.fit, pixel_core::pixelize::FitMode::Contain);
+    }
 
     fn tmp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join("aipixel/batch-test").join(name);

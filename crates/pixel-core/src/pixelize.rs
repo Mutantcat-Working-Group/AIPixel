@@ -20,18 +20,45 @@ pub enum FitMode {
 /// 量化选项。默认值面向「别把调色板撑爆」的常见诉求。
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PixelizeOptions {
+    #[serde(default = "default_max_colors")]
     /// 从位图里最多提取多少种主色（中位切分上限）。
     pub max_colors: usize,
+    #[serde(default = "default_snap_tolerance")]
     /// 命中画布已有调色板的容差：距离小于它的主色直接复用旧色，不新增。
     pub snap_tolerance: u32,
+    #[serde(default = "default_true")]
     /// 允许为找不到近似色的主色新增调色板项。
     pub expand_palette: bool,
+    #[serde(default)]
     /// 在两个最近调色板档位之间做有序抖动（Bayer 4x4）。
     pub dither: bool,
+    #[serde(default = "default_alpha_threshold")]
     /// alpha 低于该值的输出像素视为透明（索引 0）。
     pub alpha_threshold: u8,
+    #[serde(default = "default_fit")]
     /// 宽高比处理方式。
     pub fit: FitMode,
+}
+
+// 字段级默认值：老配方、老参数缺了新字段时按默认补齐，而不是让整个文件解析失败。
+fn default_max_colors() -> usize {
+    32
+}
+
+fn default_snap_tolerance() -> u32 {
+    12
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_alpha_threshold() -> u8 {
+    128
+}
+
+fn default_fit() -> FitMode {
+    FitMode::Contain
 }
 
 impl Default for PixelizeOptions {

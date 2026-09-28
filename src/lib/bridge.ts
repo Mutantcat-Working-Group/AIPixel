@@ -12,6 +12,7 @@ import type {
   BatchEvent,
   BatchKind,
   BatchRecipe,
+  BatchRecipeEntry,
   BatchScan,
   EditorOperation,
   InkColor,
@@ -240,6 +241,21 @@ export function scanBatch(inputDir: string, kind: BatchKind): Promise<BatchScan>
 /** 起一次批量。命令立即返回，过程走 batch-event。 */
 export function runBatch(recipe: BatchRecipe): Promise<void> {
   return invoke("batch_run", { recipe });
+}
+
+/** 配方簿：跑熟的 recipe 存哪儿、取哪儿。读失败 Rust 给空簿，不当错误。 */
+export function listBatchRecipes(): Promise<BatchRecipeEntry[]> {
+  return invoke<BatchRecipeEntry[]>("batch_recipes_list");
+}
+
+/** 存一条配方；同名覆盖。名字不合法由 Rust 拒掉，带着原因回来。 */
+export function saveBatchRecipe(name: string, recipe: BatchRecipe): Promise<void> {
+  return invoke("batch_recipe_save", { name, recipe });
+}
+
+/** 删一条配方；删不存在的名字 Rust 当成功。 */
+export function deleteBatchRecipe(name: string): Promise<void> {
+  return invoke("batch_recipe_delete", { name });
 }
 
 export function listenBatchEvents(handler: (event: BatchEvent) => void): Promise<UnlistenFn> {

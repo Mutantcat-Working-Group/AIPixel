@@ -4,6 +4,7 @@
 import type {
   BatchEvent,
   BatchItemState,
+  BatchRecipeEntry,
   BatchRecipe,
   BatchScan,
   PixelizeOptions,
@@ -82,6 +83,35 @@ export function reduceBatchEvent(run: BatchRun, raw: BatchEvent): BatchRun {
 /** 该不该放行「开始」：没扫到文件、或正在跑，都不许点。 */
 export function canRunBatch(scan: BatchScan | null, run: BatchRun): boolean {
   return !run.running && !!scan && scan.count > 0;
+}
+
+/** 配方名上限、配方簿容量上限。与 Rust 侧一一对应，前端先拦一遍省一次往返。 */
+export const MAX_RECIPE_NAME_CHARS = 40;
+export const MAX_RECIPES = 50;
+
+/** 这个名字为什么存不下来；null = 可以存。 */
+export type RecipeNameProblem = "empty" | "long" | "chars" | "full";
+
+/**
+ * 存之前先问一遍。和 Rust 侧 `validate_recipe_name` 是同一条线，
+ * 但 Rust 才是最终关口：这里拦的是手滑，不是恶意。
+ */
+export function recipeNameProblem(
+  name: string,
+  book: BatchRecipeEntry[],
+): RecipeNameProblem | null {
+  const trimmed = name.trim();
+  if (trimmed === "") return "empty";
+  if ([...trimmed].length > MAX_RECIPE_NAME_CHARS) return "long";
+  if (/[\u0000-\u001f\u007f-\u009f\u2028\u2029/\\]/.test(trimmed)) return "chars";
+  // 同名覆盖永远放行：簿子满了也能改旧配方，这才叫改配方而不是加配方。
+  if (book.some((entry) => entry.name === trimmed)) return null;
+  if (book.length >= MAX_RECIPES) return "full";
+  return null;
+}
+
+export function canSaveRecipe(name: string, book: BatchRecipeEntry[]): boolean {
+  return recipeNameProblem(name, book) === null;
 }
 
 /** 进度百分比 0..100；没有 total 时归零，交给 UI 当 indeterminate。 */

@@ -64,6 +64,9 @@ pub fn run() {
             editor::editor_paint_stroke,
             batch::batch_scan,
             batch::batch_run,
+            batch::batch_recipe_delete,
+            batch::batch_recipes_list,
+            batch::batch_recipe_save,
         ])
         .run(tauri::generate_context!())
         .expect("error while running AIPixel");

@@ -506,6 +506,12 @@ export interface BatchScan {
   files: string[];
 }
 
+/** 一条存下来的配方：名字加一份串好的 recipe，落在 app config 目录的 recipes.json。 */
+export interface BatchRecipeEntry {
+  name: string;
+  recipe: BatchRecipe;
+}
+
 export type BatchItemState = "ok" | "skipped" | "error";
 
 export type BatchEvent =

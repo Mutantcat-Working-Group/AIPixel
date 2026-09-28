@@ -22,6 +22,7 @@ import type {
   ApprovalDecision,
   BatchKind,
   BatchRecipe,
+  BatchRecipeEntry,
   BatchScan,
   EditorOperation,
   DockKind,
@@ -58,6 +59,7 @@ import {
   DEFAULT_BATCH_RECIPE,
   EMPTY_BATCH_RUN,
   reduceBatchEvent,
+  recipeNameProblem,
   scanMatchesKind,
   type BatchRun,
 } from "./batch";
@@ -106,6 +108,12 @@ export interface BatchState {
   scan: BatchScan | null;
   scanBusy: boolean;
   run: BatchRun;
+  /** 存在本机 recipes.json 里的配方簿：跑熟的 recipe 固化下来随取随用。 */
+  recipeBook: BatchRecipeEntry[];
+  /** 配方名输入框。存成功即清空，簿子里显示的才是真相。 */
+  recipeName: string;
+  /** 存/删配方的进行中；配方簿是本地小文件，但按钮该转还得转。 */
+  recipeBusy: boolean;
 }
 
 /** 会动文档的四条工作流入参。image_gen / frame_tween / video_frames 走 runWorkflow。 */
@@ -243,6 +251,16 @@ export interface StoreActions {
   runBatch: () => Promise<void>;
   /** 清掉上一趟的明细，方便盯着下一趟。 */
   resetBatch: () => void;
+  /** 开机把配方簿读回来；读失败只留空簿。 */
+  loadRecipes: () => Promise<void>;
+  /** 改配方名输入框。 */
+  patchRecipeName: (name: string) => void;
+  /** 把当前 recipe 存进配方簿；同名覆盖。 */
+  saveRecipeAs: () => Promise<void>;
+  /** 从簿子里挑一条盖到当前 recipe；旧的扫描作废，那条配方描述的可能是另一个文件夹。 */
+  applyRecipe: (name: string) => void;
+  /** 删一条配方。 */
+  removeRecipe: (name: string) => Promise<void>;
 }
 
 const EMPTY_MODELS: ModelsView = { active_id: "", entries: [] };
@@ -553,10 +571,15 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     scan: null,
     scanBusy: false,
     run: EMPTY_BATCH_RUN,
+    recipeBook: [],
+    recipeName: "",
+    recipeBusy: false,
 
     boot: async () => {
       if (booting) return booting;
       booting = (async () => {
+        // 配方簿和批量通道一样与会话无关：开机读回来，用户随时能从簿子里挑一条。
+        await getState().loadRecipes();
         await ensureListener();
         // 批量通道与会话无关，开机听上就行：用户随时可能从工作台起一趟。
         await ensureBatchListener();
@@ -1374,6 +1397,57 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     },
 
     resetBatch: () => setState({ run: EMPTY_BATCH_RUN }),
+
+    // ---------- 批量配方簿 ----------
+    loadRecipes: async () => {
+      try {
+        setState({ recipeBook: await bridge.listBatchRecipes() });
+      } catch (error) {
+        // 配方簿是锦上添花：读不到就是没有，别为它弹错误。
+        setState({ recipeBook: [] });
+        failKey("batch.read_recipes_failed", { error: String(error) });
+      }
+    },
+
+    patchRecipeName: (name) => setState({ recipeName: name }),
+
+    saveRecipeAs: async () => {
+      const { recipeName, recipe, recipeBook } = getState();
+      if (recipeNameProblem(recipeName, recipeBook) !== null) return; // UI 已经禁用了按钮
+      setState({ recipeBusy: true });
+      try {
+        await bridge.saveBatchRecipe(recipeName.trim(), recipe);
+        // 清空名字而不是留住它：簿子里新出现的这一条就是「存好了」的确认。
+        setState({ recipeBook: await bridge.listBatchRecipes(), recipeName: "" });
+      } catch (error) {
+        failKey("batch.recipe_save_failed", { error: String(error) });
+      } finally {
+        setState({ recipeBusy: false });
+      }
+    },
+
+    applyRecipe: (name) => {
+      const entry = getState().recipeBook.find((item) => item.name === name);
+      if (!entry) return;
+      setState({
+        recipe: { ...DEFAULT_BATCH_RECIPE, ...entry.recipe },
+        recipeName: name,
+        // 这条配方记的可能是另一个文件夹：旧清单立刻作废，宁可重扫一次。
+        scan: null,
+        run: EMPTY_BATCH_RUN,
+      });
+    },
+
+    removeRecipe: async (name) => {
+      try {
+        await bridge.deleteBatchRecipe(name);
+        const recipeBook = await bridge.listBatchRecipes();
+        // 删的正是当前这条，就把输入框一起清掉，免得名字还在、条目没了。
+        setState({ recipeBook, recipeName: getState().recipeName === name ? "" : getState().recipeName });
+      } catch (error) {
+        failKey("batch.recipe_delete_failed", { error: String(error) });
+      }
+    },
   };
 });
 
