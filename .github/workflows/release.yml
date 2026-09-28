@@ -24,13 +24,13 @@ jobs:
       - name: Build Python packages
         run: |
           python -m pip install --upgrade pip build
-          python -m build
+          mkdir -p release
+          (cd example && python -m build --outdir dist)
+          cp example/dist/*.whl example/dist/*.tar.gz release/
 
       - name: Build source tar
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          mkdir -p release
-          cp dist/*.whl dist/*.tar.gz release/
           tar -czf "release/aipixel-${VERSION}-source.tar.gz" \
             --exclude='./.git' \
             --exclude='./.venv' \
@@ -38,6 +38,10 @@ jobs:
             --exclude='./build' \
             --exclude='./aipixel.egg-info' \
             --exclude='./dist' \
+            --exclude='./example/build' \
+            --exclude='./example/dist' \
+            --exclude='./example/__pycache__' \
+            --exclude='./example/aipixel.egg-info' \
             -C . .
           cd release
           sha256sum * > ../checksums.txt

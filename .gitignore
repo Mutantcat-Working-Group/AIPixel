@@ -1,8 +1,8 @@
-# 本仓库是混合工程：根目录的 Python 工具链 + Tauri 桌面端（Rust workspace + React 前端）。
-# 仓库自带的样例数据（input/ output/ refer_aip/ refer_img/ refer_pixel/）是 README 引用的，
+# 本仓库是 Tauri 桌面工程：根目录是 Rust workspace + React 前端。
+# example/ 里保留了最初那套 Pillow 工具链与样例数据，被 README 引用，
 # 属于交付内容，不在此文件忽略范围内；新增产物目录时请显式加白，而不是靠这里兜底。
 
-# ---------- Python（根目录遗留工具链） ----------
+# ---------- Python（example/ 遗留工具链） ----------
 __pycache__/
 *.py[cod]
 *.egg
@@ -10,6 +10,10 @@ __pycache__/
 
 # setuptools 输出；锚定根目录，避免误伤嵌套的 build 目录
 /build/
+
+# example/ 里 python -m build 的产物
+/example/build/
+/example/dist/
 
 .venv/
 venv/

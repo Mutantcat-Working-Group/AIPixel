@@ -2,8 +2,8 @@
 //!
 //! 分工的道理：agent 主循环是「一个会话 + 一个模型 + 一个活文档」，一次一两张；
 //! 这里是「一个文件夹进、一个文件夹出、一个 token 都不花」。两条操作都是单文件流程的批量形态：
-//! 量化把参考图反查成 `.aip`（对应 workflow_pixelize / img2aip_converter.py），
-//! 导出把 `.aip` 渲染成图（对应 document_export / aip_converter.py）。
+//! 量化把参考图反查成 `.aip`（对应 workflow_pixelize / example/img2aip_converter.py），
+//! 导出把 `.aip` 渲染成图（对应 document_export / example/aip_converter.py）。
 //!
 //! 三条约束：
 //! - 全程本机，不碰模型、不进主循环，跑在独立的 `batch-event` 通道上；

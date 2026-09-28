@@ -146,21 +146,19 @@ cargo test --workspace
 
 模型配置在应用内「设置」里填，落盘在 app config 目录的 `models.json`，`api_key` 只留在本机、不回传 webview。
 
-### 七、遗留 Python 工具链
+### 七、`example/`：遗留工具链与样例数据
 
-仓库根目录还留着最初那套 Pillow 脚本，仍然可用，与桌面端无关：
-
-- `aip_converter.py`：`.aip` 转 PNG
-- `img2aip_converter.py`：PNG 反查成 `.aip`（颜色索引 + 透明处理）
-- `img2x_converter.py`：高质量缩放（letterbox / Lanczos）
-- `process_attack.py`、`process_knight.py`：精灵图切帧
+仓库根目录只放桌面端。最初那套 Pillow 脚本、早期网页版像素编辑器和全部样例数据都在
+[`example/`](example/README.md) 里，与桌面端没有代码共用：`.aip` 的早期约定从这里来，
+桌面端沿用并长成了 v2；工作台的「量化」就是 `img2aip_converter.py` 那条思路的 Rust 实现。
 
 ```bash
-python3 aip_converter.py input/heart.aip
-python3 img2aip_converter.py refer_img/banana_shadow.png
+python3 example/aip_converter.py                 # input/ -> output/
+python3 example/img2aip_converter.py             # refer_img/ -> refer_aip/
 ```
 
-`html/index.html` 是早期的网页版像素编辑器，一并保留作参考。
+脚本按自己所在目录找数据，整个 `example/` 目录要一起搬；里面有什么、怎么跑，见
+[`example/README.md`](example/README.md)。
 
 ### 八、路线图
 
