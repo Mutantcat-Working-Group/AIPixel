@@ -72,26 +72,13 @@ body {
   white-space: nowrap;
 }
 
+/* 品牌图标就是用户的 icon.png 抠透明背景后的产物：像素苹果别被插值糊掉。 */
 .brand-mark {
-  display: grid;
-  grid-template-columns: repeat(3, 6px);
-  grid-template-rows: repeat(3, 6px);
-  gap: 1px;
-}
-
-.brand-mark span {
-  background: var(--accent);
-  border-radius: 1px;
-}
-
-.brand-mark span:nth-child(2),
-.brand-mark span:nth-child(6),
-.brand-mark span:nth-child(8) {
-  background: transparent;
-}
-
-.brand-mark span:nth-child(5) {
-  background: var(--warm);
+  display: block;
+  width: 20px;
+  height: 20px;
+  flex: none;
+  image-rendering: pixelated;
 }
 
 .brand-tag {

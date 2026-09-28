@@ -8,6 +8,7 @@
 //! - 索引 0 恒为透明，调色板从 0 开始编号
 
 pub mod aip;
+pub mod ase;
 pub mod context;
 pub mod decode;
 pub mod document;

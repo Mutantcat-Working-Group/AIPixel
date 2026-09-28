@@ -10,6 +10,8 @@ serde_json.workspace = true
 thiserror.workspace = true
 mlua = { version = "0.10", features = ["lua54", "vendored"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+# Aseprite 导出的压缩 cel 用 zlib；image 的 png 也走这条依赖，版本自然同源。
+flate2 = "1"
 
 [dev-dependencies]
 pretty_assertions = "1"

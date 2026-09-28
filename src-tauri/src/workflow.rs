@@ -289,9 +289,8 @@ pub async fn workflow_image_gen(
         &app,
         UiText::new(
             "status.quantizing",
-            "quantizing a {transport} image onto the grid",
-        )
-        .with("transport", image.transport),
+            "quantizing the generated image onto the grid",
+        ),
     );
 
     let (rgba, width, height) =

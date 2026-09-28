@@ -15,6 +15,9 @@ import { useStore } from "./lib/store";
 import { useT } from "./lib/t";
 import type { PermissionMode } from "./lib/types";
 
+// 图标取 icon.png 抠掉白背景的版本；像素画素材声明成 URL，别让构建器给它改尺寸。
+import brandIcon from "./assets/brand-icon.png";
+
 export default function App() {
   const store = useStore();
   const [rail, setRail] = useState("canvas");
@@ -83,18 +86,8 @@ export default function App() {
     <div className="app">
       <header className="topbar">
         <div className="brand">
-          <span className="brand-mark" aria-hidden>
-            <span />
-            <span />
-            <span />
-            <span />
-            <span />
-            <span />
-            <span />
-            <span />
-            <span />
-          </span>
-          AIPixel
+          <img className="brand-mark" src={brandIcon} alt="" width={20} height={20} />
+         AIPixel
           <span className="brand-tag">{t("app.brand_tag")}</span>
         </div>
 

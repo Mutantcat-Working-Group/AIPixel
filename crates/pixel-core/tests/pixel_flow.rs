@@ -489,3 +489,54 @@ fn exported_animation_lands_on_disk_and_reads_back() {
     );
     std::fs::remove_file(&sheet_path).ok();
 }
+
+#[test]
+fn set_palette_remaps_painted_pixels_to_nearest_color() {
+    let mut doc = blank();
+    let layer = doc.layers[0].id.clone();
+    let frame = doc.frames[0].id.clone();
+    ops::apply_batch(
+        &mut doc,
+        &[
+            PixelOperation::AddPaletteColors {
+                colors: vec!["#FF0000".into(), "#0000FF".into()],
+            },
+            PixelOperation::SetPixels {
+                layer: layer.clone(),
+                frame: frame.clone(),
+                cells: (0..4)
+                    .map(|x| ops::PixelCell {
+                        x,
+                        y: 0,
+                        color: "#FF0000".into(),
+                    })
+                    .chain((0..4).map(|x| ops::PixelCell {
+                        x,
+                        y: 1,
+                        color: "#0000FF".into(),
+                    }))
+                    .collect(),
+            },
+        ],
+    )
+    .unwrap();
+
+    // 换到灰阶两色：红色就近变成白，蓝色就近变成黑，画面不丢成透明。
+    ops::apply_batch(
+        &mut doc,
+        &[PixelOperation::SetPalette {
+            colors: vec!["#000000".into(), "#FFFFFF".into()],
+        }],
+    )
+    .unwrap();
+
+    assert_eq!(doc.palette.len(), 2);
+    let cel = doc.cel(&layer, &frame).unwrap();
+    assert_eq!(cel.indices[0], 2, "红色最近的是白（索引 2）");
+    assert_eq!(cel.indices[16], 1, "蓝色最近的是黑（索引 1）");
+
+    // 合成回位图看最终颜色：就近映射必须落到肉眼可辨的结果上。
+    let flat = pixel_core::png::flatten(&doc);
+    assert_eq!(flat.get_pixel(0, 0).0, [0xFF, 0xFF, 0xFF, 0xFF]);
+    assert_eq!(flat.get_pixel(0, 1).0, [0x00, 0x00, 0x00, 0xFF]);
+}

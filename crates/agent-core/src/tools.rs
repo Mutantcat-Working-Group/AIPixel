@@ -46,7 +46,7 @@ pub fn specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "pixel_apply_operations".into(),
-            description: "Apply ONE transaction of typed pixel/layer/frame/palette operations. Structure ops (create/move/delete/duplicate/rename layers and frames, set duration, add palette colors) and tiny precise pixel patches (set_pixels, stamp_grid, draw_shape, bucket_fill, clear_region). Fails atomically if any operation is invalid; the error names the failing operation index.".into(),
+            description: "Apply ONE transaction of typed pixel/layer/frame/palette operations. Structure ops (create/move/delete/duplicate/rename layers and frames, set duration, add or replace the palette) and tiny precise pixel patches (set_pixels, stamp_grid, draw_shape, bucket_fill, clear_region). set_palette replaces the palette and remaps painted pixels to the nearest color. Fails atomically if any operation is invalid; the error names the failing operation index.".into(),
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -57,7 +57,7 @@ pub fn specs() -> Vec<ToolSpec> {
                             "properties": {
                                 "op": {
                                     "type": "string",
-                                    "enum": ["create_frame","delete_frame","duplicate_frame","move_frame","set_frame_duration","create_layer","delete_layer","move_layer","rename_layer","set_layer_properties","add_palette_colors","set_pixels","bucket_fill","draw_shape","clear_region","stamp_grid"]
+                                    "enum": ["create_frame","delete_frame","duplicate_frame","move_frame","set_frame_duration","create_layer","delete_layer","move_layer","rename_layer","set_layer_properties","add_palette_colors","set_palette","set_pixels","bucket_fill","draw_shape","clear_region","stamp_grid"]
                                 },
                                 "id": {"type": "string"},
                                 "after": {"type": "string"},

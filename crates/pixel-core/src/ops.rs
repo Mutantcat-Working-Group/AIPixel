@@ -64,6 +64,11 @@ pub enum PixelOperation {
     AddPaletteColors {
         colors: Vec<String>,
     },
+    /// 整幅换调色板：已有像素按颜色就近映射到新配色。
+    /// 「换配色范围」对用户就是把图画进另一套色板，语义上必须保留画面而不是留透明。
+    SetPalette {
+        colors: Vec<String>,
+    },
     // ---- 像素 ----
     SetPixels {
         layer: String,
@@ -352,6 +357,26 @@ pub fn apply_one(doc: &mut Document, op: &PixelOperation) -> Result<(), Operatio
                 doc.intern_color(color).map_err(OperationError::Document)?;
             }
         }
+        PixelOperation::SetPalette { colors } => {
+            let mut next: Vec<Rgba> = Vec::with_capacity(colors.len());
+            for hex in colors {
+                let color =
+                    Rgba::parse_hex(hex).ok_or_else(|| OperationError::BadColor(hex.clone()))?;
+                next.push(color);
+            }
+            // 就近映射表：旧索引 -> 新索引。透明（0）与调色板外的东西都归 0。
+            let mut remap = vec![0u16; doc.palette.len() + 1];
+            for (old, color) in doc.palette.iter().enumerate() {
+                remap[old + 1] = nearest_index(&next, *color).map(|i| i as u16 + 1).unwrap_or(0);
+            }
+            for cel in doc.cels.values_mut().flat_map(|m| m.values_mut()) {
+                for idx in cel.indices.iter_mut() {
+                    let old = *idx as usize;
+                    *idx = remap.get(old).copied().unwrap_or(0);
+                }
+            }
+            doc.palette = next;
+        }
         PixelOperation::SetPixels {
             layer,
             frame,
@@ -495,6 +520,70 @@ fn intern_color_str(doc: &mut Document, hex: &str) -> Result<u16, OperationError
     doc.intern_color(color).map_err(OperationError::Document)
 }
 
+/// 新调色板里和 `color` 最接近的下标。RGB 欧氏距离，不比较 alpha：
+/// 换色板是肉眼决策，半透明的那点差别交给新色板自己说话。
+fn nearest_index(palette: &[Rgba], color: Rgba) -> Option<usize> {
+    palette
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| {
+            perceptual_distance(**a, color)
+                .partial_cmp(&perceptual_distance(**b, color))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(i, _)| i)
+}
+
+/// CIELAB（D65）下的欧氏距离平方。换调色板时按感知距离而不是裸 RGB
+/// 找最接近的颜色：红色对照 {黑, 白} 时裸 RGB 会判成黑，人眼明显更像白，
+/// 换成 Lab 距离就落到白。像素画换预设色板是高频操作，值得这一步精确。
+fn perceptual_distance(a: Rgba, b: Rgba) -> f64 {
+    let (l1, a1, b1) = lab(a);
+    let (l2, a2, b2) = lab(b);
+    let dl = l1 - l2;
+    let da = a1 - a2;
+    let db = b1 - b2;
+    dl * dl + da * da + db * db
+}
+
+/// sRGB -> CIELAB，x/y/z 白点取 D65。
+fn lab(c: Rgba) -> (f64, f64, f64) {
+    let (x, y, z) = xyz(c);
+    // D65 白点归一化，f(t) 是 CIE 标准化分段函数。
+    let fx = pivot(x / 0.95047);
+    let fy = pivot(y);
+    let fz = pivot(z / 1.08883);
+    (116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz))
+}
+
+fn pivot(t: f64) -> f64 {
+    if t > 0.008856 {
+        t.cbrt()
+    } else {
+        7.787 * t + 16.0 / 116.0
+    }
+}
+
+fn xyz(c: Rgba) -> (f64, f64, f64) {
+    let r = linearize(c.r);
+    let g = linearize(c.g);
+    let b = linearize(c.b);
+    (
+        0.4124564 * r + 0.3575761 * g + 0.1804375 * b,
+        0.2126729 * r + 0.7151522 * g + 0.0721750 * b,
+        0.0193339 * r + 0.1191920 * g + 0.9503041 * b,
+    )
+}
+
+fn linearize(v: u8) -> f64 {
+    let c = v as f64 / 255.0;
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
 pub(crate) fn next_id(prefix: &str, existing: &[String]) -> String {
     for i in 0..existing.len() + 2 {
         let candidate = format!("{prefix}{i}");
@@ -612,5 +701,29 @@ pub fn draw_ellipse(
                 cel.set(w, x, y, idx);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nearest_match_uses_perceived_distance() {
+        let palette = vec![Rgba::rgb(0, 0, 0), Rgba::rgb(255, 255, 255)];
+        // 裸 RGB 会把红色判成黑，感知距离判成白。
+        assert_eq!(nearest_index(&palette, Rgba::rgb(255, 0, 0)), Some(1));
+        assert_eq!(nearest_index(&palette, Rgba::rgb(0, 0, 255)), Some(0));
+    }
+
+    #[test]
+    fn lab_matches_published_reference_points() {
+        // sRGB 红/绿/蓝的 CIELAB 基准值（D65）。
+        let (l, a, b) = lab(Rgba::rgb(255, 0, 0));
+        assert!((l - 53.24).abs() < 0.2 && (a - 80.09).abs() < 0.2 && (b - 67.20).abs() < 0.3);
+        let (l, a, b) = lab(Rgba::rgb(255, 255, 255));
+        assert!((l - 100.0).abs() < 0.01 && a.abs() < 0.01 && b.abs() < 0.01);
+        let (l, a, b) = lab(Rgba::rgb(0, 0, 0));
+        assert!(l.abs() < 0.01 && a.abs() < 0.01 && b.abs() < 0.01);
     }
 }

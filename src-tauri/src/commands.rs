@@ -238,6 +238,8 @@ pub fn document_png_url(
 }
 
 /// 把整个动画导出到磁盘：`gif` 走无限循环动画，`sheet` 走 PNG spritesheet。
+/// `ase`/`aseprite` 写 Aseprite 文件（图层+帧语义原样保留），`frame` 写当前帧 PNG
+/// （`frame` 参数即帧索引，缺省铺平整幅）。
 /// `columns` 为 0 或 None 时 spritesheet 排成一行。
 ///
 /// 用户选什么扩展名就写什么字节，引擎和素材库各取所需，不做二次确认。
@@ -248,10 +250,19 @@ pub fn document_export(
     format: String,
     path: String,
     columns: Option<u32>,
+    frame: Option<u32>,
 ) -> Result<(), String> {
     let doc = state.session(&id)?.document();
     let bytes = match format.as_str() {
         "gif" => pixel_core::sheet::encode_gif(&doc)?,
+        "ase" | "aseprite" => pixel_core::ase::encode_ase(&doc)?,
+        "frame" => {
+            let img = match frame {
+                Some(index) => pixel_core::png::composite_frame(&doc, index),
+                None => pixel_core::png::flatten(&doc),
+            };
+            pixel_core::png::encode_png(&img)?
+        }
         "sheet" => {
             let img = pixel_core::sheet::spritesheet(&doc, columns.unwrap_or(0));
             pixel_core::png::encode_png(&img)?

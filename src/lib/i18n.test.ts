@@ -41,6 +41,29 @@ function referencedKeys(): string[] {
   return [...keys].sort();
 }
 
+/** Rust 源码原文：glob 到仓库外一层，跑测试时就是一堆字符串。 */
+const RUST_SOURCES = import.meta.glob("../../{src-tauri,crates/*}/src/*.rs", {
+  query: "?raw",
+  import: "default",
+  eager: true,
+}) as Record<string, string>;
+
+/** Rust 侧 `UiText::new("k", "fallback")` 的键与英文后备。跨行写法和尾随逗号都要认。 */
+function rustFallbacks(): { key: string; fallback: string; file: string }[] {
+  const found: { key: string; fallback: string; file: string }[] = [];
+  const pattern = /UiText::new\(\s*"([\w.]+)"\s*,\s*"((?:[^"\\]|\\.)*)"\s*,?\s*\)/gs;
+  for (const [path, text] of Object.entries(RUST_SOURCES)) {
+    for (const match of text.matchAll(pattern)) {
+      // 报错里写清是哪个文件，不然改文案的人得自己翻。
+      found.push({ key: match[1], fallback: match[2], file: path.replace("../../", "") });
+    }
+  }
+  return found;
+}
+
+const placeholders = (template: string): string[] =>
+  [...new Set([...template.matchAll(/\{(\w+)\}/g)].map((m) => m[1]))].sort();
+
 describe("dictionaries", () => {
   it("aligns zh and en key for key", () => {
     expect(Object.keys(en).sort()).toEqual(Object.keys(zh).sort());
@@ -72,6 +95,35 @@ describe("referenced keys", () => {
   it("resolves every literal t() call in the source", () => {
     const missing = referencedKeys().filter((key) => !(key in zh) || !(key in en));
     expect(missing).toEqual([]);
+  });
+});
+
+// Rust 的后备文案是「字典缺键时用户看到的英文」，所以它必须和 en 条目逐字同构。
+// 占位符一旦漂移，缺键那一侧就会把 {count} 原样显示出来，或者把已传的变量悄悄吃掉。
+describe("rust fallbacks", () => {
+  const fallbacks = rustFallbacks();
+
+  it("finds the UiText calls it is meant to police", () => {
+    expect(fallbacks.length).toBeGreaterThan(5);
+  });
+
+  it("names a key the dictionaries actually have", () => {
+    expect(fallbacks.filter((f) => !(f.key in en))).toEqual([]);
+  });
+
+  it("carries the same placeholders as the en entry", () => {
+    const drifted = fallbacks
+      .filter((f) => f.key in en)
+      .filter((f) => placeholders(f.fallback).join() !== placeholders(en[f.key as keyof typeof en]).join())
+      .map((f) => `${f.file} ${f.key}: fallback [${placeholders(f.fallback)}] vs en [${placeholders(en[f.key as keyof typeof en])}]`);
+    expect(drifted).toEqual([]);
+  });
+
+  it("keeps zh and en placeholders identical", () => {
+    const drifted = Object.keys(zh)
+      .filter((key) => placeholders(zh[key as keyof typeof zh]).join() !== placeholders(en[key as keyof typeof en]).join())
+      .map((key) => `${key}: zh [${placeholders(zh[key as keyof typeof zh])}] vs en [${placeholders(en[key as keyof typeof en])}]`);
+    expect(drifted).toEqual([]);
   });
 });
 
