@@ -23,6 +23,7 @@ import type {
  ModelsView,
   PermissionMode,
   PixelDocument,
+  RecipeImportReport,
   SessionInfo,
   StrokeRequest,
   ImageGenParams,
@@ -256,6 +257,16 @@ export function saveBatchRecipe(name: string, recipe: BatchRecipe): Promise<void
 /** 删一条配方；删不存在的名字 Rust 当成功。 */
 export function deleteBatchRecipe(name: string): Promise<void> {
   return invoke("batch_recipe_delete", { name });
+}
+
+/** 把点名几条配方写成 `.aipr`；返回真正落盘的那个路径（可能补了后缀）。 */
+export function exportBatchRecipes(entries: BatchRecipeEntry[], path: string): Promise<string> {
+  return invoke<string>("batch_recipe_export", { entries, path });
+}
+
+/** 从 `.aipr` 读配方并进来；回执带合并后的整本簿子，前端不必再问一次。 */
+export function importBatchRecipes(path: string): Promise<RecipeImportReport> {
+  return invoke<RecipeImportReport>("batch_recipe_import", { path });
 }
 
 export function listenBatchEvents(handler: (event: BatchEvent) => void): Promise<UnlistenFn> {

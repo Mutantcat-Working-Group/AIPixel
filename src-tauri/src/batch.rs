@@ -312,6 +312,289 @@ pub fn batch_recipe_delete(app: AppHandle, name: String) -> Result<(), String> {
     save_recipes(&app, &file)
 }
 
+/// `.aipr` 的格式标识与版本号。带标识是为了让「拿错文件」在第一眼就被拒掉，
+/// 而不是解析到一半才报一句看不懂的话。
+pub const RECIPE_FILE_MAGIC: &str = "aipixel-recipe-book";
+pub const RECIPE_FILE_VERSION: u32 = 1;
+
+/// `.aipr` 是拿来分享的，无限宽容就会把本机簿子撑爆：条数先设一道上限。
+pub const MAX_RECIPE_FILE_ENTRIES: usize = 200;
+
+/// 从文件里扣出来的一条：要么是能用的配方，要么带着一条读不懂的原因。
+/// 一条坏记录不该让整份文件作废，所以分开抱着走。
+#[derive(Debug, Clone, PartialEq)]
+pub enum RecipeFileEntry {
+    Entry(BatchRecipeEntry),
+    Broken { label: String, note: String },
+}
+
+/// 一条配方进来之后去了哪儿。UI 按 state 挑文案，改名的映射单独放在 final_name。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecipeImportState {
+    Imported,
+    Renamed,
+    Skipped,
+}
+
+/// 回执里的一行：文件里请求的名字、实际落下的名字、跳过原因。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecipeImportRow {
+    /// 文件里请求的名字；坏记录里可能只是个序号（#3）。
+    pub name: String,
+    /// 实际落下的名字；跳过时是空串。
+    pub final_name: String,
+    pub state: RecipeImportState,
+    /// 为什么跳过；进簿子了就是空串。
+    pub note: String,
+}
+
+/// 导入回执：逐条交代，外加合并后的整本簿子。前端拿 entries 直接刷新视图，
+/// 不必再问一次 Rust。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecipeImportReport {
+    pub rows: Vec<RecipeImportRow>,
+    pub entries: Vec<BatchRecipeEntry>,
+}
+
+/// `.aipr` 的落盘信封：标识 + 版本 + 条目。读的时候不直接用它，
+/// 而是走 `parse_recipe_book` 的宽容解析，坏条目在那儿单独抱着走。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecipeBookFile {
+    pub format: String,
+    pub version: u32,
+    #[serde(default)]
+    pub entries: Vec<BatchRecipeEntry>,
+}
+
+impl RecipeBookFile {
+    fn new(entries: Vec<BatchRecipeEntry>) -> Self {
+        Self {
+            format: RECIPE_FILE_MAGIC.to_string(),
+            version: RECIPE_FILE_VERSION,
+            entries,
+        }
+    }
+}
+
+/// 读一份 `.aipr`。信封（标识 / 版本 / 条数）错了整份作废；
+/// 单条坏了只坏那一条，剩下的照样能进来。
+pub fn parse_recipe_book(text: &str) -> Result<Vec<RecipeFileEntry>, String> {
+    #[derive(Deserialize)]
+    struct Envelope {
+        format: String,
+        version: u32,
+        #[serde(default)]
+        entries: Vec<serde_json::Value>,
+    }
+    let file: Envelope =
+        serde_json::from_str(text).map_err(|e| format!("not a readable .aipr file: {e}"))?;
+    if file.format != RECIPE_FILE_MAGIC {
+        return Err("not an AIPixel recipe file".into());
+    }
+    if file.version > RECIPE_FILE_VERSION {
+        return Err(format!(
+            "this recipe file needs a newer AIPixel (format v{})",
+            file.version
+        ));
+    }
+    if file.entries.len() > MAX_RECIPE_FILE_ENTRIES {
+        return Err(format!(
+            "this file holds more than {MAX_RECIPE_FILE_ENTRIES} recipes, split it first"
+        ));
+    }
+    Ok(file
+        .entries
+        .into_iter()
+        .enumerate()
+        .map(|(index, raw)| {
+            // 名字先单独捞一次：整条解析失败时，回执里好歹能说清是哪一条。
+            let hint = raw
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            match serde_json::from_value::<BatchRecipeEntry>(raw) {
+                Ok(entry) => RecipeFileEntry::Entry(entry),
+                Err(e) => RecipeFileEntry::Broken {
+                    label: safe_label(&hint, index),
+                    note: e.to_string(),
+                },
+            }
+        })
+        .collect())
+}
+
+/// 坏记录的展示名：优先用它自己的名字，没有就用序号。
+/// 控制字符会弄坏界面标签，一律抹掉。
+fn safe_label(raw: &str, index: usize) -> String {
+    let cleaned: String = raw
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_RECIPE_NAME_CHARS)
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        format!("#{}", index + 1)
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// 把一份文件并进本机簿子。同名不覆盖：本机那条是好容易调出来的，
+/// 被一个同名文件悄悄换掉太冤；加个序号落进来，回执里写明落在哪个名字下。
+pub fn merge_recipes(
+    current: &[BatchRecipeEntry],
+    incoming: Vec<RecipeFileEntry>,
+) -> RecipeImportReport {
+    let mut entries: Vec<BatchRecipeEntry> = current.to_vec();
+    let mut rows = Vec::new();
+    for item in incoming {
+        match item {
+            RecipeFileEntry::Entry(entry) => {
+                let name = match validate_recipe_name(&entry.name) {
+                    Ok(name) => name,
+                    Err(note) => {
+                        let label = safe_label(&entry.name, rows.len());
+                        rows.push(RecipeImportRow {
+                            name: label,
+                            final_name: String::new(),
+                            state: RecipeImportState::Skipped,
+                            note,
+                        });
+                        continue;
+                    }
+                };
+                if entries.len() >= MAX_RECIPES {
+                    rows.push(RecipeImportRow {
+                        name,
+                        final_name: String::new(),
+                        state: RecipeImportState::Skipped,
+                        note: "recipe book is full".into(),
+                    });
+                    continue;
+                }
+                if entries.iter().any(|e| e.name == name) {
+                    let final_name = unique_recipe_name(&name, &entries);
+                    rows.push(RecipeImportRow {
+                        name,
+                        final_name: final_name.clone(),
+                        state: RecipeImportState::Renamed,
+                        note: String::new(),
+                    });
+                    entries.push(BatchRecipeEntry {
+                        name: final_name,
+                        recipe: entry.recipe,
+                    });
+                } else {
+                    rows.push(RecipeImportRow {
+                        name: name.clone(),
+                        final_name: name.clone(),
+                        state: RecipeImportState::Imported,
+                        note: String::new(),
+                    });
+                    entries.push(BatchRecipeEntry {
+                        name,
+                        recipe: entry.recipe,
+                    });
+                }
+            }
+            RecipeFileEntry::Broken { label, note } => rows.push(RecipeImportRow {
+                name: label,
+                final_name: String::new(),
+                state: RecipeImportState::Skipped,
+                note,
+            }),
+        }
+    }
+    RecipeImportReport { rows, entries }
+}
+
+/// 给撞名的配方找个落脚名：原名、原名 (2)、原名 (3)……原名太长就截尾巴，
+/// 序号和长度上限两头都保住。
+fn unique_recipe_name(base: &str, entries: &[BatchRecipeEntry]) -> String {
+    let free = |candidate: &str| !entries.iter().any(|e| e.name == candidate);
+    let candidate = (2..=MAX_RECIPES + 1).find_map(|suffix| {
+        let tail = format!(" ({suffix})");
+        let head: String = base
+            .chars()
+            .take(MAX_RECIPE_NAME_CHARS.saturating_sub(tail.chars().count()))
+            .collect();
+        let full = format!("{head}{tail}");
+        free(&full).then_some(full)
+    });
+    // 簿子最多 50 条，理论上必有空位；兜底截断原名，绝不死循环。
+    candidate.unwrap_or_else(|| base.chars().take(MAX_RECIPE_NAME_CHARS).collect())
+}
+
+/// 落盘时补后缀：用户在对话框里手打的名字不保证带 `.aipr`，
+/// 补一次总比存出一个没有关联程序的文件强。
+fn with_recipe_extension(path: &str) -> String {
+    let has = Path::new(path)
+        .extension()
+        .map(|e| e.eq_ignore_ascii_case("aipr"))
+        .unwrap_or(false);
+    if has {
+        path.to_string()
+    } else {
+        format!("{path}.aipr")
+    }
+}
+
+/// 把这几条配方写成 `.aipr`。条目由前端给——可能是簿子里的，也可能是手上这份
+/// 还没存过的——Rust 只负责校验名字和落盘：调完参数直接分享，不必先存进簿子。
+/// 同名两条一起写会被拒：分享出去的文件自己撞名，导入时只会得到一堆改名。
+#[tauri::command]
+pub fn batch_recipe_export(entries: Vec<BatchRecipeEntry>, path: String) -> Result<String, String> {
+    if entries.is_empty() {
+        return Err("no recipe selected for export".into());
+    }
+    let mut picked: Vec<BatchRecipeEntry> = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let name = validate_recipe_name(&entry.name)?;
+        if picked.iter().any(|e| e.name == name) {
+            return Err(format!("recipe listed twice: {name}"));
+        }
+        picked.push(BatchRecipeEntry {
+            name,
+            recipe: entry.recipe,
+        });
+    }
+    let out = with_recipe_extension(&path);
+    if let Some(parent) = Path::new(&out).parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+        }
+    }
+    let text =
+        serde_json::to_string_pretty(&RecipeBookFile::new(picked)).map_err(|e| e.to_string())?;
+    std::fs::write(&out, text).map_err(|e| format!("cannot write {out}: {e}"))?;
+    Ok(out)
+}
+
+/// 从 `.aipr` 读配方并进来。回执逐条交代；一条都没进来就不落盘。
+#[tauri::command]
+pub fn batch_recipe_import(app: AppHandle, path: String) -> Result<RecipeImportReport, String> {
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {path}: {e}"))?;
+    let incoming = parse_recipe_book(&text)?;
+    let book = load_recipes(&app);
+    let report = merge_recipes(&book.entries, incoming);
+    let changed = report
+        .rows
+        .iter()
+        .any(|r| r.state != RecipeImportState::Skipped);
+    if changed {
+        save_recipes(
+            &app,
+            &RecipesFile {
+                entries: report.entries.clone(),
+            },
+        )?;
+    }
+    Ok(report)
+}
+
 fn run_batch(app: &AppHandle, recipe: &BatchRecipe, files: &[PathBuf], out_dir: &Path) {
     let total = files.len();
     emit(app, BatchEvent::Started { total });
@@ -640,5 +923,144 @@ mod tests {
         let recipe = BatchRecipe::default();
         let err = quantize_one(&in_dir.join("junk.png"), &out_dir, &recipe).unwrap_err();
         assert!(!err.is_empty());
+    }
+
+    fn recipe_named(name: &str) -> BatchRecipeEntry {
+        BatchRecipeEntry {
+            name: name.into(),
+            recipe: BatchRecipe::default(),
+        }
+    }
+
+    #[test]
+    fn recipe_book_file_round_trips_and_turns_away_strangers() {
+        let file = RecipeBookFile::new(vec![recipe_named("sword")]);
+        let text = serde_json::to_string_pretty(&file).unwrap();
+        let back = parse_recipe_book(&text).unwrap();
+        assert_eq!(back, vec![RecipeFileEntry::Entry(recipe_named("sword"))]);
+
+        // 拿错文件：一句人话，不是解析到一半才崩。
+        assert!(parse_recipe_book(r#"{"entries":[]}"#).is_err());
+        let stranger = r#"{"format":"some-other-tool","version":1,"entries":[]}"#;
+        assert!(parse_recipe_book(stranger)
+            .unwrap_err()
+            .contains("not an AIPixel recipe file"));
+
+        // 未来版本存下的文件：明说需要更新的 AIPixel，别硬读。
+        let newer = r#"{"format":"aipixel-recipe-book","version":99,"entries":[]}"#;
+        assert!(parse_recipe_book(newer)
+            .unwrap_err()
+            .contains("newer AIPixel"));
+    }
+
+    #[test]
+    fn one_broken_entry_does_not_sink_the_whole_file() {
+        // 原样字符串里的花括号不用转义：这条 manifest 按字面写，读出来才是文件真容。
+        let text = r#"{"format":"aipixel-recipe-book","version":1,"entries":[
+            {"name":"sword","recipe":{"kind":"quantize","input_dir":"in","output_dir":"out"}},
+            {"name":"broken","recipe":{"input_dir":"in"}},
+            {"name":"also-fine","recipe":{"kind":"export","input_dir":"in","output_dir":"out"}}
+        ]}"#;
+        let parsed = parse_recipe_book(text).unwrap();
+        assert_eq!(parsed.len(), 3);
+        let report = merge_recipes(&[], parsed);
+        // 两条好的进来，坏的那条被点名跳过。
+        assert_eq!(report.entries.len(), 2);
+        let broken = report
+            .rows
+            .iter()
+            .find(|r| r.state == RecipeImportState::Skipped)
+            .expect("坏条目该被跳过");
+        assert_eq!(broken.name, "broken");
+        assert!(!broken.note.is_empty());
+    }
+
+    #[test]
+    fn merging_renames_collisions_instead_of_overwriting_local_recipes() {
+        let current = vec![recipe_named("sword")];
+        let incoming = vec![
+            RecipeFileEntry::Entry(recipe_named("sword")),
+            RecipeFileEntry::Entry(recipe_named("shield")),
+        ];
+        let report = merge_recipes(&current, incoming);
+        assert_eq!(report.entries.len(), 3);
+        // 本机那条原地不动，文件里的那条加序号落在旁边。
+        assert_eq!(report.entries[0].name, "sword");
+        assert_eq!(report.entries[1].name, "sword (2)");
+        assert_eq!(report.entries[2].name, "shield");
+        let renamed = report
+            .rows
+            .iter()
+            .find(|r| r.state == RecipeImportState::Renamed)
+            .expect("撞名该被改名");
+        assert_eq!(renamed.name, "sword");
+        assert_eq!(renamed.final_name, "sword (2)");
+        assert!(
+            report.rows.iter().all(|r| r.note.is_empty()),
+            "进来的都不该带原因"
+        );
+    }
+
+    #[test]
+    fn renamed_slots_keep_the_name_length_limit() {
+        let long = "x".repeat(MAX_RECIPE_NAME_CHARS);
+        let current = vec![recipe_named(&long)];
+        let incoming = vec![
+            RecipeFileEntry::Entry(recipe_named(&long)),
+            RecipeFileEntry::Entry(recipe_named(&long)),
+        ];
+        let report = merge_recipes(&current, incoming);
+        let names: Vec<&str> = report.entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(names
+            .iter()
+            .all(|n| n.chars().count() <= MAX_RECIPE_NAME_CHARS));
+        assert!(names.contains(&format!("{} (2)", "x".repeat(MAX_RECIPE_NAME_CHARS - 4)).as_str()));
+        assert!(names.contains(&format!("{} (3)", "x".repeat(MAX_RECIPE_NAME_CHARS - 4)).as_str()));
+    }
+
+    #[test]
+    fn a_full_book_refuses_new_recipes_one_by_one() {
+        let current: Vec<BatchRecipeEntry> = (0..MAX_RECIPES)
+            .map(|i| recipe_named(&format!("r{i}")))
+            .collect();
+        let incoming = vec![RecipeFileEntry::Entry(recipe_named("newcomer"))];
+        let report = merge_recipes(&current, incoming);
+        assert_eq!(report.entries.len(), MAX_RECIPES);
+        assert_eq!(report.rows.len(), 1);
+        assert_eq!(report.rows[0].state, RecipeImportState::Skipped);
+        assert!(
+            report.rows[0].note.contains("full"),
+            "{}",
+            report.rows[0].note
+        );
+    }
+
+    #[test]
+    fn an_unusable_name_is_skipped_with_its_label() {
+        let incoming = vec![RecipeFileEntry::Entry(recipe_named("bad/name"))];
+        let report = merge_recipes(&[], incoming);
+        assert!(report.entries.is_empty());
+        assert_eq!(report.rows[0].state, RecipeImportState::Skipped);
+        assert_eq!(report.rows[0].name, "bad/name");
+    }
+
+    #[test]
+    fn broken_entries_without_a_name_fall_back_to_a_position_label() {
+        let text = r#"{"format":"aipixel-recipe-book","version":1,"entries":[{"recipe":{}}]}"#;
+        let parsed = parse_recipe_book(text).unwrap();
+        let report = merge_recipes(&[], parsed);
+        assert_eq!(report.rows[0].name, "#1");
+        assert_eq!(report.rows[0].state, RecipeImportState::Skipped);
+    }
+
+    #[test]
+    fn the_recipe_extension_gets_added_when_the_user_skips_it() {
+        assert_eq!(with_recipe_extension("/tmp/book.aipr"), "/tmp/book.aipr");
+        assert_eq!(with_recipe_extension("/tmp/book"), "/tmp/book.aipr");
+        assert_eq!(
+            with_recipe_extension("/tmp/book.json"),
+            "/tmp/book.json.aipr"
+        );
+        assert_eq!(with_recipe_extension("/tmp/book.AIPR"), "/tmp/book.AIPR");
     }
 }

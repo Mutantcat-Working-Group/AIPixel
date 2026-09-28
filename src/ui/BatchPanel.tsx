@@ -6,6 +6,7 @@
 import {
   Alert,
   Button,
+  Dropdown,
   Input,
   InputNumber,
   Popconfirm,
@@ -14,15 +15,17 @@ import {
   Select,
   Switch,
 } from "antd";
-import { FolderOpen, Layers, Play, Save, ScanSearch, Trash2, X } from "lucide-react";
-import { open } from "@tauri-apps/plugin-dialog";
+import { FileDown, FolderOpen, Layers, Play, Save, ScanSearch, Trash2, X } from "lucide-react";
+import { open, save } from "@tauri-apps/plugin-dialog";
 
 import { Field, QuantizeFields } from "./QuantizeFields";
 import {
   MAX_RECIPE_NAME_CHARS,
   batchPercent,
   canRunBatch,
+  recipeImportNotables,
   recipeNameProblem,
+  tallyRecipeImport,
   scanMatchesKind,
 } from "../lib/batch";
 import { useStore } from "../lib/store";
@@ -88,6 +91,9 @@ export default function BatchPanel() {
   const saveRecipeAs = useStore((s) => s.saveRecipeAs);
   const applyRecipe = useStore((s) => s.applyRecipe);
   const removeRecipe = useStore((s) => s.removeRecipe);
+  const recipeImport = useStore((s) => s.recipeImport);
+  const exportRecipes = useStore((s) => s.exportRecipes);
+  const importRecipes = useStore((s) => s.importRecipes);
 
   // store 会在 kind / 目录变化时作废旧扫描，这里再确认一次：清单和 recipe 必须是同一码事。
   const scanned = scan !== null && scanMatchesKind(scan, recipe.kind);
@@ -101,6 +107,35 @@ export default function BatchPanel() {
         ? { count: recipeBook.length }
         : undefined;
   const savedName = recipeBook.some((entry) => entry.name === recipeName);
+
+  /** 配方的进出只认 `.aipr`：伸手给对方的就是一个能在任何编辑器里读的 JSON。 */
+  const aiprFilter = [{ name: t("dialog.aipr"), extensions: ["aipr"] }];
+
+  /**
+   * 导出手上这份：调完参数直接分享，不必先存进本机簿子。
+   * 名字借用配方名输入框——空着就没法分享，占位符已经说了要起名。
+   */
+  async function exportCurrentRecipe() {
+    const name = recipeName.trim();
+    if (name === "") return;
+    const target = await save({ defaultPath: `${name}.aipr`, filters: aiprFilter });
+    if (typeof target !== "string") return;
+    await exportRecipes([{ name, recipe }], target);
+  }
+
+  /** 整本搬走：换机器、给同事，一个文件就是全部家当。 */
+  async function exportWholeBook() {
+    if (recipeBook.length === 0) return;
+    const target = await save({ defaultPath: "recipes.aipr", filters: aiprFilter });
+    if (typeof target !== "string") return;
+    await exportRecipes(recipeBook, target);
+  }
+
+  async function importRecipeFile() {
+    const picked = await open({ multiple: false, filters: aiprFilter });
+    if (typeof picked !== "string") return;
+    await importRecipes(picked);
+  }
 
   async function pickDir(assign: (dir: string) => void) {
     const picked = await open({ directory: true });
@@ -201,6 +236,63 @@ export default function BatchPanel() {
           ) : (
             <p className="dock-note">{t("batch.recipe.empty")}</p>
           )}
+
+          <Field label={t("batch.recipe.file")}>
+            <div className="dock-actions">
+              <Dropdown
+                trigger={["click"]}
+                menu={{
+                  items: [
+                    {
+                      key: "current",
+                      label: t("batch.recipe.export_one"),
+                      // 名字借用配方名输入框：空着就没法分享，占位符已经说了要起名。
+                      disabled: recipeName.trim() === "",
+                    },
+                    {
+                      key: "all",
+                      label: t("batch.recipe.export_all"),
+                      disabled: recipeBook.length === 0,
+                    },
+                    { type: "divider" },
+                    { key: "import", label: t("batch.recipe.import") },
+                  ],
+                  onClick: ({ key }) => {
+                    if (key === "current") void exportCurrentRecipe();
+                    else if (key === "all") void exportWholeBook();
+                    else void importRecipeFile();
+                  },
+                }}
+              >
+                <Button size="small" icon={<FileDown size={12} />} loading={recipeBusy}>
+                  {t("batch.recipe.file.button")}
+                </Button>
+              </Dropdown>
+            </div>
+
+            <p className="dock-note">{t("batch.recipe.file.hint")}</p>
+
+            {recipeImport ? (
+              <>
+                <p className="dock-note">
+                  {t("batch.recipe.import_note", {
+                    count: recipeImport.rows.length,
+                    ...tallyRecipeImport(recipeImport.rows),
+                  })}
+                </p>
+                {recipeImportNotables(recipeImport.rows).map((row, index) => (
+                  <p className="dock-note" key={`${row.name}-${index}`}>
+                    {t(
+                      row.state === "renamed"
+                        ? "batch.recipe.import.row.renamed"
+                        : "batch.recipe.import.row.skipped",
+                      { name: row.name, final: row.final_name, note: row.note },
+                    )}
+                  </p>
+                ))}
+              </>
+            ) : null}
+          </Field>
 
           <DirField
             label={t("batch.input")}

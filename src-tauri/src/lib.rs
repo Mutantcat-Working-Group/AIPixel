@@ -65,6 +65,8 @@ pub fn run() {
             batch::batch_scan,
             batch::batch_run,
             batch::batch_recipe_delete,
+            batch::batch_recipe_export,
+            batch::batch_recipe_import,
             batch::batch_recipes_list,
             batch::batch_recipe_save,
         ])

@@ -512,6 +512,24 @@ export interface BatchRecipeEntry {
   recipe: BatchRecipe;
 }
 
+/** 一条配方从 `.aipr` 进来后的去向。 */
+export type RecipeImportState = "imported" | "renamed" | "skipped";
+
+/** 回执里的一行：文件里请求的名字、实际落下的名字、跳过原因。 */
+export interface RecipeImportRow {
+  name: string;
+  final_name: string;
+  state: RecipeImportState;
+  /** 为什么跳过；进簿子了就是空串。 */
+  note: string;
+}
+
+/** 导入回执：逐条交代，外加合并后的整本簿子。 */
+export interface RecipeImportReport {
+  rows: RecipeImportRow[];
+  entries: BatchRecipeEntry[];
+}
+
 export type BatchItemState = "ok" | "skipped" | "error";
 
 export type BatchEvent =

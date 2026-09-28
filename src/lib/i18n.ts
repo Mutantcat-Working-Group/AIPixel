@@ -42,6 +42,7 @@ export const zh = {
   "dialog.gif": "GIF 动画",
   "dialog.png": "PNG 图片",
   "dialog.aseprite": "Aseprite 文件",
+  "dialog.aipr": "AIPixel 配方",
 
   // ---------- 首次启动 ----------
   "gate.pitch":
@@ -415,6 +416,18 @@ export const zh = {
   "batch.recipe.problem.full": "配方簿满了（{count} 条），先删一条",
   "batch.read_recipes_failed": "读取配方失败：{error}",
   "batch.recipe_save_failed": "保存配方失败：{error}",
+  "batch.recipe_export_failed": "导出配方失败：{error}",
+  "batch.recipe_import_failed": "导入配方失败：{error}",
+  "batch.recipe_exported": "已导出 {count} 条配方到 {path}",
+  "batch.recipe.file": "配方文件",
+  "batch.recipe.file.button": "导入 / 导出",
+  "batch.recipe.file.hint": "配方是纯文本 JSON：能直接发给别人，也能在任何编辑器里改。",
+  "batch.recipe.export_one": "导出当前这条",
+  "batch.recipe.export_all": "导出整本",
+  "batch.recipe.import": "从 .aipr 导入",
+  "batch.recipe.import_note": "读进 {count} 条：{imported} 条进来、{renamed} 条改名、{skipped} 条跳过",
+  "batch.recipe.import.row.renamed": "「{name}」本机已有，改名存成「{final}」",
+  "batch.recipe.import.row.skipped": "「{name}」跳过：{note}",
   "batch.recipe_delete_failed": "删除配方失败：{error}",
 } as const;
 
@@ -453,6 +466,7 @@ export const en: Record<TKey, string> = {
   "dialog.gif": "GIF animation",
   "dialog.png": "PNG image",
   "dialog.aseprite": "Aseprite file",
+  "dialog.aipr": "AIPixel recipe",
 
   "gate.pitch":
     "Bring your own model. Nothing to sign up for, no server in the middle: the agent loop runs on your machine and talks straight to the provider you configure.",
@@ -816,6 +830,18 @@ export const en: Record<TKey, string> = {
   "batch.recipe.problem.full": "Recipe book is full ({count} entries), delete one first",
   "batch.read_recipes_failed": "could not read recipes: {error}",
   "batch.recipe_save_failed": "could not save recipe: {error}",
+  "batch.recipe_export_failed": "could not export recipes: {error}",
+  "batch.recipe_import_failed": "could not import recipes: {error}",
+  "batch.recipe_exported": "Exported {count} recipe(s) to {path}",
+  "batch.recipe.file": "Recipe file",
+  "batch.recipe.file.button": "Import / export",
+  "batch.recipe.file.hint": "Recipes are plain JSON: hand them to anyone, or edit them in any text editor.",
+  "batch.recipe.export_one": "Export this one",
+  "batch.recipe.export_all": "Export the whole book",
+  "batch.recipe.import": "Import from .aipr",
+  "batch.recipe.import_note": "Read {count}: {imported} came in, {renamed} renamed, {skipped} skipped",
+  "batch.recipe.import.row.renamed": "\"{name}\" already exists here, saved as \"{final}\"",
+  "batch.recipe.import.row.skipped": "\"{name}\" skipped: {note}",
   "batch.recipe_delete_failed": "could not delete recipe: {error}",
 };
 

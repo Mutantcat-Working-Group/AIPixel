@@ -23,6 +23,7 @@ import type {
   BatchKind,
   BatchRecipe,
   BatchRecipeEntry,
+  RecipeImportReport,
   BatchScan,
   EditorOperation,
   DockKind,
@@ -114,6 +115,8 @@ export interface BatchState {
   recipeName: string;
   /** 存/删配方的进行中；配方簿是本地小文件，但按钮该转还得转。 */
   recipeBusy: boolean;
+  /** 最近一次导入的回执；没导入过就是 null。显示逐条交代，用户自己判断下一步。 */
+  recipeImport: RecipeImportReport | null;
 }
 
 /** 会动文档的四条工作流入参。image_gen / frame_tween / video_frames 走 runWorkflow。 */
@@ -261,6 +264,10 @@ export interface StoreActions {
   applyRecipe: (name: string) => void;
   /** 删一条配方。 */
   removeRecipe: (name: string) => Promise<void>;
+  /** 把点名几条配方写成 `.aipr`；path 由文件对话框给。 */
+  exportRecipes: (entries: BatchRecipeEntry[], path: string) => Promise<void>;
+  /** 从 `.aipr` 读配方并进来；path 由文件对话框给。 */
+  importRecipes: (path: string) => Promise<void>;
 }
 
 const EMPTY_MODELS: ModelsView = { active_id: "", entries: [] };
@@ -574,6 +581,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     recipeBook: [],
     recipeName: "",
     recipeBusy: false,
+    recipeImport: null,
 
     boot: async () => {
       if (booting) return booting;
@@ -1446,6 +1454,33 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         setState({ recipeBook, recipeName: getState().recipeName === name ? "" : getState().recipeName });
       } catch (error) {
         failKey("batch.recipe_delete_failed", { error: String(error) });
+      }
+    },
+
+    exportRecipes: async (entries, path) => {
+      setState({ recipeBusy: true });
+      try {
+        // 落盘路径由 Rust 定：它负责补 `.aipr` 后缀，所以提示里念的是最终路径。
+        const written = await bridge.exportBatchRecipes(entries, path);
+        noteKey("batch.recipe_exported", { count: entries.length, path: written });
+      } catch (error) {
+        failKey("batch.recipe_export_failed", { error: String(error) });
+      } finally {
+        setState({ recipeBusy: false });
+      }
+    },
+
+    importRecipes: async (path) => {
+      setState({ recipeBusy: true });
+      try {
+        const report = await bridge.importBatchRecipes(path);
+        // 回执自带合并后的整本簿子：刷新视图不必再问一次 Rust。
+        setState({ recipeBook: report.entries, recipeImport: report });
+      } catch (error) {
+        setState({ recipeImport: null });
+        failKey("batch.recipe_import_failed", { error: String(error) });
+      } finally {
+        setState({ recipeBusy: false });
       }
     },
   };

@@ -13,10 +13,12 @@ import {
   MAX_RECIPE_NAME_CHARS,
   MAX_RECIPES,
   reduceBatchEvent,
+  recipeImportNotables,
   recipeNameProblem,
+  tallyRecipeImport,
   scanMatchesKind,
 } from "./batch";
-import type { BatchRecipeEntry, BatchScan } from "./types";
+import type { BatchRecipeEntry, BatchScan, RecipeImportRow } from "./types";
 
 function scan(over: Partial<BatchScan> = {}): BatchScan {
   return {
@@ -196,5 +198,37 @@ describe("配方名（存之前先问一遍）", () => {
     expect(recipeNameProblem("新名字", full)).toBe("full");
     expect(canSaveRecipe("配方7", full)).toBe(true);
     expect(canSaveRecipe("新名字", full)).toBe(false);
+  });
+});
+
+describe("配方导入回执", () => {
+  const row = (
+    name: string,
+    state: RecipeImportRow["state"],
+    finalName = "",
+    note = "",
+  ): RecipeImportRow => ({ name, final_name: finalName, state, note });
+
+  it("按三条路分别点数，空回执归零", () => {
+    expect(tallyRecipeImport([])).toEqual({ imported: 0, renamed: 0, skipped: 0 });
+    expect(
+      tallyRecipeImport([
+        row("sword", "imported", "sword"),
+        row("shield", "imported", "shield"),
+        row("sword", "renamed", "sword (2)"),
+        row("#3", "skipped", "", "missing field `kind`"),
+      ]),
+    ).toEqual({ imported: 2, renamed: 1, skipped: 1 });
+  });
+
+  it("只把改名和跳过拎出来：顺利进来的不逐条复述", () => {
+    const rows = [
+      row("sword", "imported", "sword"),
+      row("sword", "renamed", "sword (2)"),
+      row("bad/name", "skipped", "", "invalid name"),
+    ];
+    const notables = recipeImportNotables(rows);
+    expect(notables.map((item) => item.name)).toEqual(["sword", "bad/name"]);
+    expect(notables[0].final_name).toBe("sword (2)");
   });
 });

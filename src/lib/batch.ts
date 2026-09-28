@@ -7,6 +7,7 @@ import type {
   BatchRecipeEntry,
   BatchRecipe,
   BatchScan,
+  RecipeImportRow,
   PixelizeOptions,
 } from "./types";
 
@@ -112,6 +113,24 @@ export function recipeNameProblem(
 
 export function canSaveRecipe(name: string, book: BatchRecipeEntry[]): boolean {
   return recipeNameProblem(name, book) === null;
+}
+
+/** 导入回执的点算：三条路各落了多少条，拼一句总结就够了。 */
+export interface RecipeImportTally {
+  imported: number;
+  renamed: number;
+  skipped: number;
+}
+
+export function tallyRecipeImport(rows: RecipeImportRow[]): RecipeImportTally {
+  const tally: RecipeImportTally = { imported: 0, renamed: 0, skipped: 0 };
+  for (const row of rows) tally[row.state] += 1;
+  return tally;
+}
+
+/** 只有改名和跳过值得占一行：顺顺利利进来的那一堆不需要逐条复述。 */
+export function recipeImportNotables(rows: RecipeImportRow[]): RecipeImportRow[] {
+  return rows.filter((row) => row.state !== "imported");
 }
 
 /** 进度百分比 0..100；没有 total 时归零，交给 UI 当 indeterminate。 */

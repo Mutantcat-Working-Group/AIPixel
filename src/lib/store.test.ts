@@ -7,6 +7,7 @@ import type {
   BatchRecipe,
   BatchRecipeEntry,
   BatchScan,
+  RecipeImportReport,
   Layer,
   PixelDocument,
   VideoBrief,
@@ -437,6 +438,62 @@ describe("批量配方簿（存、取、删）", () => {
 
     expect(useStore.getState().recipeName).toBe("甲");
     expect(useStore.getState().recipeBook.map((item) => item.name)).toEqual(["甲"]);
+  });
+
+  it("导出把点名的配方和路径一起交给 Rust，提示念落盘后的路径", async () => {
+    invokeResults["batch_recipe_export"] = "/tmp/team/剑士.aipr";
+    useStore.setState({ recipeBook: [entry("甲"), entry("乙")], recipeBusy: false });
+    invokeCalls.length = 0;
+
+    await useStore
+      .getState()
+      .exportRecipes([entry("甲"), entry("乙")], "/tmp/team/剑士.json");
+
+    const call = invokeCalls.find((item) => item.cmd === "batch_recipe_export");
+    expect((call?.args.entries as BatchRecipeEntry[]).map((item) => item.name)).toEqual(["甲", "乙"]);
+    expect(call?.args.path).toBe("/tmp/team/剑士.json");
+    // Rust 补了后缀，所以提示里是 .aipr 那个路径。
+    expect(useStore.getState().notice).toEqual({
+      text: "已导出 2 条配方到 /tmp/team/剑士.aipr",
+      isError: false,
+    });
+    expect(useStore.getState().recipeBusy).toBe(false);
+  });
+
+  it("导入用回执里的簿子刷新视图，逐条交代也留下来", async () => {
+    invokeResults["batch_recipe_import"] = {
+      rows: [
+        { name: "甲", final_name: "甲", state: "imported", note: "" },
+        { name: "甲", final_name: "甲 (2)", state: "renamed", note: "" },
+        { name: "#3", final_name: "", state: "skipped", note: "missing field `kind`" },
+      ],
+      entries: [entry("甲"), entry("甲 (2)")],
+    } as RecipeImportReport;
+    useStore.setState({ recipeBook: [entry("旧")], recipeImport: null, notice: null });
+    invokeCalls.length = 0;
+
+    await useStore.getState().importRecipes("/tmp/team/team.aipr");
+
+    const call = invokeCalls.find((item) => item.cmd === "batch_recipe_import");
+    expect(call?.args.path).toBe("/tmp/team/team.aipr");
+    expect(useStore.getState().recipeBook.map((item) => item.name)).toEqual(["甲", "甲 (2)"]);
+    expect(useStore.getState().recipeImport?.rows).toHaveLength(3);
+    expect(useStore.getState().notice).toBeNull();
+  });
+
+  it("导入失败只清回执，不动本机簿子", async () => {
+    invokeErrors["batch_recipe_import"] = "cannot read /tmp/x.aipr";
+    useStore.setState({
+      recipeBook: [entry("甲")],
+      recipeImport: { rows: [], entries: [] },
+      notice: null,
+    });
+
+    await useStore.getState().importRecipes("/tmp/x.aipr");
+
+    expect(useStore.getState().recipeBook.map((item) => item.name)).toEqual(["甲"]);
+    expect(useStore.getState().recipeImport).toBeNull();
+    expect(useStore.getState().notice?.isError).toBe(true);
   });
 
   it("读不到配方簿只当没有，不给用户弹错误", async () => {
