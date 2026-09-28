@@ -1341,6 +1341,13 @@ body {
   color: var(--text-faint);
 }
 
+/* 「由 X 跑」：和 summary 同一层意思，但说的是模型，所以换成强调色。 */
+.dock-served {
+  margin: 0;
+  color: var(--accent);
+  font-size: 11.5px;
+}
+
 .dock-field {
   display: flex;
   flex-direction: column;
@@ -1559,6 +1566,50 @@ body {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
   gap: 4px 10px;
+}
+
+/* ---------- 会话模型分工 ---------- */
+
+.role-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.role-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.role-name {
+  flex: none;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* 徽标跟着绑定状态换语气：单独绑了才用正常色，未绑定要退后。 */
+.role-flag {
+  flex: none;
+  color: var(--ok);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.role-flag.muted {
+  color: var(--text-faint);
+}
+
+.role-picker {
+  flex: 1;
+  min-width: 0;
+}
+
+.role-empty {
+  color: var(--text-faint);
+  font-size: 12px;
 }
 
 /* ---------- 工作台编辑器与审批 ---------- */

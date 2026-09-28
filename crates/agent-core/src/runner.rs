@@ -21,11 +21,12 @@ use tokio::sync::oneshot;
 use super::imagegen::{self, ImageGenParams, LandSpot};
 use super::mcp::{self, McpRegistry};
 use super::models::{
-    ActiveContext, AgentEvent, ApprovalDecision, Attachment, ChatRequest, ContentBlock, LlmEvent,
-    Message, ModelConfig, PermissionMode, Role, RunnerConfig, ToolSpec,
+    ActiveContext, AgentEvent, ApprovalDecision, Attachment, Capabilities, ChatRequest,
+    ContentBlock, LlmEvent, Message, ModelConfig, PermissionMode, Role, RunnerConfig, ToolSpec,
 };
 use super::prompt;
 use super::providers::{self, LlmProvider};
+use super::roles::{ModelRole, RoleBinding};
 use super::tools::{self, ToolOutcome, IMAGE_GEN_TOOL};
 use pixel_core::decode;
 use pixel_core::document::Document;
@@ -55,6 +56,10 @@ pub struct AgentSession {
     pub id: String,
     /// 模型配置与 provider 放在同一把锁里，运行时切换模型不必重建会话、丢历史。
     engine: Mutex<Engine>,
+    /// 生图 / 识图 / 读视频的另外三个模型。按角色各一个，没有就回落主模型。
+    /// 和 engine 分成两处而不是塞进 Engine：主模型的语义是「会话本身那把」，
+    /// 换它要连带提示词和工具默认值一起变，角色模型只是某段流程的替身。
+    role_engines: Mutex<BTreeMap<ModelRole, Engine>>,
     runner_config: Mutex<RunnerConfig>,
     messages: Mutex<Vec<Message>>,
     document: Mutex<Document>,
@@ -75,6 +80,7 @@ impl AgentSession {
             id: id.into(),
             runner_config: Mutex::new(RunnerConfig::default()),
             engine: Mutex::new(Engine { config, provider }),
+            role_engines: Mutex::new(BTreeMap::new()),
             messages: Mutex::new(Vec::new()),
             document: Mutex::new(document),
             active: Mutex::new(active),
@@ -95,6 +101,72 @@ impl AgentSession {
     pub fn with_mcp_registry(mut self, registry: Arc<McpRegistry>) -> Self {
         self.mcp = Some(registry);
         self
+    }
+
+    /// 把某个角色另绑到一个模型。配同一个角色就是换模型。
+    /// 没配过这个角色时，它本来在蹭主模型的饭碗，现在才有自己的。
+    pub fn rebind_role(&self, role: ModelRole, config: ModelConfig) {
+        if !role.is_detachable() {
+            // 主模型只能整体 rebind_provider，这里是调用方走错了门。
+            return;
+        }
+        let provider = providers::build_provider(&config);
+        self.role_engines
+            .lock()
+            .unwrap()
+            .insert(role, Engine { config, provider });
+    }
+
+    /// 取消某个角色的单独绑定，让它回落去蹭主模型。没绑过就是空操作。
+    pub fn clear_role(&self, role: ModelRole) {
+        self.role_engines.lock().unwrap().remove(&role);
+    }
+
+    /// 这个角色实际该用哪个模型配置：单独绑了就用它，否则用主模型。
+    /// 单模型用户什么都没配，所以拿到的永远是主模型，行为和以前一致。
+    pub fn model_for_role(&self, role: ModelRole) -> ModelConfig {
+        self.role_engines
+            .lock()
+            .unwrap()
+            .get(&role)
+            .map(|engine| engine.config.clone())
+            .unwrap_or_else(|| self.model_config())
+    }
+
+    /// 四个角色各自实际在干的活，给 UI 摆「谁负责哪段流程」。
+    /// 没有分工引擎的会话也照答：回落主模型，`detached` 是 false。
+    pub fn role_bindings(&self) -> Vec<RoleBinding> {
+        let primary = self.model_config();
+        let roles = self.role_engines.lock().unwrap();
+        ModelRole::all()
+            .into_iter()
+            .map(|role| match roles.get(&role) {
+                Some(engine) => RoleBinding {
+                    role,
+                    model_id: engine.config.id.clone(),
+                    model_label: engine.config.label.clone(),
+                    detached: true,
+                },
+                None => RoleBinding {
+                    role,
+                    model_id: primary.id.clone(),
+                    model_label: primary.label.clone(),
+                    detached: false,
+                },
+            })
+            .collect()
+    }
+
+    /// 会话实际能跑的工作流能力：把各角色自己那份能力并进来。
+    /// 单模型用户没有角色引擎，并集就等于主模型自己的能力。
+    pub fn effective_capabilities(&self) -> Capabilities {
+        let mut caps = self.model_config().capabilities;
+        for engine in self.role_engines.lock().unwrap().values() {
+            caps.vision |= engine.config.capabilities.vision;
+            caps.image_gen |= engine.config.capabilities.image_gen;
+            caps.video |= engine.config.capabilities.video;
+        }
+        caps
     }
 
     /// 本会话可见的 MCP 工具规格（没挂注册表就空）。
@@ -804,6 +876,152 @@ mod tests {
             },
             Document::new("t", 8, 8).unwrap(),
         )
+    }
+
+    fn model_with(id: &str, caps: Capabilities) -> ModelConfig {
+        ModelConfig {
+            id: id.into(),
+            label: format!("{id} label"),
+            protocol: super::super::models::Protocol::OpenAiCompat,
+            base_url: "https://example.invalid".into(),
+            api_key: String::new(),
+            model: "test".into(),
+            max_tokens: None,
+            temperature: None,
+            capabilities: caps,
+        }
+    }
+
+    #[test]
+    fn a_session_without_role_models_answers_with_the_session_model() {
+        let s = session();
+        for role in ModelRole::all() {
+            assert_eq!(s.model_for_role(role).id, "m1", "{role:?} should fall back");
+        }
+        // 回落时 UI 要显示「正在用主模型凑」，所以 detached 必须是 false。
+        for binding in s.role_bindings() {
+            assert!(!binding.detached, "{:?} is not detached", binding.role);
+            assert_eq!(binding.model_id, "m1");
+        }
+        assert_eq!(s.effective_capabilities(), Capabilities::default());
+    }
+
+    #[test]
+    fn binding_a_role_moves_only_that_role() {
+        let s = session();
+        s.rebind_role(
+            ModelRole::ImageGen,
+            model_with(
+                "img",
+                Capabilities {
+                    image_gen: true,
+                    ..Default::default()
+                },
+            ),
+        );
+
+        assert_eq!(s.model_for_role(ModelRole::ImageGen).id, "img");
+        // 另外三个角色没被惊动，还指着主模型。
+        assert_eq!(s.model_for_role(ModelRole::Chat).id, "m1");
+        assert_eq!(s.model_for_role(ModelRole::Vision).id, "m1");
+        assert_eq!(s.model_for_role(ModelRole::Video).id, "m1");
+
+        let bindings = s.role_bindings();
+        let gen = bindings
+            .iter()
+            .find(|b| b.role == ModelRole::ImageGen)
+            .unwrap();
+        assert!(gen.detached);
+        assert_eq!(gen.model_id, "img");
+        assert_eq!(gen.model_label, "img label");
+    }
+
+    #[test]
+    fn effective_capabilities_unions_every_role() {
+        let s = session();
+        assert!(!s.effective_capabilities().any());
+
+        s.rebind_role(
+            ModelRole::ImageGen,
+            model_with(
+                "img",
+                Capabilities {
+                    image_gen: true,
+                    ..Default::default()
+                },
+            ),
+        );
+        s.rebind_role(
+            ModelRole::Video,
+            model_with(
+                "vid",
+                Capabilities {
+                    video: true,
+                    ..Default::default()
+                },
+            ),
+        );
+
+        let caps = s.effective_capabilities();
+        assert!(caps.image_gen);
+        assert!(caps.video);
+        // 没人认领识图，所以它还是关着：并集不是无条件全开。
+        assert!(!caps.vision);
+    }
+
+    #[test]
+    fn rebinding_the_same_role_replaces_the_model() {
+        let s = session();
+        s.rebind_role(ModelRole::Vision, model_with("v1", Capabilities::default()));
+        s.rebind_role(ModelRole::Vision, model_with("v2", Capabilities::default()));
+        assert_eq!(s.model_for_role(ModelRole::Vision).id, "v2");
+        assert_eq!(
+            s.role_bindings()
+                .iter()
+                .find(|b| b.role == ModelRole::Vision)
+                .unwrap()
+                .model_id,
+            "v2"
+        );
+    }
+
+    #[test]
+    fn clearing_a_role_falls_back_to_the_session_model() {
+        let s = session();
+        s.rebind_role(
+            ModelRole::ImageGen,
+            model_with(
+                "img",
+                Capabilities {
+                    image_gen: true,
+                    ..Default::default()
+                },
+            ),
+        );
+        assert!(s.effective_capabilities().image_gen);
+
+        s.clear_role(ModelRole::ImageGen);
+        assert_eq!(s.model_for_role(ModelRole::ImageGen).id, "m1");
+        assert!(!s.effective_capabilities().image_gen);
+        for binding in s.role_bindings() {
+            assert!(!binding.detached);
+        }
+    }
+
+    #[test]
+    fn the_chat_role_cannot_be_rebound_through_the_role_door() {
+        // 主模型只能整体 rebind_provider；从角色门改它会让 UI 以为有两个主模型。
+        let s = session();
+        s.rebind_role(
+            ModelRole::Chat,
+            model_with("other", Capabilities::default()),
+        );
+        assert_eq!(s.model_for_role(ModelRole::Chat).id, "m1");
+        assert!(s.role_bindings().iter().all(|b| !b.detached));
+
+        // 清一个没绑过的角色也不该炸。
+        s.clear_role(ModelRole::Video);
+        assert_eq!(s.model_for_role(ModelRole::Video).id, "m1");
     }
 
     #[test]

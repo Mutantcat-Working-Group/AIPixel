@@ -7,7 +7,10 @@ import type {
   BatchRecipe,
   BatchRecipeEntry,
   BatchScan,
+  ModelRole,
   RecipeImportReport,
+  RoleBinding,
+  SessionInfo,
   Layer,
   PixelDocument,
   VideoBrief,
@@ -533,5 +536,74 @@ describe("把提示词送进生图面板（识图 -> 生图）", () => {
     expect(draft.genSource).toBe("frame");
     expect(draft.genFrame).toBe("F1");
     expect(draft.genPath).toBeNull();
+  });
+});
+
+describe("会话模型分工（按角色另绑模型）", () => {
+  /** 四个角色的分工快照：点名的角色自己带模型，其余蹭主模型。 */
+  function rolesOf(...detached: ModelRole[]): RoleBinding[] {
+    return (["chat", "image_gen", "vision", "video"] as ModelRole[]).map((role) => ({
+      role,
+      model_id: detached.includes(role) ? `m-${role}` : "m-chat",
+      model_label: detached.includes(role) ? `${role}-model` : "chat-model",
+      detached: detached.includes(role),
+    }));
+  }
+
+  function session(roles: RoleBinding[]): SessionInfo {
+    return {
+      id: "s-1",
+      model_id: "m-chat",
+      model_label: "chat-model",
+      roles,
+      width: 64,
+      height: 64,
+      revision: 3,
+    };
+  }
+
+  it("把角色和模型 id 一起交给 Rust，回执整条换掉旧会话", async () => {
+    const rebound = session(rolesOf("image_gen"));
+    invokeResults["session_bind_role"] = rebound;
+    invokeResults["workflow_catalog"] = [];
+    useStore.setState({ activeId: "s-1", sessions: [session(rolesOf())], workflows: [] });
+    invokeCalls.length = 0;
+
+    await useStore.getState().bindSessionRole("image_gen", "m-image_gen");
+
+    const bound = invokeCalls.find((call) => call.cmd === "session_bind_role");
+    expect(bound?.args).toEqual({ id: "s-1", role: "image_gen", modelId: "m-image_gen" });
+    // 分会话整条换：分工快照不换的话，模型菜单里那条还指着旧模型。
+    expect(useStore.getState().sessions).toEqual([rebound]);
+    // 多了一个会生图的模型，之前灰着的流程可能就能跑了：重新问一遍目录。
+    expect(invokeCalls.some((call) => call.cmd === "workflow_catalog")).toBe(true);
+  });
+
+  it("取消绑定时只点名角色，不带模型 id", async () => {
+    const cleared = session(rolesOf());
+    invokeResults["session_clear_role"] = cleared;
+    invokeResults["workflow_catalog"] = [];
+    useStore.setState({
+      activeId: "s-1",
+      sessions: [session(rolesOf("image_gen"))],
+      workflows: [],
+    });
+    invokeCalls.length = 0;
+
+    await useStore.getState().clearSessionRole("image_gen");
+
+    const clearedCall = invokeCalls.find((call) => call.cmd === "session_clear_role");
+    expect(clearedCall?.args).toEqual({ id: "s-1", role: "image_gen" });
+    expect(useStore.getState().sessions).toEqual([cleared]);
+  });
+
+  it("没有会话时一个命令都不发", async () => {
+    useStore.setState({ activeId: null, sessions: [] });
+    invokeCalls.length = 0;
+
+    await useStore.getState().bindSessionRole("vision", "m-vision");
+    await useStore.getState().clearSessionRole("vision");
+
+    expect(invokeCalls).toEqual([]);
   });
 });

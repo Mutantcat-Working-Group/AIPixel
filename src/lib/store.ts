@@ -28,11 +28,12 @@ import type {
   EditorOperation,
   DockKind,
   DockDraft,
- ImageGenParams,
+  ImageGenParams,
   McpServerConfig,
   McpServersView,
- ModelConfig,
- ModelsView,
+  ModelConfig,
+  ModelsView,
+  ModelRole,
   PixelizeParams,
   PendingAttachment,
   PendingApproval,
@@ -158,6 +159,10 @@ export interface StoreActions {
   createSession: (width?: number, height?: number) => Promise<void>;
   removeSession: (id: string) => Promise<void>;
   bindSessionModel: (modelId: string) => Promise<void>;
+  /** 给生图 / 识图 / 读视频之一另绑一个模型。 */
+  bindSessionRole: (role: ModelRole, modelId: string) => Promise<void>;
+  /** 取消某个角色的单独绑定，让它回落去用会话主模型。 */
+  clearSessionRole: (role: ModelRole) => Promise<void>;
   setPermissionMode: (mode: PermissionMode) => Promise<void>;
   send: (text: string) => Promise<void>;
   interrupt: () => Promise<void>;
@@ -676,6 +681,27 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         sessions: getState().sessions.map((s) => (s.id === id ? info : s)),
       });
       // 能力跟着会话绑的模型走，换绑之后哪些工作流跑得动就变了。
+      await getState().refreshWorkflows();
+    },
+
+    bindSessionRole: async (role, modelId) => {
+      const id = getState().activeId;
+      if (!id) return;
+      const info = await bridge.bindSessionRole(id, role, modelId);
+      setState({
+        sessions: getState().sessions.map((s) => (s.id === id ? info : s)),
+      });
+      // 多了一个会生图 / 识图 / 读视频的模型，之前灰着的流程可能就能跑了。
+      await getState().refreshWorkflows();
+    },
+
+    clearSessionRole: async (role) => {
+      const id = getState().activeId;
+      if (!id) return;
+      const info = await bridge.clearSessionRole(id, role);
+      setState({
+        sessions: getState().sessions.map((s) => (s.id === id ? info : s)),
+      });
       await getState().refreshWorkflows();
     },
 

@@ -16,7 +16,13 @@ import { KeyRound, Plus, Star, Trash2 } from "lucide-react";
 import { useStore } from "../lib/store";
 import { LANG_OPTIONS, type Lang } from "../lib/i18n";
 import { useT } from "../lib/t";
-import type { Capabilities, ModelConfig, ModelView, Protocol } from "../lib/types";
+import type {
+  Capabilities,
+  ModelConfig,
+  ModelRole,
+  ModelView,
+  Protocol,
+} from "../lib/types";
 
 const NO_CAPABILITIES: Capabilities = { vision: false, image_gen: false, video: false };
 
@@ -30,6 +36,16 @@ interface FormShape {
   temperature: number | null;
   capabilities: Capabilities;
 }
+
+/** 能另绑一个模型的三个角色，按工作流坞的条目顺序排。 */
+const DETACHABLE_ROLES: {
+  role: ModelRole;
+  labelKey: "roles.image_gen" | "roles.vision" | "roles.video";
+}[] = [
+  { role: "image_gen", labelKey: "roles.image_gen" },
+  { role: "vision", labelKey: "roles.vision" },
+  { role: "video", labelKey: "roles.video" },
+];
 
 function toForm(model: ModelView | null): FormShape {
   if (!model) {
@@ -76,6 +92,11 @@ export default function ModelSettingsModal() {
   const upsertModel = useStore((s) => s.upsertModel);
   const removeModel = useStore((s) => s.removeModel);
   const activateModel = useStore((s) => s.activateModel);
+  // 分工按会话走：读的是当前会话的分工快照，改的也是当前会话。
+  const activeSessionId = useStore((s) => s.activeId);
+  const sessions = useStore((s) => s.sessions);
+  const bindSessionRole = useStore((s) => s.bindSessionRole);
+  const clearSessionRole = useStore((s) => s.clearSessionRole);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [form] = Form.useForm<FormShape>();
@@ -83,6 +104,8 @@ export default function ModelSettingsModal() {
   const [error, setError] = useState<string | null>(null);
 
   const selected: ModelView | null = models.find((m) => m.id === selectedId) ?? null;
+  const activeSession = sessions.find((s) => s.id === activeSessionId) ?? null;
+  const roleBindings = activeSession?.roles ?? [];
 
   const protocolOptions: { label: string; value: Protocol }[] = [
     { label: t("settings.protocol.anthropic"), value: "anthropic" },
@@ -256,6 +279,43 @@ export default function ModelSettingsModal() {
             ))}
           </div>
         </Form>
+
+        <ModelFragment title={t("roles.title")} hint={t("roles.hint")} />
+        {activeSession ? (
+          <div className="role-list">
+            {DETACHABLE_ROLES.map(({ role, labelKey }) => {
+              const binding = roleBindings.find((b) => b.role === role);
+              const bound = binding?.detached ?? false;
+              return (
+                <div className="role-row" key={role}>
+                  <span className="role-name">{t(labelKey)}</span>
+                  <span className={`role-flag ${bound ? "" : "muted"}`}>
+                    {bound ? t("roles.detached") : t("roles.following")}
+                  </span>
+                  <Select
+                    size="small"
+                    className="role-picker"
+                    value={binding?.model_id}
+                    placeholder={t("roles.pick")}
+                    options={models.map((model) => ({ label: model.label, value: model.id }))}
+                    onChange={(next) => void bindSessionRole(role, next)}
+                  />
+                  {bound ? (
+                    <Button
+                      size="small"
+                      type="text"
+                      onClick={() => void clearSessionRole(role)}
+                    >
+                      {t("roles.clear")}
+                    </Button>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="role-empty">{t("roles.session_needed")}</div>
+        )}
 
         {error ? <Alert type="error" message={error} showIcon /> : null}
 

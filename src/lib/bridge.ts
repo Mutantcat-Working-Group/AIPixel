@@ -16,12 +16,13 @@ import type {
   BatchScan,
   EditorOperation,
   InkColor,
- Message,
+  Message,
   McpServerConfig,
   McpServersView,
- ModelConfig,
- ModelsView,
-  PermissionMode,
+  ModelConfig,
+  ModelsView,
+  ModelRole,
+ PermissionMode,
   PixelDocument,
   RecipeImportReport,
   SessionInfo,
@@ -94,6 +95,20 @@ export function dropSession(id: string): Promise<void> {
 
 export function bindModel(id: string, modelId: string): Promise<SessionInfo> {
   return invoke<SessionInfo>("session_bind_model", { id, modelId });
+}
+
+/** 给生图 / 识图 / 读视频之一另绑一个模型；回来带着最新的分工概览。 */
+export function bindSessionRole(
+  id: string,
+  role: ModelRole,
+  modelId: string,
+): Promise<SessionInfo> {
+  return invoke<SessionInfo>("session_bind_role", { id, role, modelId });
+}
+
+/** 取消某个角色的单独绑定，让它回落去用会话主模型。 */
+export function clearSessionRole(id: string, role: ModelRole): Promise<SessionInfo> {
+  return invoke<SessionInfo>("session_clear_role", { id, role });
 }
 
 export function setActive(id: string, active: ActiveContext): Promise<void> {

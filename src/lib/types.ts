@@ -149,9 +149,22 @@ export interface SessionInfo {
   id: string;
   model_id: string;
   model_label: string;
+  /** 四个角色各自在干活的模型。没分工就是主模型，`detached` 是 false。 */
+  roles: RoleBinding[];
   width: number;
   height: number;
   revision: number;
+}
+
+/** 会话里的一种模型分工。chat 就是会话主模型，另外三个能另绑一个。 */
+export type ModelRole = "chat" | "image_gen" | "vision" | "video";
+
+/** 一个角色实际在干活的活。回落主模型时 model_id/model_label 是主模型那两个。 */
+export interface RoleBinding {
+  role: ModelRole;
+  model_id: string;
+  model_label: string;
+  detached: boolean;
 }
 
 export interface Attachment {
@@ -299,6 +312,10 @@ export interface WorkflowInfo {
 /** 目录项：WorkflowInfo 在 Rust 侧是 #[serde(flatten)]，所以前台看到的是同一层字段。 */
 export interface WorkflowEntry extends WorkflowInfo {
   readiness: Readiness;
+  /** 这条流程实际由哪个角色干活；角色没单独绑模型时是 chat。 */
+  served_by: ModelRole;
+  /** 干活那个模型的名字，给面板显示「生图由 X 提供」。 */
+  served_by_label: string;
 }
 
 /** 当前会话绑的模型跑不跑得动。 */

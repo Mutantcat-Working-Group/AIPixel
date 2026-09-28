@@ -17,6 +17,7 @@ pub mod one_shot;
 pub mod prompt;
 pub mod providers;
 pub mod refine;
+pub mod roles;
 pub mod runner;
 pub mod tools;
 pub mod video;
@@ -36,6 +37,7 @@ pub use models::{
 };
 pub use providers::{build_provider, EventStream, LlmProvider, ProviderError};
 pub use refine::{refine, RefineRequest, RefineTarget, RefinedPrompt};
+pub use roles::{ModelRole, RoleBinding};
 pub use runner::AgentSession;
 pub use video::{extract_frames, probe, ProbeSource, VideoProbe};
 pub use video_brief::{

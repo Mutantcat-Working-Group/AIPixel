@@ -12,7 +12,8 @@ use agent_core::video_brief::{
 };
 use agent_core::{
     imagegen, refine as refine_flow, video as video_flow, vision, ActiveContext, AgentEvent,
-    AgentSession, Attachment, AttachmentRole, LandSpot, RefineRequest, RefineTarget, UiText,
+    AgentSession, Attachment, AttachmentRole, LandSpot, ModelRole, RefineRequest, RefineTarget,
+    UiText,
 };
 use pixel_core::decode;
 use pixel_core::document::Document;
@@ -44,6 +45,11 @@ pub struct WorkflowEntry {
     #[serde(flatten)]
     pub info: agent_core::WorkflowInfo,
     pub readiness: agent_core::Readiness,
+    /// 这条流程实际由哪个角色干活。角色没单独绑模型时会话会说「主模型」，
+    /// 用户在面板里一眼看出生图和聊天是不是同一家。
+    pub served_by: agent_core::ModelRole,
+    /// 干活那个模型的 id 和名字。回落主模型时就是主模型那两个。
+    pub served_by_label: String,
 }
 
 /// 视频探针结果。source 决定 UI 该说「抽帧」还是「这就是一串静帧」。
@@ -172,12 +178,26 @@ pub fn workflow_catalog(
     id: String,
 ) -> Result<Vec<WorkflowEntry>, String> {
     let session = state.session(&id)?;
-    let caps = session.model_config().capabilities;
+    // 能力按合起来算：生图模型单独绑了也算这个会话会生图，
+    // 不然用户明明配了生图模型，面板里那条流程还是灰的。
+    let caps = session.effective_capabilities();
+    let bindings = session.role_bindings();
     Ok(agent_core::catalog()
         .into_iter()
         .map(|info| {
             let readiness = agent_core::readiness(info.kind, &caps);
-            WorkflowEntry { info, readiness }
+            let role = ModelRole::for_workflow(info.kind);
+            let served = bindings
+                .iter()
+                .find(|binding| binding.role == role)
+                .map(|binding| binding.model_label.clone())
+                .unwrap_or_default();
+            WorkflowEntry {
+                info,
+                readiness,
+                served_by: role,
+                served_by_label: served,
+            }
         })
         .collect())
 }
@@ -203,7 +223,7 @@ pub async fn prompt_refine(
     target: Option<RefineTarget>,
 ) -> Result<agent_core::RefinedPrompt, String> {
     let session = state.session(&id)?;
-    let config = session.model_config();
+    let config = session.model_for_role(ModelRole::Chat);
     let (w, h) = {
         let doc = session.document();
         (doc.width, doc.height)
@@ -228,10 +248,10 @@ pub async fn vision_brief(
     path: String,
 ) -> Result<vision::VisionBrief, String> {
     let session = state.session(&id)?;
-    let config = session.model_config();
+    let config = session.model_for_role(ModelRole::Vision);
     if !config.capabilities.vision {
         return Err(
-            "this model is not marked as able to read images; enable vision in model settings"
+            "this model is not marked as able to read images; pick a vision model for this session or turn on vision in model settings"
                 .into(),
         );
     }
@@ -254,9 +274,12 @@ pub async fn workflow_image_gen(
     params: ImageGenParams,
 ) -> Result<WorkflowOutcome, String> {
     let session = state.session(&id)?;
-    let config = session.model_config();
+    let config = session.model_for_role(ModelRole::ImageGen);
     if !config.capabilities.image_gen {
-        return Err("this model is not marked as able to generate images; enable image generation in model settings".into());
+        return Err(
+            "this model is not marked as able to generate images; pick an image model for this session or turn on image generation in model settings"
+                .into(),
+        );
     }
     if params.prompt.trim().is_empty() {
         return Err("image generation needs a prompt".into());
@@ -479,10 +502,11 @@ pub async fn video_brief(
     params: VideoBriefParams,
 ) -> Result<agent_core::VideoBrief, String> {
     let session = state.session(&id)?;
-    let config = session.model_config();
+    let config = session.model_for_role(ModelRole::Video);
     if !config.capabilities.video {
         return Err(
-            "this model is not marked as able to read video; enable video in model settings".into(),
+            "this model is not marked as able to read video; pick a video model for this session or turn on video in model settings"
+                .into(),
         );
     }
     let source = PathBuf::from(&params.path);

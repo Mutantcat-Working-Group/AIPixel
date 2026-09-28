@@ -3,7 +3,7 @@
 
 use agent_core::{
     ActiveContext, AgentEvent, AgentSession, ApprovalDecision, Attachment, AttachmentRole, Message,
-    ModelConfig, PermissionMode,
+    ModelConfig, ModelRole, PermissionMode,
 };
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, State};
@@ -56,6 +56,8 @@ pub struct SessionInfo {
     pub id: String,
     pub model_id: String,
     pub model_label: String,
+    /// 四个角色各自在干活的模型。没分工就是主模型，前端据此显示「谁负责哪段」。
+    pub roles: Vec<agent_core::RoleBinding>,
     pub width: u32,
     pub height: u32,
     pub revision: u64,
@@ -68,6 +70,7 @@ fn session_info(session: &AgentSession) -> SessionInfo {
         id: session.id().to_string(),
         model_id: config.id,
         model_label: config.label,
+        roles: session.role_bindings(),
         width: doc.width,
         height: doc.height,
         revision: doc.revision,
@@ -116,6 +119,40 @@ pub fn session_bind_model(
     let session = state.session(&id)?;
     let config = state.model_config(&model_id)?;
     session.rebind_provider(config);
+    Ok(session_info(&session))
+}
+
+/// 给某个角色另绑一个模型。生图 / 识图 / 读视频各能配一个和会话主模型不同的，
+/// 这样用户不用为了跑一次生图把整个会话改绑过去再改回来。
+/// 主模型不允许从这里改：那是 `session_bind_model` 的活。
+#[tauri::command]
+pub fn session_bind_role(
+    state: State<'_, AppState>,
+    id: String,
+    role: ModelRole,
+    model_id: String,
+) -> Result<SessionInfo, String> {
+    let session = state.session(&id)?;
+    if !role.is_detachable() {
+        return Err("the chat role is the session model itself; rebind the session instead".into());
+    }
+    let config = state.model_config(&model_id)?;
+    session.rebind_role(role, config);
+    Ok(session_info(&session))
+}
+
+/// 取消某个角色的单独绑定，让它回落去用会话主模型。
+#[tauri::command]
+pub fn session_clear_role(
+    state: State<'_, AppState>,
+    id: String,
+    role: ModelRole,
+) -> Result<SessionInfo, String> {
+    let session = state.session(&id)?;
+    if !role.is_detachable() {
+        return Err("the chat role is the session model itself; rebind the session instead".into());
+    }
+    session.clear_role(role);
     Ok(session_info(&session))
 }
 

@@ -33,6 +33,7 @@ import type {
   DockDraft,
   LandSpot,
   MigrateOrder,
+  ModelRole,
   RefineTarget,
   TweenMode,
   VisionBrief,
@@ -56,6 +57,15 @@ const SIZE_OPTIONS = ["512x512", "768x768", "1024x1024", "1024x576", "576x1024"]
 const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "webp", "gif"];
 const VIDEO_EXTENSIONS = ["mp4", "mov", "webm", "mkv", "avi", "m4v"];
 
+/** 有模型在背后跑的四条流程加 agent 主循环；抽帧、补间、量化全程本机，不说谁跑。 */
+const MODEL_BACKED: ReadonlySet<DockKind> = new Set<DockKind>([
+  "agent",
+  "prompt_refine",
+  "image_gen",
+  "vision_brief",
+  "video_brief",
+]);
+
 interface DockRow {
   key: DockKind;
   title: string;
@@ -63,6 +73,14 @@ interface DockRow {
   /** 跑完会得到什么，给 tooltip 用。 */
   output: string;
   readiness: { state: "ready" } | { state: "blocked"; missing: string[] };
+  /** 这条流程实际由哪个模型跑；纯本机的流程没有，是 null。 */
+  servedBy: { role: ModelRole; label: string } | null;
+}
+
+/** 面板里那句「由谁跑」。回落主模型时说清楚是主模型，别让用户以为背后藏了个模型。 */
+function servedText(served: { role: ModelRole; label: string }, t: T): string {
+  const key = served.role === "chat" ? "roles.served_fallback" : "roles.served";
+  return t(key, { model: served.label });
 }
 
 /** 缺的能力名 -> 界面词。Rust 只给 snake_case 标识，中文要说人话。 */
@@ -226,6 +244,9 @@ export default function WorkflowDock() {
         summary: translateText(lang, `wf.${entry.kind}.summary`, undefined, entry.summary),
         output: translateText(lang, `wf.${entry.kind}.output`, undefined, entry.output),
         readiness: entry.readiness,
+        servedBy: entry.served_by_label
+          ? { role: entry.served_by, label: entry.served_by_label }
+          : null,
       })),
       {
         key: "quantize" as const,
@@ -233,6 +254,7 @@ export default function WorkflowDock() {
         summary: translate(lang, "wf.quantize.summary"),
         output: translate(lang, "wf.quantize.output"),
         readiness: { state: "ready" as const },
+        servedBy: null,
       },
     ],
     [workflows, lang],
@@ -289,6 +311,9 @@ export default function WorkflowDock() {
             <strong>{active.title}</strong>
           </div>
           <p className="dock-note">{active.summary}</p>
+          {MODEL_BACKED.has(active.key) && active.servedBy ? (
+            <p className="dock-served">{servedText(active.servedBy, t)}</p>
+          ) : null}
 
           {pending ? (
             <Alert
