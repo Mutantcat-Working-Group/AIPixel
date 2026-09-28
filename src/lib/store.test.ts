@@ -146,6 +146,54 @@ describe("编辑器结构动作（store -> bridge）", () => {
     await useStore.getState().moveLayer(-1);
     expect(lastOps()).toEqual([]);
   });
+
+  it("swaps the whole palette through one set_palette op", async () => {
+    useStore.setState({
+      activeId: "doc-01",
+      document: seedDocument(),
+      active: { layer: "L0", frame: "F0", color: null },
+    });
+    invokeCalls.length = 0;
+
+    await expect(useStore.getState().setPaletteColors(["#1a1c2c", "#ffcd75"])).resolves.toBe(
+      true,
+    );
+    expect(lastOps()).toEqual([{ op: "set_palette", colors: ["#1a1c2c", "#ffcd75"] }]);
+  });
+
+  it("refuses an empty palette instead of wiping the canvas", async () => {
+    useStore.setState({ activeId: "doc-01", document: seedDocument() });
+    invokeCalls.length = 0;
+
+    // 空配色等于把整幅擦透明：不发车，并如实告诉调用方没落成。
+    await expect(useStore.getState().setPaletteColors([])).resolves.toBe(false);
+    expect(lastOps()).toEqual([]);
+  });
+
+  it("hands an export straight to Rust with the picked path", async () => {
+    useStore.setState({ activeId: "doc-01", document: seedDocument() });
+    invokeCalls.length = 0;
+
+    await useStore.getState().exportDocument("gif", "/tmp/out.gif");
+    expect(invokeCalls.at(-1)).toEqual({
+      cmd: "document_export",
+      args: { id: "doc-01", format: "gif", path: "/tmp/out.gif", columns: 0, frame: null },
+    });
+  });
+
+  it("carries the frame number only for a single-frame export", async () => {
+    useStore.setState({ activeId: "doc-01", document: seedDocument(), frameIndex: 2 });
+    invokeCalls.length = 0;
+
+    await useStore.getState().exportDocument("frame", "/tmp/out.png", { frame: 2 });
+    expect(invokeCalls.at(-1)?.args).toEqual({
+      id: "doc-01",
+      format: "frame",
+      path: "/tmp/out.png",
+      columns: 0,
+      frame: 2,
+    });
+  });
 });
 
 describe("blankDocument", () => {

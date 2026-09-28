@@ -367,7 +367,9 @@ pub fn apply_one(doc: &mut Document, op: &PixelOperation) -> Result<(), Operatio
             // 就近映射表：旧索引 -> 新索引。透明（0）与调色板外的东西都归 0。
             let mut remap = vec![0u16; doc.palette.len() + 1];
             for (old, color) in doc.palette.iter().enumerate() {
-                remap[old + 1] = nearest_index(&next, *color).map(|i| i as u16 + 1).unwrap_or(0);
+                remap[old + 1] = nearest_index(&next, *color)
+                    .map(|i| i as u16 + 1)
+                    .unwrap_or(0);
             }
             for cel in doc.cels.values_mut().flat_map(|m| m.values_mut()) {
                 for idx in cel.indices.iter_mut() {

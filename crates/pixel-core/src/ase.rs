@@ -67,7 +67,7 @@ pub fn encode_ase(doc: &Document) -> Result<Vec<u8>, String> {
         out.extend_from_slice(&((FRAME_HEADER_LEN + chunks.len()) as u32).to_le_bytes());
         out.extend_from_slice(&FRAME_MAGIC.to_le_bytes());
         out.extend_from_slice(&chunk_count.to_le_bytes()); // 旧字段
-        // 帧头只有 u16，超过 65535ms 的停留夹住（文档上限 60s 也到不了）。
+                                                           // 帧头只有 u16，超过 65535ms 的停留夹住（文档上限 60s 也到不了）。
         out.extend_from_slice(&(frame.duration_ms.min(u16::MAX as u32) as u16).to_le_bytes());
         out.extend_from_slice(&[0u8; 2]); // 保留
         out.extend_from_slice(&0u32.to_le_bytes()); // 新字段 0 = 用旧字段
@@ -169,9 +169,8 @@ mod tests {
 
     fn parse(bytes: &[u8]) -> Parsed {
         let u16_at = |o: usize| u16::from_le_bytes([bytes[o], bytes[o + 1]]);
-        let u32_at = |o: usize| {
-            u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]])
-        };
+        let u32_at =
+            |o: usize| u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
         assert_eq!(u16_at(4), ASE_MAGIC);
         let frames = u16_at(6) as usize;
         assert_eq!(u32_at(0) as usize, bytes.len(), "file size must be exact");

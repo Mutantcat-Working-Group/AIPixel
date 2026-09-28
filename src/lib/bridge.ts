@@ -151,14 +151,23 @@ export function readImageContext(path: string): Promise<Attachment> {
   return invoke<Attachment>("read_image_context", { path });
 }
 
-/** 导出动画：gif 是无限循环动画，sheet 是 PNG spritesheet（columns 0 = 排成一行）。 */
+/** 导出格式：Rust 侧 document_export 认领的这几种；aseprite 是 ase 的别名。 */
+export type ExportFormat = "gif" | "sheet" | "ase" | "aseprite" | "frame" | "strip";
+
+/** 导出：gif 是无限循环动画，sheet 是 PNG spritesheet（columns 0 = 排成一行）。 */
 export function documentExport(
   id: string,
-  format: "gif" | "sheet",
+  format: ExportFormat,
   path: string,
-  columns = 0
+  options: { columns?: number; frame?: number } = {}
 ): Promise<void> {
-  return invoke<void>("document_export", { id, format, path, columns });
+  return invoke<void>("document_export", {
+    id,
+    format,
+    path,
+    columns: options.columns ?? 0,
+    frame: options.frame ?? null,
+  });
 }
 
 // ---------- 工作流 ----------

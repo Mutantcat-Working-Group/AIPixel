@@ -530,6 +530,8 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
+  /* 3x3 瓦片比预览区还大时：滚动看全，别把格子压扁。 */
+  overflow: auto;
   width: 100%;
 }
 
@@ -566,21 +568,6 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.06em;
   margin-bottom: 7px;
-}
-
-/* 两个导出按钮平摊整行，别让标签长短决定按钮宽度。 */
-.export-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 6px;
-}
-
-.export-row .ant-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  font-size: 11.5px;
 }
 
 .layer-row {
@@ -731,12 +718,16 @@ body {
   gap: 5px;
 }
 
+/* 帧条一格一帧：缩略图在上、帧号与时长在下，像底片一样竖着排。 */
 .frame-chip {
-  font-family: var(--mono);
-  font-size: 11px;
-  padding: 2px 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  width: 56px;
+  padding: 4px 4px 3px;
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: 6px;
   background: var(--bg-panel-2);
   color: var(--text-dim);
   cursor: pointer;
@@ -748,10 +739,59 @@ body {
   background: var(--accent-soft);
 }
 
+.frame-chip-id {
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.frame-chip-ms {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-faint);
+}
+
+/* 缩略图和播放共用一套合成，透明格底下垫层淡棋盘：看得出没有内容，不是黑了一块。 */
+.frame-thumb {
+  image-rendering: pixelated;
+  background-image: conic-gradient(#222a35 0 25%, #171d26 0 50%, #222a35 0 75%, #171d26 0);
+  background-size: 8px 8px;
+  border-radius: 3px;
+}
+
 .palette-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, 18px);
   gap: 4px;
+}
+
+/* 配色范围：先定范围再挑颜色，所以预设下拉排在色块区上面。 */
+.palette-preset {
+  width: 100%;
+  margin-bottom: 8px;
+}
+
+/* 「任意颜色」槽：虚线框说它「等一个颜色」，里面塞的取色盘缩到色块大小。 */
+.swatch-slot {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  border: 1px dashed rgba(255, 255, 255, 0.3);
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.swatch-slot.active {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.swatch-slot .ant-color-picker-trigger {
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
 }
 
 .swatch {
@@ -1542,11 +1582,32 @@ body {
   font-size: 12px;
 }
 
+/* 瓦片格号：1x1 / 2x2 / 3x3，等宽数字才不会在切换时抖。 */
+.tile-label {
+  display: inline-block;
+  padding: 0 3px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
 /* 图片、笔迹画布、指针捕获面三层叠在同一尺寸上。 */
 .canvas-stack {
   position: relative;
   display: block;
   line-height: 0;
+}
+
+/* 瓦片底图：每格都是同一幅画，缝必须严丝合缝，所以不留 gap。 */
+.canvas-tiles {
+  display: grid;
+  gap: 0;
+  margin: auto;
+  flex: none;
+}
+
+/* 只有中间格接管指针：描个边，笔落在哪儿一眼能看到。 */
+.canvas-stack[data-live="true"] {
+  outline: 1px solid rgba(62, 155, 255, 0.45);
 }
 
 .paint-layer,

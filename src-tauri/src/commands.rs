@@ -238,8 +238,8 @@ pub fn document_png_url(
 }
 
 /// 把整个动画导出到磁盘：`gif` 走无限循环动画，`sheet` 走 PNG spritesheet。
-/// `ase`/`aseprite` 写 Aseprite 文件（图层+帧语义原样保留），`frame` 写当前帧 PNG
-/// （`frame` 参数即帧索引，缺省铺平整幅）。
+/// `ase`/`aseprite` 写 Aseprite 文件（图层+帧语义原样保留），`frame` 写单帧 PNG
+/// （`frame` 参数即帧索引，缺省第一帧），`strip` 把所有帧横向铺成一张 PNG。
 /// `columns` 为 0 或 None 时 spritesheet 排成一行。
 ///
 /// 用户选什么扩展名就写什么字节，引擎和素材库各取所需，不做二次确认。
@@ -257,10 +257,13 @@ pub fn document_export(
         "gif" => pixel_core::sheet::encode_gif(&doc)?,
         "ase" | "aseprite" => pixel_core::ase::encode_ase(&doc)?,
         "frame" => {
-            let img = match frame {
-                Some(index) => pixel_core::png::composite_frame(&doc, index),
-                None => pixel_core::png::flatten(&doc),
-            };
+            // 单帧导出：点名哪一帧就合哪一帧，没点名就合第一帧。
+            let img = pixel_core::png::composite_frame(&doc, frame.unwrap_or(0));
+            pixel_core::png::encode_png(&img)?
+        }
+        // 横向整条：所有帧并排贴成一张，逐帧动画的接缝一眼能看完。
+        "strip" => {
+            let img = pixel_core::png::flatten(&doc);
             pixel_core::png::encode_png(&img)?
         }
         "sheet" => {

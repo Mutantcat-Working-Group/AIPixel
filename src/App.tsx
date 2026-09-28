@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { Button, Segmented, Select, Spin, Tooltip } from "antd";
-import { FolderOpen, ImagePlus, Plug, Save, Settings2, X } from "lucide-react";
+import { Button, Dropdown, Segmented, Select, Spin, Tooltip } from "antd";
+import { Download, FolderOpen, ImagePlus, Plug, Save, Settings2, X } from "lucide-react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 
 import ChatPanel from "./ui/ChatPanel";
@@ -14,6 +14,7 @@ import WorkflowDock from "./ui/WorkflowDock";
 import { useStore } from "./lib/store";
 import { useT } from "./lib/t";
 import type { PermissionMode } from "./lib/types";
+import type { ExportFormat } from "./lib/bridge";
 
 // 图标取 icon.png 抠掉白背景的版本；像素画素材声明成 URL，别让构建器给它改尺寸。
 import brandIcon from "./assets/brand-icon.png";
@@ -82,6 +83,66 @@ export default function App() {
     await store.attachReferenceImages(paths);
   }
 
+  /**
+   * 导出表：格式、默认文件名后缀、对话框过滤器一次说清，剩下的只是「存哪儿」。
+   * 单帧导出带当前帧号，免得每次导出都覆盖上一帧的图。
+   */
+  const exportEntries: {
+    format: ExportFormat;
+    label: string;
+    extension: string;
+    filter: string;
+    suffix: string;
+  }[] = [
+    {
+      format: "gif",
+      label: t("topbar.export_gif"),
+      extension: "gif",
+      filter: t("dialog.gif"),
+      suffix: "",
+    },
+    {
+      format: "frame",
+      label: t("topbar.export_frame"),
+      extension: "png",
+      filter: t("dialog.png"),
+      suffix: `-f${store.frameIndex + 1}`,
+    },
+    {
+      format: "strip",
+      label: t("topbar.export_strip"),
+      extension: "png",
+      filter: t("dialog.png"),
+      suffix: "-strip",
+    },
+    {
+      format: "sheet",
+      label: t("topbar.export_sheet"),
+      extension: "png",
+      filter: t("dialog.png"),
+      suffix: "-sheet",
+    },
+    {
+      format: "ase",
+      label: t("topbar.export_ase"),
+      extension: "ase",
+      filter: t("dialog.aseprite"),
+      suffix: "",
+    },
+  ];
+
+  async function exportAs(entry: (typeof exportEntries)[number]) {
+    const target = await save({
+      defaultPath: `${documentName}${entry.suffix}.${entry.extension}`,
+      filters: [{ name: entry.filter, extensions: [entry.extension] }],
+    });
+    if (typeof target !== "string") return;
+    await store.exportDocument(entry.format, target, {
+      // 只有单帧导出认 frame；别的格式传了 Rust 也当没看见。
+      frame: entry.format === "frame" ? store.frameIndex : undefined,
+    });
+  }
+
   return (
     <div className="app">
       <header className="topbar">
@@ -130,6 +191,28 @@ export default function App() {
           </Tooltip>
           <Tooltip title={t("topbar.save_aip")}>
             <Button size="small" type="text" icon={<Save size={14} />} onClick={pickAndSaveAip} />
+          </Tooltip>
+          <Tooltip title={t("topbar.export")}>
+            <Dropdown
+              trigger={["click"]}
+              menu={{
+                items: exportEntries.map((entry) => ({
+                  key: entry.format,
+                  label: entry.label,
+                })),
+                onClick: ({ key }) => {
+                  const entry = exportEntries.find((item) => item.format === key);
+                  if (entry) void exportAs(entry);
+                },
+              }}
+            >
+              <Button
+                size="small"
+                type="text"
+                icon={<Download size={14} />}
+                disabled={!store.document || store.busy}
+              />
+            </Dropdown>
           </Tooltip>
           <Tooltip title={t("topbar.attach_reference")}>
             <Button

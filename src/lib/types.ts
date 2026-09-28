@@ -246,13 +246,14 @@ export type EditorOperation =
   | { op: "move_layer"; id: string; to_index: number }
   | { op: "rename_layer"; id: string; name: string }
   | { op: "set_layer_properties"; id: string; visible?: boolean | null; opacity?: number | null }
-  | { op: "add_palette_colors"; colors: string[] };
+  | { op: "add_palette_colors"; colors: string[] }
+  | { op: "set_palette"; colors: string[] };
 
 /** 落笔颜色：hex 字面量；null = 擦回透明（索引 0）。 */
 export type InkColor = string | null;
 
-/** 编辑器工具。橡皮不是独立工具：调色板里选透明格即是擦。 */
-export type EditorTool = "brush" | "fill";
+/** 编辑器工具。橡皮是独立工具：落笔即擦回透明，不必先去调色板点到透明格。 */
+export type EditorTool = "brush" | "eraser" | "fill";
 
 export interface StrokeCell {
   x: number;

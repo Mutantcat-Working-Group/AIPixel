@@ -5,6 +5,8 @@ import { create } from "zustand";
 
 import { renderUiText, translate, type Lang, type TVARS, type TKey } from "./i18n";
 import * as bridge from "./bridge";
+import type { ExportFormat } from "./bridge";
+import { hexesOf, nearestHex } from "./palette";
 import {
   emptyTranscript,
   historyToTranscript,
@@ -48,6 +50,7 @@ import type {
   TranscriptEntry,
   Usage,
   StrokeCell,
+  InkColor,
 } from "./types";
 
 import {
@@ -168,6 +171,12 @@ export interface StoreActions {
   refreshSessions: () => Promise<void>;
   openAip: (path: string) => Promise<void>;
   saveAip: (path: string) => Promise<void>;
+  /** 导出到本地文件；格式由 Rust 认领（gif / frame / strip / sheet / ase）。 */
+  exportDocument: (
+    format: ExportFormat,
+    path: string,
+    options?: { columns?: number; frame?: number },
+  ) => Promise<void>;
   readAipText: () => Promise<string | null>;
   clearNotice: () => void;
   openSettings: () => void;
@@ -196,11 +205,14 @@ export interface StoreActions {
   /** 对挂起的工具调用给出决定；Approve all 只降级本 turn。 */
   resolveApproval: (decision: ApprovalDecision) => Promise<void>;
   /** 落一笔：抬笔时整笔发送，颜色取当前调色板选择（null = 擦除）。 */
-  paintStroke: (cells: StrokeCell[]) => Promise<void>;
+  /** inkOverride 给橡皮用：无视当前选色，一律擦回透明。 */
+  paintStroke: (cells: StrokeCell[], inkOverride?: InkColor) => Promise<void>;
   /** 油漆桶点一下；颜色取当前调色板选择（null = 浸回透明）。 */
-  fillCell: (x: number, y: number) => Promise<void>;
+  fillCell: (x: number, y: number, inkOverride?: InkColor) => Promise<void>;
   /** 结构与帧操作。frameHint 是新文档到达后要选中的帧序。 */
   runEditorOps: (ops: EditorOperation[], frameHint?: number) => Promise<number | null>;
+  /** 换配色范围：整幅按就近色重映射进新调色板，画面留住、颜色归队。 */
+  setPaletteColors: (colors: string[]) => Promise<boolean>;
   addFrame: () => Promise<void>;
   duplicateFrame: () => Promise<void>;
   deleteFrame: () => Promise<void>;
@@ -366,18 +378,31 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       pendingFrameIndex: null,
       pngRevision: stale ? state.pngRevision : revision,
     };
+    // 调色板就是配色范围：选中的色不在新调色板里，就近挪进去。
+    // 不挪的话画笔会按字面量把色 intern 进调色板，用户挑的范围就悄悄失守了。
+    let active = state.active;
+    // color 是可选的：null 与「没选过」在这里都是一个意思，都就近归队。
+    if (active.color != null) {
+      const snapped = nearestHex(hexesOf(document), active.color);
+      if (snapped !== null && snapped !== active.color) active = { ...active, color: snapped };
+    }
     if (frameHint !== null) {
       // 结构操作后帧表已变：按预期位置选帧，越界夹到末帧。
       const index = Math.max(0, Math.min(frameHint, document.frames.length - 1));
       const frame = document.frames[index];
       next.frameIndex = index;
-      if (frame) next.active = { ...state.active, frame: frame.id };
+      if (frame) active = { ...active, frame: frame.id };
     }
     undoCapture = false;
-    setState(next);
-    if (frameHint !== null) {
+    // 选色被就近挪过、或者结构操作换了帧：都得让 Rust 侧的 active 跟上，
+    // 不然模型的下一步编辑还落在旧的选中上。
+    const activeChanged =
+      active.color !== state.active.color ||
+      active.frame !== state.active.frame ||
+      active.layer !== state.active.layer;
+    setState({ ...next, active });
+    if (activeChanged) {
       const id = getState().activeId;
-      const active = getState().active;
       if (id) void bridge.setActive(id, active);
     }
     void getState().refreshPng();
@@ -874,6 +899,20 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       }
     },
 
+    exportDocument: async (format, path, options) => {
+      const id = getState().activeId;
+      if (!id) return;
+      setState({ busy: true });
+      try {
+        await bridge.documentExport(id, format, path, options);
+        noteKey("store.exported", { name: baseName(path) });
+      } catch (error) {
+        failKey("store.export_failed", { error: String(error) });
+      } finally {
+        setState({ busy: false });
+      }
+    },
+
     readAipText: async () => {
       const id = getState().activeId;
       if (!id) return null;
@@ -1098,7 +1137,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       }
     },
 
-    paintStroke: async (cells) => {
+    paintStroke: async (cells, inkOverride) => {
       const id = getState().activeId;
       const document = getState().document;
       const active = getState().active;
@@ -1109,20 +1148,28 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
           layer: active.layer,
           frame: active.frame,
           cells,
-          color: active.color ?? null,
+          // 传进来的 override 是给橡皮的：null 明说「这一笔就是擦」。
+          color: inkOverride !== undefined ? inkOverride : (active.color ?? null),
         });
       } catch (error) {
         failKey("store.paint_failed", { error: String(error) });
       }
     },
 
-    fillCell: async (x, y) => {
+    fillCell: async (x, y, inkOverride) => {
       const id = getState().activeId;
       const active = getState().active;
       if (!id) return;
       undoCapture = true;
       try {
-        await bridge.fillCells(id, active.layer, active.frame, x, y, active.color ?? null);
+        await bridge.fillCells(
+          id,
+          active.layer,
+          active.frame,
+          x,
+          y,
+          inkOverride !== undefined ? inkOverride : (active.color ?? null),
+        );
       } catch (error) {
         failKey("store.fill_failed", { error: String(error) });
       }
@@ -1166,6 +1213,13 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       if (!current) return;
       // 复制帧插在源帧后面，所以新选中的是下一格。
       await getState().runEditorOps([{ op: "duplicate_frame", id: current.id }], getState().frameIndex + 1);
+    },
+
+    setPaletteColors: async (colors) => {
+      // 空配色等于把整幅擦透明，那是毁画面不是换风格，拦在门外。
+      if (colors.length === 0) return false;
+      const revision = await getState().runEditorOps([{ op: "set_palette", colors }]);
+      return revision !== null;
     },
 
     deleteFrame: async () => {
