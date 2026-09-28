@@ -11,7 +11,7 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["process", "io-util"] }
 futures-util = "0.3"
 bytes = "1"
-reqwest = { version = "0.12", default-features = false, features = ["stream", "json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["stream", "json", "rustls-tls", "multipart"] }
 async-trait = "0.1"
 pixel-core = { path = "../pixel-core" }
 

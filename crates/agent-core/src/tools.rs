@@ -165,7 +165,7 @@ pub fn specs() -> Vec<ToolSpec> {
                 "properties": {
                     "prompt": {"type": "string", "description": "what to draw: subject, proportions, palette, pose"},
                     "reference_frame": {"type": "string", "description": "frame id to send as a reference image; pass the current frame id to edit it in place"},
-                    "size": {"type": "string", "description": "optional size hint like 1024x1024; only honored by chat-modalities image models"},
+                    "size": {"type": "string", "description": "optional size hint like 1024x1024; honored by the image endpoints, folded into an aspect ratio on chat-modalities models"},
                     "spot": {"type": "string", "enum": ["active_cel","new_frame"], "description": "overwrite the active cel (default) or land on a new_frame"},
                     "layer": {"type": "string"},
                     "frame": {"type": "string", "description": "target cel for active_cel, or the anchor a new_frame is inserted after"},

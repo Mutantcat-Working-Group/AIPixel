@@ -310,7 +310,7 @@ export const zh = {
   "wf.quantize.output": "一格量化好的像素",
 
   // ---------- Rust 回执与状态 ----------
-  "outcome.bitmap_landed": "{transport}已落在图层 {layer} 的帧 {frame}（{colors} 色，新增 {added}）",
+  "outcome.bitmap_landed": "已落在图层 {layer} 的帧 {frame}（{colors} 色，新增 {added}，走 {transport}）",
   "outcome.pixelize_landed": "已量化到图层 {layer} 的帧 {frame}（{colors} 色，新增 {added}）",
   "outcome.tween_inserted": "已在图层 {layer} 的 {from} 与 {to} 之间插入 {count} 帧；改动 {changed} 像素",
   "outcome.video_landed.ffprobe": "ffmpeg 取出的 {count} 帧，落在图层 {layer} 的 {from} 到 {to}",
@@ -320,7 +320,7 @@ export const zh = {
   "outcome.video_skipped.directory": "静帧目录里的 {count} 帧，落在图层 {layer} 的 {from} 到 {to}；{skipped} 帧跳过",
   "outcome.video_skipped.none": "{count} 帧落在图层 {layer} 的 {from} 到 {to}；{skipped} 帧跳过",
   "status.asking_image": "正在请模型出图",
-  "status.quantizing": "正在把{transport}图片量化到网格上",
+  "status.quantizing": "正在把模型出的图量化到网格上",
   "status.reading_frame": "正在读取第 {index} 帧，共 {total} 帧",
 
   // ---------- 本机通知 ----------
@@ -679,7 +679,7 @@ export const en: Record<TKey, string> = {
   "wf.quantize.summary": "Drop a bitmap onto the grid. Runs on this machine, no model needed.",
   "wf.quantize.output": "One cel of quantized pixels",
 
-  "outcome.bitmap_landed": "{transport} landed on layer {layer} frame {frame} ({colors} colors, {added} new)",
+  "outcome.bitmap_landed": "landed on layer {layer} frame {frame} ({colors} colors, {added} new, via {transport})",
   "outcome.pixelize_landed": "quantized onto layer {layer} frame {frame} ({colors} colors, {added} new)",
   "outcome.tween_inserted": "{count} frame(s) inserted between {from} and {to} on layer {layer}; {changed} px changed",
   "outcome.video_landed.ffprobe": "{count} frame(s) from ffmpeg landed on layer {layer} frames {from}-{to}",
@@ -689,7 +689,7 @@ export const en: Record<TKey, string> = {
   "outcome.video_skipped.directory": "{count} frame(s) from a stills directory landed on layer {layer} frames {from}-{to} ({skipped} skipped)",
   "outcome.video_skipped.none": "{count} frame(s) landed on layer {layer} frames {from}-{to} ({skipped} skipped)",
   "status.asking_image": "asking the model for an image",
-  "status.quantizing": "quantizing a {transport} image onto the grid",
+  "status.quantizing": "quantizing the generated image onto the grid",
   "status.reading_frame": "reading frame {index} of {total}",
 
   "store.read_models_failed": "could not read the model config: {error}",
