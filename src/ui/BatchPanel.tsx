@@ -160,7 +160,8 @@ export default function BatchPanel() {
                 {t("batch.recipe.save")}
               </Button>
             </div>
-            {problem ? (
+            {/* 空白初始态不唠叨：占位符已经说了要起名。存完盘输入框清空，也归这片安静。 */}
+            {problem && recipeName.length > 0 ? (
               <p className="dock-note">{t(`batch.recipe.problem.${problem}`, problemVars)}</p>
             ) : null}
           </Field>
