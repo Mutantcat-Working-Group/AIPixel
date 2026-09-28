@@ -1,8 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { briefToText, probeSummary, videoBriefToText } from "./dock-format";
 import { DEFAULT_BATCH_RECIPE, EMPTY_BATCH_RUN } from "./batch";
-import { blankDocument, useStore, type WorkflowParams } from "./store";
+import { STALL_SECONDS, blankDocument, useStore, type WorkflowParams } from "./store";
 import type {
   BatchRecipe,
   BatchRecipeEntry,
@@ -517,7 +517,7 @@ describe("把提示词送进生图面板（识图 -> 生图）", () => {
     useStore.getState().patchDraft({ genSource: "none", genPath: null });
     invokeCalls.length = 0;
 
-    useStore.getState().usePromptInGen("一只乌鸦起飞", "/tmp/crow.png");
+    useStore.getState().fillGenPrompt("一只乌鸦起飞", "/tmp/crow.png");
 
     const draft = useStore.getState().dockDraft;
     expect(useStore.getState().kind).toBe("image_gen");
@@ -530,7 +530,7 @@ describe("把提示词送进生图面板（识图 -> 生图）", () => {
   it("不带参考图时，原来选好的垫图方式原样留着", () => {
     useStore.getState().patchDraft({ genSource: "frame", genFrame: "F1", genPath: null });
 
-    useStore.getState().usePromptInGen("把头饰画大一点");
+    useStore.getState().fillGenPrompt("把头饰画大一点");
 
     const draft = useStore.getState().dockDraft;
     expect(draft.genSource).toBe("frame");
@@ -750,5 +750,55 @@ describe("runWorkflow / runPixelize 派发（kind -> Rust 命令 -> params）", 
 
     expect(invokeCalls).toEqual([]);
     expect(useStore.getState().notice).toEqual({ text: "还没有会话", isError: true });
+  });
+});
+
+describe("静默提醒（模型半天不吭声）", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("一句发出去之后，太久没有事件就亮提醒，重发照原样再来一遍", async () => {
+    vi.useFakeTimers();
+    useStore.setState({
+      activeId: "doc-01",
+      lang: "zh",
+      entries: [],
+      lastQuery: null,
+      attachments: [],
+      notice: null,
+      models: { active_id: "", entries: [] },
+    });
+    invokeCalls.length = 0;
+
+    await useStore.getState().send("画一只八帧橘猫行走图");
+    // 发出去立刻有占位节点兜底，但还不算卡住。
+    expect(useStore.getState().entries.at(-1)).toMatchObject({ kind: "pending" });
+    expect(useStore.getState().stalled).toBe(false);
+
+    vi.advanceTimersByTime(STALL_SECONDS * 1000 - 1);
+    expect(useStore.getState().stalled).toBe(false);
+    vi.advanceTimersByTime(2);
+    expect(useStore.getState().stalled).toBe(true);
+
+    // 出路只有两个：重发刚才那句，或者中断。先看重发。
+    invokeCalls.length = 0;
+    await useStore.getState().retry();
+    expect(invokeCalls.filter((call) => call.cmd === "agent_send_message")).toEqual([
+      { cmd: "agent_send_message", args: { id: "doc-01", text: "画一只八帧橘猫行走图", attachments: [], modelId: null } },
+    ]);
+    expect(useStore.getState().stalled).toBe(false);
+  });
+
+  it("发不出去就把表撤了，不留一个到点自爆的计时器", async () => {
+    vi.useFakeTimers();
+    useStore.setState({ activeId: null, lang: "zh", entries: [], notice: null });
+
+    await useStore.getState().send("画一只八帧橘猫行走图");
+    expect(useStore.getState().running).toBe(false);
+    expect(useStore.getState().notice).toMatchObject({ isError: true });
+
+    vi.advanceTimersByTime(STALL_SECONDS * 1000 + 5);
+    expect(useStore.getState().stalled).toBe(false);
   });
 });

@@ -4,6 +4,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
+import { subscribeLocal } from "./local-bus";
+
 import type {
   ActiveContext,
   AgentEvent,
@@ -262,7 +264,25 @@ export function videoBrief(
 }
 
 export function listenAgentEvents(handler: (event: AgentEvent) => void): Promise<UnlistenFn> {
-  return listen<AgentEvent>(AGENT_EVENT_CHANNEL, (event) => handler(event.payload));
+  return listenSafe<AgentEvent>(AGENT_EVENT_CHANNEL, handler);
+}
+
+/** Tauri 的事件桥通不通：`listen` 靠 `__TAURI_INTERNALS__.transformCallback` 注册回调，
+ * 它不在（旧运行时、或者谁先注入了半成品 internals）这次调用就会抛。
+ * 抛出来的代价很大：boot 里正 await 着它，后面读模型、建会话全都不做了。 */
+function hasEventBridge(): boolean {
+  if (typeof window === "undefined") return false;
+  const internals = (window as unknown as { __TAURI_INTERNALS__?: { transformCallback?: unknown } })
+    .__TAURI_INTERNALS__;
+  return typeof internals?.transformCallback === "function";
+}
+
+/** 订阅一条 Rust 广播的通道。事件桥不在就退到页面内总线，绝不把异常抛给调用方。 */
+function listenSafe<T>(channel: string, handler: (event: T) => void): Promise<UnlistenFn> {
+  if (hasEventBridge()) {
+    return listen<T>(channel, (event) => handler(event.payload));
+  }
+  return Promise.resolve(subscribeLocal(channel, handler as (payload: unknown) => void));
 }
 
 /** 扫一个文件夹，数清有几份对口素材。只读。 */
@@ -301,7 +321,7 @@ export function importBatchRecipes(path: string): Promise<RecipeImportReport> {
 }
 
 export function listenBatchEvents(handler: (event: BatchEvent) => void): Promise<UnlistenFn> {
-  return listen<BatchEvent>(BATCH_EVENT_CHANNEL, (event) => handler(event.payload));
+  return listenSafe<BatchEvent>(BATCH_EVENT_CHANNEL, handler);
 }
 
 // ---------- 工作台编辑器与审批 ----------

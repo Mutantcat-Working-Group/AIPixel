@@ -25,7 +25,12 @@ import type {
   Protocol,
 } from "../lib/types";
 
-const NO_CAPABILITIES: Capabilities = { vision: false, image_gen: false, video: false };
+const NO_CAPABILITIES: Capabilities = {
+  vision: false,
+  image_gen: false,
+  video: false,
+  reasoning: false,
+};
 
 interface FormShape {
   label: string;
@@ -128,6 +133,7 @@ export default function ModelSettingsModal() {
     { key: "vision", label: t("settings.cap.vision"), hint: t("settings.cap.vision.hint") },
     { key: "image_gen", label: t("settings.cap.image_gen"), hint: t("settings.cap.image_gen.hint") },
     { key: "video", label: t("settings.cap.video"), hint: t("settings.cap.video.hint") },
+    { key: "reasoning", label: t("settings.cap.reasoning"), hint: t("settings.cap.reasoning.hint") },
   ];
 
   // 只在开关时决定选中项；保存后不抢焦点，避免选中项跳回激活模型。

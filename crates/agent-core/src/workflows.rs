@@ -238,6 +238,7 @@ mod tests {
             vision: true,
             image_gen: true,
             video: true,
+            ..Default::default()
         };
         for kind in [
             WorkflowKind::ImageGen,
@@ -264,6 +265,7 @@ mod tests {
             vision: true,
             image_gen: true,
             video: true,
+            ..Default::default()
         };
         let list = available(&caps);
         assert_eq!(list.len(), catalog().len());

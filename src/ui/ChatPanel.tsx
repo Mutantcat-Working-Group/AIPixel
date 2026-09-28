@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Button, Input, Tooltip } from "antd";
 import {
+  AlertTriangle,
   Camera,
   Check,
   CheckCheck,
@@ -9,6 +10,7 @@ import {
   CircleStop,
   ImagePlus,
   MessageSquare,
+  RefreshCcw,
   Send,
   ShieldQuestion,
   Sparkles,
@@ -16,7 +18,7 @@ import {
 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 
-import { useStore } from "../lib/store";
+import { STALL_SECONDS, useStore } from "../lib/store";
 import { useT } from "../lib/t";
 import type { ApprovalDecision, PendingAttachment, TranscriptEntry } from "../lib/types";
 
@@ -137,6 +139,32 @@ function EntryRow({ entry }: { entry: TranscriptEntry }) {
       </div>
     );
   }
+  if (entry.kind === "pending") {
+    if (entry.thinking) {
+      return (
+        <details className="entry-reasoning thinking" open>
+          <summary>{t("chat.reasoning")}</summary>
+          <div className="reasoning-body thinking-body">
+            <span className="thinking-dot" />
+            {t("chat.thinking")}
+            <span className="caret" />
+          </div>
+        </details>
+      );
+    }
+    return (
+      <div className="entry-assistant">
+        <div className="assistant-label">
+          <Sparkles size={12} />
+          AIPixel
+        </div>
+        <div className="assistant-body">
+          {t("chat.processing")}
+          <span className="caret" />
+        </div>
+      </div>
+    );
+  }
   if (entry.kind === "tool") {
     return (
       <ToolEntry
@@ -149,19 +177,36 @@ function EntryRow({ entry }: { entry: TranscriptEntry }) {
   }
   if (entry.kind === "reasoning") {
     return (
-      <details className="entry-reasoning">
+      <details className="entry-reasoning" open={entry.live}>
         <summary>{t("chat.reasoning")}</summary>
         <div className="reasoning-body">{entry.text}</div>
       </details>
     );
   }
-  return <div className={`entry-notice ${entry.isError ? "error" : ""}`}>{entry.text}</div>;
+  return (
+    <div className={`entry-notice ${entry.isError ? "error" : ""}`}>
+      <span>{entry.text}</span>
+      {entry.retry ? (
+        <Tooltip title={t("chat.retry_tip")}>
+          <Button
+            size="small"
+            type="text"
+            icon={<RefreshCcw size={13} />}
+            onClick={() => void useStore.getState().retry()}
+          >
+            {t("chat.retry")}
+          </Button>
+        </Tooltip>
+      ) : null}
+    </div>
+  );
 }
 
 export default function ChatPanel() {
   const t = useT();
   const entries = useStore((s) => s.entries);
   const running = useStore((s) => s.running);
+  const stalled = useStore((s) => s.stalled);
   const attachments = useStore((s) => s.attachments);
   const [draft, setDraft] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -220,6 +265,30 @@ export default function ChatPanel() {
       </div>
 
       <div className="composer">
+        {stalled ? (
+          <div className="chat-stall">
+            <AlertTriangle size={13} />
+            <span>{t("chat.stall", { secs: STALL_SECONDS })}</span>
+            <span className="grow" />
+            <Button
+              size="small"
+              type="link"
+              icon={<RefreshCcw size={13} />}
+              onClick={() => void useStore.getState().retry()}
+            >
+              {t("chat.retry")}
+            </Button>
+            <Button
+              size="small"
+              type="link"
+              danger
+              icon={<CircleStop size={13} />}
+              onClick={() => void useStore.getState().interrupt()}
+            >
+              {t("chat.stop")}
+            </Button>
+          </div>
+        ) : null}
         <ApprovalCard />
         {attachments.length > 0 ? (
           <div className="composer-pending">

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   historyToTranscript,
+  pushPendingAssistant,
   pushUserMessage,
   reduceEvent,
   sealTranscript,
@@ -125,6 +126,53 @@ describe("reduceEvent", () => {
     const tool = entries.find((entry) => entry.kind === "tool");
     expect(tool?.kind === "tool" && tool.isError).toBe(true);
     expect(tool?.kind === "tool" && tool.live).toBe(false);
+  });
+
+  it("replaces the pending placeholder with the first real token", () => {
+    let entries = pushUserMessage([], "hi", []);
+    entries = pushPendingAssistant(entries, false);
+    expect(lastEntry(entries).kind).toBe("pending");
+    entries = reduceEvent(entries, { kind: "token", text: "On it" } as AgentEvent);
+    const last = lastEntry(entries);
+    expect(last.kind).toBe("assistant");
+    expect(last.kind === "assistant" && last.text).toBe("On it");
+    expect(last.kind === "assistant" && last.live).toBe(true);
+  });
+
+  it("turns the pending placeholder into a live reasoning block", () => {
+    let entries = pushUserMessage([], "hi", []);
+    entries = pushPendingAssistant(entries, true);
+    entries = reduceEvent(entries, { kind: "reasoning", text: "think" } as AgentEvent);
+    const last = lastEntry(entries);
+    expect(last.kind).toBe("reasoning");
+    expect(last.kind === "reasoning" && last.text).toBe("think");
+    expect(last.kind === "reasoning" && last.live).toBe(true);
+  });
+
+  it("drops the pending placeholder when the assistant goes straight to a tool", () => {
+    let entries = pushUserMessage([], "hi", []);
+    entries = pushPendingAssistant(entries, false);
+    entries = reduceEvent(entries, {
+      kind: "tool_call",
+      id: "t1",
+      name: "pixel_run_shader",
+      input: {},
+    } as AgentEvent);
+    expect(entries.some((entry) => entry.kind === "pending")).toBe(false);
+    expect(entries.some((entry) => entry.kind === "tool")).toBe(true);
+  });
+
+  it("seal drops a leftover pending and flags interrupted as retryable", () => {
+    let entries = pushUserMessage([], "hi", []);
+    entries = pushPendingAssistant(entries, false);
+    expect(sealTranscript(entries).some((entry) => entry.kind === "pending")).toBe(false);
+
+    const interrupted = reduceEvent(pushUserMessage([], "hi", []), {
+      kind: "interrupted",
+    } as AgentEvent);
+    const last = lastEntry(interrupted);
+    expect(last.kind).toBe("notice");
+    expect(last.kind === "notice" && last.retry).toBe(true);
   });
 });
 

@@ -13,6 +13,8 @@
 import { emit } from "@tauri-apps/api/event";
 import { mockIPC } from "@tauri-apps/api/mocks";
 
+import { AGENT_EVENT_CHANNEL } from "./bridge";
+import { publishLocal } from "./local-bus";
 import { rgbaToHex } from "./palette";
 import { compositeFrame } from "./render";
 import type {
@@ -128,7 +130,7 @@ const MODEL: ModelView = {
   model: "gpt-4o-mini",
   max_tokens: 16384,
   temperature: 0.7,
-  capabilities: { vision: true, image_gen: false, video: false },
+  capabilities: { vision: true, image_gen: false, video: false, reasoning: true },
   has_api_key: true,
 };
 
@@ -274,8 +276,33 @@ function pngFor(frameIndex: number): string {
 }
 
 /** 文档变了就往真机同一条通道报一声，前端的路由一行都不用改。 */
+function fire(channel: string, payload: unknown): void {
+  // 事件桥能用就走 Tauri（真机 / mockIPC 装了 invoke 的时候）；
+  // 用不了就落页面内总线，至少订阅方还在。
+  const internals = (window as unknown as { __TAURI_INTERNALS__?: { invoke?: unknown } })
+    .__TAURI_INTERNALS__;
+  if (typeof internals?.invoke === "function") {
+    void emit(channel, payload);
+    return;
+  }
+  publishLocal(channel, payload);
+}
+
 function broadcast(): void {
-  void emit("agent-event", { kind: "document_updated", revision, document: doc });
+  fire(AGENT_EVENT_CHANNEL, { kind: "document_updated", revision, document: doc });
+}
+
+/** 假后端在聊天里播一段「思考 -> 答复」的演示流，纯浏览器里能直接看成色。 */
+function demoTurn(): void {
+  const frames = [
+    { at: 0, kind: "reasoning", text: "先看画布结构和需要改动的区域。" },
+    { at: 420, kind: "reasoning", text: "\n中间那格改成橙色，其余保持原样。" },
+    { at: 840, kind: "token", text: "我来把这格涂成橙色。" },
+    { at: 1300, kind: "completed", turns: 1 },
+  ] as const;
+  for (const frame of frames) {
+    setTimeout(() => fire(AGENT_EVENT_CHANNEL, frame), frame.at);
+  }
 }
 
 type Args = Record<string, unknown>;
@@ -294,7 +321,9 @@ function handler(cmd: string, raw?: unknown): unknown {
     case "agent_set_permission":
     case "agent_interrupt":
     case "agent_resolve_approval":
+      return null;
     case "agent_send_message":
+      demoTurn();
       return null;
     case "session_list":
       return [makeSession(revision)];
@@ -393,7 +422,12 @@ let emptyModels = false;
 /** 装好假后端。不在 Tauri 里就什么都不做，一句提示都不打。 */
 export function installBrowserMock(): void {
   if (typeof window === "undefined") return;
-  if ("__TAURI_INTERNALS__" in window) return;
+  const internals = (window as unknown as { __TAURI_INTERNALS__?: { invoke?: unknown } })
+    .__TAURI_INTERNALS__;
+  // 是不是真机，看 invoke 在不在，而不是 internals 这个对象存不存在：
+  // 只认对象的话，碰上被谁抢先注入的半成品 internals 会两头落空——
+  // mock 不装，真机的命令又调不通。
+  if (typeof internals?.invoke === "function") return;
   emptyModels = new URLSearchParams(window.location.search).get("mock") === "empty";
   mockIPC(handler, { shouldMockEvents: true });
 }

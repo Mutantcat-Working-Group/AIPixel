@@ -10,6 +10,7 @@ import { hexesOf, nearestHex } from "./palette";
 import {
   emptyTranscript,
   historyToTranscript,
+  pushPendingAssistant,
   pushNotice,
   pushUserMessage,
   reduceEvent,
@@ -133,7 +134,11 @@ interface StoreState extends DocumentSnapshot, WorkflowState, BatchState {
   activeId: string | null;
   entries: TranscriptEntry[];
   running: boolean;
+  /** 主循环还在跑，但很久没有新事件了。只是提醒，不动数据、不替你中断。 */
+  stalled: boolean;
   usage: Usage | null;
+  /** 上一句发出的话（含附件），中断/报错后用来一键重试。换会话即清空。 */
+  lastQuery: { text: string; attachments: PendingAttachment[] } | null;
   attachments: PendingAttachment[];
   permission: PermissionMode;
   active: ActiveContext;
@@ -166,6 +171,8 @@ export interface StoreActions {
   clearSessionRole: (role: ModelRole) => Promise<void>;
   setPermissionMode: (mode: PermissionMode) => Promise<void>;
   send: (text: string) => Promise<void>;
+  /** 重发刚才没跑完的那句。没有可重试的就什么都不做。 */
+  retry: () => Promise<void>;
   interrupt: () => Promise<void>;
   upsertModel: (config: ModelConfig) => Promise<void>;
   removeModel: (id: string) => Promise<void>;
@@ -229,7 +236,7 @@ export interface StoreActions {
    * referencePath 是「图也一起带过去」：识图读过的示例图垫到生图面板当参考图，
    * 模型既看得见描述、也看得见原图；不给就只搬提示词，不动垫图设置。
    */
-  usePromptInGen: (prompt: string, referencePath?: string | null) => void;
+  fillGenPrompt: (prompt: string, referencePath?: string | null) => void;
   /** 对挂起的工具调用给出决定；Approve all 只降级本 turn。 */
   resolveApproval: (decision: ApprovalDecision) => Promise<void>;
   /** 落一笔：抬笔时整笔发送，颜色取当前调色板选择（null = 擦除）。 */
@@ -385,6 +392,17 @@ const UNDO_LIMIT = 40;
  */
 let undoCapture = false;
 
+/**
+ * 多久收不到任何 agent 事件就当「卡住了」提醒用户。
+ * 思考模型静默一分钟以上很常见（长推理、大图），所以门槛比那更宽：
+ * 只在真的很久没动静时打扰，而且只是提醒，替用户做不了主。
+ */
+export const STALL_SECONDS = 90;
+
+const STALL_MS = STALL_SECONDS * 1000;
+
+let stallTimer: ReturnType<typeof setTimeout> | null = null;
+
 function pushUndo(stack: PixelDocument[], doc: PixelDocument): PixelDocument[] {
   const next = [...stack, doc];
   return next.length > UNDO_LIMIT ? next.slice(next.length - UNDO_LIMIT) : next;
@@ -399,6 +417,22 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
   /** 一段本机成功提示（载入、保存）。不是错误，所以不进 fail 那条路。 */
   function noteKey(key: TKey, vars?: TVARS) {
     setState({ notice: { text: translate(getState().lang, key, vars), isError: false } });
+  }
+
+  function clearStallWatch() {
+    if (stallTimer !== null) {
+      clearTimeout(stallTimer);
+      stallTimer = null;
+    }
+  }
+
+  /** 每有一条事件活着进来就重打表。还在吐字就不算卡，一个事件都不来才会响。 */
+  function touchStallWatch() {
+    clearStallWatch();
+    stallTimer = setTimeout(() => {
+      stallTimer = null;
+      if (getState().running) setState({ stalled: true });
+    }, STALL_MS);
   }
 
   /** document_updated 的统一落点：文档、撤销栈、帧选择意图一起结算。 */
@@ -455,6 +489,9 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     if (unlisten) return;
     unlisten = await bridge.listenAgentEvents((raw: AgentEvent) => {
       const state = getState();
+      // 事件一到就说明链路活着：取消卡住提醒，并给静默计时重新打表。
+      touchStallWatch();
+      if (state.stalled) setState({ stalled: false });
       if (raw.kind === "approval_request") {
         setState({
           pendingApproval: { callId: raw.call_id, name: raw.name, input: raw.input },
@@ -466,9 +503,11 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         return;
       }
       if (raw.kind === "completed" || raw.kind === "error" || raw.kind === "interrupted") {
+        clearStallWatch();
         setState({
           entries: sealTranscript(reduceEvent(state.entries, raw, state.lang)),
           running: false,
+          stalled: false,
           // 一轮收尾，挂着没批的调用跟着作废——别让下一轮还看见这张票。
           pendingApproval: null,
         });
@@ -559,7 +598,9 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     frameIndex: 0,
     entries: emptyTranscript(),
     running: false,
+    stalled: false,
     usage: null,
+    lastQuery: null,
     attachments: [],
     permission: "auto",
     active: { layer: "L0", frame: "F0", color: null },
@@ -646,7 +687,10 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       setState({
         activeId: id,
         entries: emptyTranscript(),
+        running: false,
+        stalled: false,
         usage: null,
+        lastQuery: null,
         attachments: [],
         frameIndex: 0,
       });
@@ -661,7 +705,10 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         sessions: [...getState().sessions, info].sort((a, b) => a.id.localeCompare(b.id)),
         activeId: info.id,
         entries: emptyTranscript(),
+        running: false,
+        stalled: false,
         usage: null,
+        lastQuery: null,
         attachments: [],
         frameIndex: 0,
       });
@@ -734,17 +781,38 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         media_type: a.mediaType,
         data_base64: a.dataBase64,
       }));
+      // 占位气泡要不要画成「思考节点」：看会话主模型有没有勾「会思考」。
+      const state = getState();
+      const session = state.sessions.find((s) => s.id === state.activeId);
+      const model = state.models.entries.find((m) => m.id === session?.model_id);
+      const thinking = model?.capabilities.reasoning ?? false;
       setState({
-        entries: pushUserMessage(getState().entries, trimmed, attachments),
+        entries: pushPendingAssistant(
+          pushUserMessage(state.entries, trimmed, attachments),
+          thinking,
+        ),
         attachments: [],
         running: true,
+        stalled: false,
+        lastQuery: { text: trimmed, attachments },
         notice: null,
       });
+      // 从这一刻起盯着静默：路上一个事件都不来的话，界面上会出现「可能卡住了」。
+      touchStallWatch();
       try {
         await bridge.sendMessage(id, trimmed, payload);
       } catch (error) {
+        clearStallWatch();
         failKey("store.send_failed", { error: String(error) });
       }
+    },
+
+    retry: async () => {
+      const last = getState().lastQuery;
+      if (!last) return;
+      // 占位与运行态在 send 里统一布置；这里只把上次的字和附件还给发送入口。
+      setState({ attachments: last.attachments });
+      await getState().send(last.text);
     },
 
     interrupt: async () => {
@@ -1192,7 +1260,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     requestCompose: (text) =>
       setState({ composeRequest: { text, nonce: Date.now() } }),
 
-    usePromptInGen: (prompt, referencePath) =>
+    fillGenPrompt: (prompt, referencePath) =>
       setState({
         kind: "image_gen",
         outcome: null,

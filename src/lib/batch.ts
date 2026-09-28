@@ -104,6 +104,8 @@ export function recipeNameProblem(
   const trimmed = name.trim();
   if (trimmed === "") return "empty";
   if ([...trimmed].length > MAX_RECIPE_NAME_CHARS) return "long";
+  // 控制字符就是要被拦的那一类，正则里出现它们正是目的本身。
+  // eslint-disable-next-line no-control-regex
   if (/[\u0000-\u001f\u007f-\u009f\u2028\u2029/\\]/.test(trimmed)) return "chars";
   // 同名覆盖永远放行：簿子满了也能改旧配方，这才叫改配方而不是加配方。
   if (book.some((entry) => entry.name === trimmed)) return null;

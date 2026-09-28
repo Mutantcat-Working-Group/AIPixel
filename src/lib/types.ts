@@ -22,6 +22,8 @@ export interface Capabilities {
   image_gen: boolean;
   /** 能吃视频输入。 */
   video: boolean;
+  /** 会先输出推理（thinking）内容，聊天里按思考块展示。 */
+  reasoning?: boolean;
 }
 
 export interface Layer {
@@ -212,6 +214,8 @@ export type TranscriptEntry =
   | { key: string; kind: "user"; text: string; attachments: PendingAttachment[] }
   | { key: string; kind: "assistant"; text: string; live: boolean }
   | { key: string; kind: "reasoning"; text: string; live: boolean }
+  /** 发送后立即弹出的占位：thinking=true 显示思考节点，否则显示一句「在处理」。 */
+  | { key: string; kind: "pending"; thinking: boolean }
   | {
       key: string;
       kind: "tool";
@@ -222,7 +226,7 @@ export type TranscriptEntry =
       isError: boolean;
       live: boolean;
     }
-  | { key: string; kind: "notice"; text: string; isError: boolean };
+  | { key: string; kind: "notice"; text: string; isError: boolean; retry?: boolean };
 
 export type ToolName =
   | "pixel_apply_operations"

@@ -114,6 +114,14 @@ export function pushUserMessage(
   return [...entries, { key: key(), kind: "user", text, attachments }];
 }
 
+/** 发送后立刻弹一个占位节点，让用户马上有反馈；真实事件一到就被顶掉。 */
+export function pushPendingAssistant(
+  entries: TranscriptEntry[],
+  thinking: boolean,
+): TranscriptEntry[] {
+  return [...entries, { key: key(), kind: "pending", thinking }];
+}
+
 /**
  * 追加一条系统提示（工作流跑完的结果、失败原因）。
  * 先封口 live 条目：直接 append 会把 notice 塞进正在流式输出的气泡后面，
@@ -148,6 +156,17 @@ export function reduceEvent(
   switch (event.kind) {
     case "token": {
       const last = entries[entries.length - 1];
+      // 还在占位：用第一个真实 token 顶掉「在处理」的假气泡。
+      if (last && last.kind === "pending") {
+        const next = [...entries];
+        next[next.length - 1] = {
+          key: last.key,
+          kind: "assistant",
+          text: event.text,
+          live: true,
+        };
+        return next;
+      }
       if (last && last.kind === "assistant" && last.live) {
         const next = [...entries];
         next[next.length - 1] = { ...last, text: last.text + event.text };
@@ -157,6 +176,17 @@ export function reduceEvent(
     }
     case "reasoning": {
       const last = entries[entries.length - 1];
+      // 占位节点变成真正的思考块：流式期间保持展开。
+      if (last && last.kind === "pending") {
+        const next = [...entries];
+        next[next.length - 1] = {
+          key: last.key,
+          kind: "reasoning",
+          text: event.text,
+          live: true,
+        };
+        return next;
+      }
       if (last && last.kind === "reasoning" && last.live) {
         const next = [...entries];
         next[next.length - 1] = { ...last, text: last.text + event.text };
@@ -165,8 +195,11 @@ export function reduceEvent(
       return [...entries, { key: key(), kind: "reasoning", text: event.text, live: true }];
     }
     case "tool_call": {
+      // 模型上一步没吐字直接调工具：占位先撤，别留着假气泡占地方。
+      const base =
+        entries[entries.length - 1]?.kind === "pending" ? entries.slice(0, -1) : entries;
       return [
-        ...entries,
+        ...base,
         {
           key: key(),
           kind: "tool",
@@ -200,11 +233,17 @@ export function reduceEvent(
       ];
     }
     case "error": {
-      return [...entries, { key: key(), kind: "notice", text: event.message, isError: true }];
+      return [
+        ...entries,
+        { key: key(), kind: "notice", text: event.message, isError: true, retry: true },
+      ];
     }
     case "interrupted": {
       const text = translate(lang, "agent.interrupted");
-      return [...sealLiveAssistant(entries), { key: key(), kind: "notice", text, isError: false }];
+      return [
+        ...sealLiveAssistant(entries),
+        { key: key(), kind: "notice", text, isError: false, retry: true },
+      ];
     }
     case "completed": {
       return sealLiveAssistant(entries);
@@ -219,7 +258,10 @@ export function reduceEvent(
 
 /** turn 结束（完成 / 报错 / 中断）后的收尾：封口所有 live 条目。 */
 export function sealTranscript(entries: TranscriptEntry[]): TranscriptEntry[] {
-  return sealLiveAssistant(entries).map((entry) =>
+  // 占位只剩一轮收尾都没变成真内容（空回复 / 直接断掉）：直接抹掉，不残留假气泡。
+  const withoutPending = entries
+    .filter((entry, index) => !(entry.kind === "pending" && index === entries.length - 1));
+  return sealLiveAssistant(withoutPending).map((entry) =>
     entry.kind === "reasoning" && entry.live ? { ...entry, live: false } : entry,
   );
 }

@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
+use std::time::Instant;
 
 use futures_util::StreamExt;
 use serde_json::{json, Value};
@@ -43,6 +44,37 @@ struct PlannedCall {
 struct ApprovalSlot {
     call_id: String,
     tx: oneshot::Sender<ApprovalDecision>,
+}
+
+/// 整个响应流允许静默多久。
+///
+/// 想得久一点没关系——推理增量、心跳、工具入参分段都会带来字节；
+/// 这么久一个字节都没有，基本就是连接假死（代理把流吞了、对端不吭声挂了）。
+/// 不设这条线的话 `stream.next()` 会永远挂住，前端只剩一个思考节点空转。
+const STREAM_IDLE_LIMIT: Duration = Duration::from_secs(180);
+
+/// 流静默计时器：记下最后一次见到字节的时刻，答一句「是不是该判死刑了」。
+#[derive(Debug, Clone, Copy)]
+struct IdleWatch {
+    last_data: Instant,
+    limit: Duration,
+}
+
+impl IdleWatch {
+    fn new(limit: Duration) -> Self {
+        Self {
+            last_data: Instant::now(),
+            limit,
+        }
+    }
+
+    fn touch(&mut self) {
+        self.last_data = Instant::now();
+    }
+
+    fn expired(&self) -> bool {
+        self.last_data.elapsed() >= self.limit
+    }
 }
 
 /// 单个 agent 会话：持有文档（权威状态）、消息历史与 provider。
@@ -165,6 +197,7 @@ impl AgentSession {
             caps.vision |= engine.config.capabilities.vision;
             caps.image_gen |= engine.config.capabilities.image_gen;
             caps.video |= engine.config.capabilities.video;
+            caps.reasoning |= engine.config.capabilities.reasoning;
         }
         caps
     }
@@ -456,10 +489,13 @@ impl AgentSession {
             let mut reasoning_out = String::new();
             let mut accumulator: BTreeMap<usize, (String, String, String)> = BTreeMap::new();
             let mut tick = tokio::time::interval(Duration::from_millis(120));
+            let mut idle = IdleWatch::new(STREAM_IDLE_LIMIT);
 
             loop {
                 tokio::select! {
                     item = stream.next() => {
+                        // 收到什么都算活着：思考越久越要刷新，免得把慢模型误判成假死。
+                        idle.touch();
                         match item {
                             Some(Ok(event)) => match event {
                                 LlmEvent::Token(t) => {
@@ -499,6 +535,19 @@ impl AgentSession {
                         if self.is_cancelled() {
                             drop(stream);
                             emit(&tx, AgentEvent::Interrupted);
+                            return;
+                        }
+                        if idle.expired() {
+                            drop(stream);
+                            emit(
+                                &tx,
+                                AgentEvent::Error {
+                                    message: format!(
+                                        "no data from the model for {}s, the stream looks stalled",
+                                        STREAM_IDLE_LIMIT.as_secs()
+                                    ),
+                                },
+                            );
                             return;
                         }
                     }
@@ -859,6 +908,17 @@ fn summarize(content: &str) -> String {
 mod tests {
     use super::*;
     use pixel_core::document::Document;
+
+    #[test]
+    fn idle_watch_only_expires_after_the_limit() {
+        let mut watch = IdleWatch::new(Duration::from_millis(20));
+        assert!(!watch.expired(), "刚建好就判死刑是误伤");
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(watch.expired(), "真静默了就得认");
+        // 收到字节就重打表：思考再久也不能算卡住。
+        watch.touch();
+        assert!(!watch.expired());
+    }
 
     fn session() -> AgentSession {
         AgentSession::new(

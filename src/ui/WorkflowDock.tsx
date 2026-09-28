@@ -396,7 +396,7 @@ function RefinePanel({ gated }: { gated: boolean }) {
   const setRefineTarget = useStore((s) => s.setRefineTarget);
   const setRefinedPrompt = useStore((s) => s.setRefinedPrompt);
   const refinePrompt = useStore((s) => s.refinePrompt);
-  const usePromptInGen = useStore((s) => s.usePromptInGen);
+  const fillGenPrompt = useStore((s) => s.fillGenPrompt);
   const requestCompose = useStore((s) => s.requestCompose);
 
   return (
@@ -447,7 +447,7 @@ function RefinePanel({ gated }: { gated: boolean }) {
             <Button
               size="small"
               icon={<ArrowRight size={13} />}
-              onClick={() => usePromptInGen(prompt)}
+              onClick={() => fillGenPrompt(prompt)}
             >
               {t("dock.use_in_gen")}
             </Button>
@@ -600,7 +600,7 @@ function VisionPanel({ gated }: { gated: boolean }) {
   const vision = useStore((s) => s.vision);
   const patchDraft = useStore((s) => s.patchDraft);
   const briefReference = useStore((s) => s.briefReference);
-  const usePromptInGen = useStore((s) => s.usePromptInGen);
+  const fillGenPrompt = useStore((s) => s.fillGenPrompt);
   const requestCompose = useStore((s) => s.requestCompose);
 
   return (
@@ -624,7 +624,7 @@ function VisionPanel({ gated }: { gated: boolean }) {
           disabled={gated || vision === null}
           onClick={() => {
             // path 是刚才挑给识图的那张示例图：提示词描述它，垫图直接把原图递给模型。
-            if (vision) usePromptInGen(briefToText(vision), path);
+            if (vision) fillGenPrompt(briefToText(vision), path);
           }}
         >
           {t("dock.draw_from_this")}
@@ -722,7 +722,7 @@ function VideoBriefPanel({ gated }: { gated: boolean }) {
   const patchDraft = useStore((s) => s.patchDraft);
   const probeVideo = useStore((s) => s.probeVideo);
   const briefVideo = useStore((s) => s.briefVideo);
-  const usePromptInGen = useStore((s) => s.usePromptInGen);
+  const fillGenPrompt = useStore((s) => s.fillGenPrompt);
   const requestCompose = useStore((s) => s.requestCompose);
 
   return (
@@ -774,7 +774,7 @@ function VideoBriefPanel({ gated }: { gated: boolean }) {
           icon={<ArrowRight size={13} />}
           disabled={gated || brief === null}
           onClick={() => {
-            if (brief) usePromptInGen(videoBriefToText(brief));
+            if (brief) fillGenPrompt(videoBriefToText(brief));
           }}
         >
           {t("dock.draw_from_this")}

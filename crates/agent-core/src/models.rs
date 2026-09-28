@@ -133,6 +133,9 @@ pub struct Capabilities {
     /// 能吃视频输入。
     #[serde(default)]
     pub video: bool,
+    /// 会先输出推理（thinking）内容，聊天里按思考块展示。
+    #[serde(default)]
+    pub reasoning: bool,
 }
 
 impl Capabilities {
