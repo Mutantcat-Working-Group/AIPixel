@@ -84,6 +84,11 @@ agent-core 不依赖 Tauri，是纯 Rust。它通过一个 `tokio::sync::mpsc` �
 - `pixel_pixelize_image`：把一张位图（通常是生图模型的产出，base64 PNG/JPEG）量化成索引像素落到目标 cel，往画布调色板上吸附、尽量复用接近色而不撑爆调色板。用来把生成结果落到网格，而不是一个像素一个像素地描述
 - `pixel_generate_image`：让生图模型直接画一张位图、再量化上画布。画刷、细密过渡、偏写实这类 Lua 脚本和类型化 ops 表达不来的走这条。默认覆盖激活 cel；要「改这一帧」就把当前帧 id 透传进 `reference_frame` 当垫图，`spot="new_frame"` 则落到新建帧而不是覆盖
 
+直连生图的传输链见 `crates/agent-core/src/imagegen.rs`：有垫图时优先走 `images/edits` 多段上传，没有垫图时走 `images/generations`，
+两者都被端点拒绝（404/405/501）才退回 chat 的 `modalities=["image"]`。这里有一条硬规则——垫图绝不静默丢失：只要调用带了 reference，
+就永远不会掉回纯提示词的 `generations`，只能退回把 base64 垫图塞进 content parts 的 chat 通道，宁可报错也不悄悄画一张没参考过的图。
+所以「改这一帧」「照这一帧再长一帧」「照示例图画」在任何 OpenAI 风格端点上行为一致。
+
 「模型不许手写矩阵」的契约在 `crates/agent-core/src/tools.rs` 收口：绘制和动画统一走 Lua 沙箱，结构改动统一走 ops，读回统一走 RLE。
 
 预算与退避保护同样在主循环里：`max_tool_steps`（单 turn 工具步数，默认 24）、`max_turns`（续轮次数，默认 12）、
