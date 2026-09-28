@@ -18,6 +18,9 @@ import type {
   Attachment,
   AgentEvent,
   ApprovalDecision,
+  BatchKind,
+  BatchRecipe,
+  BatchScan,
   EditorOperation,
   DockKind,
   DockDraft,
@@ -46,6 +49,15 @@ import type {
   Usage,
   StrokeCell,
 } from "./types";
+
+import {
+  canRunBatch,
+  DEFAULT_BATCH_RECIPE,
+  EMPTY_BATCH_RUN,
+  reduceBatchEvent,
+  scanMatchesKind,
+  type BatchRun,
+} from "./batch";
 
 export interface DocumentSnapshot {
   document: PixelDocument | null;
@@ -80,10 +92,23 @@ export interface WorkflowState {
   composeRequest: { text: string; nonce: number } | null;
 }
 
+/**
+ * 批量工作台的状态。它不跟着会话走：一个文件夹进一个文件夹出，与哪条对话开着无关。
+ * scan 描述「这个文件夹里有什么」，run 描述「这一趟跑到哪了」。
+ */
+export interface BatchState {
+  /** 可序列化的 recipe：改完下次扫/跑都带着。 */
+  recipe: BatchRecipe;
+  /** 最近一次扫描结果；目录或 kind 一变就作废，宁可多扫一次也别拿着旧清单开跑。 */
+  scan: BatchScan | null;
+  scanBusy: boolean;
+  run: BatchRun;
+}
+
 /** 会动文档的四条工作流入参。image_gen / frame_tween / video_frames 走 runWorkflow。 */
 export type WorkflowParams = TweenParams | PixelizeParams | ImageGenParams | VideoFramesParams;
 
-interface StoreState extends DocumentSnapshot, WorkflowState {
+interface StoreState extends DocumentSnapshot, WorkflowState, BatchState {
   booted: boolean;
   models: ModelsView;
   /** 用户自配的 MCP 服务器；连上的才带工具清单。 */
@@ -190,6 +215,18 @@ export interface StoreActions {
   moveLayer: (delta: number) => Promise<void>;
   /** 回退一步编辑器改动：撤销栈见底就什么都不做。 */
   undoEdit: () => Promise<void>;
+  /** 换批量种类。旧扫描立马作废：素材类型和语义都变了，留着只会误导。 */
+  setBatchKind: (kind: BatchKind) => void;
+  /** 改 recipe。换了输入目录同样作废旧扫描。 */
+  patchBatchRecipe: (patch: Partial<BatchRecipe>) => void;
+  pickBatchInput: (dir: string) => void;
+  pickBatchOutput: (dir: string) => void;
+  /** 扫一遍输入文件夹，只读，数清楚有几份对口素材。 */
+  scanBatchInput: () => Promise<void>;
+  /** 跑一趟。命令即刻返回，过程走 batch-event。 */
+  runBatch: () => Promise<void>;
+  /** 清掉上一趟的明细，方便盯着下一趟。 */
+  resetBatch: () => void;
 }
 
 const EMPTY_MODELS: ModelsView = { active_id: "", entries: [] };
@@ -281,6 +318,8 @@ function workflowError(error: unknown): string {
 }
 
 let unlisten: (() => void) | null = null;
+// 批量跑在独立通道上，与 agent-event 各听一条，互不打扰。
+let batchUnlisten: (() => void) | null = null;
 let booting: Promise<void> | null = null;
 let snapshotSeq = 0;
 
@@ -377,6 +416,28 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     });
   }
 
+  /** batch-event 路由：事件流折叠成 run 快照，跑完投一条通知栏收尾。 */
+  async function ensureBatchListener() {
+    if (batchUnlisten) return;
+    batchUnlisten = await bridge.listenBatchEvents((raw) => {
+      setState({ run: reduceBatchEvent(getState().run, raw) });
+      if (raw.kind !== "done") return;
+      // 批量可能要跑一会儿，这期间用户很可能切去别的视图；通知栏是唯一不依赖所见视图的回执。
+      const lang = getState().lang;
+      const failing = raw.failed > 0;
+      setState({
+        notice: {
+          text: translate(
+            lang,
+            failing ? "batch.done" : "batch.done_clean",
+            { ok: raw.ok, skipped: raw.skipped, failed: raw.failed },
+          ),
+          isError: failing,
+        },
+      });
+    });
+  }
+
   async function loadDocument(id: string) {
     // 换会话就把工作流面板的中间产物倒掉：上一条会话的提示词不属于这一条。
     setState({
@@ -459,11 +520,17 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     dockDraft: INITIAL_DOCK_DRAFT,
     composeRequest: null,
     lang: storedLang(),
+    recipe: DEFAULT_BATCH_RECIPE,
+    scan: null,
+    scanBusy: false,
+    run: EMPTY_BATCH_RUN,
 
     boot: async () => {
       if (booting) return booting;
       booting = (async () => {
         await ensureListener();
+        // 批量通道与会话无关，开机听上就行：用户随时可能从工作台起一趟。
+        await ensureBatchListener();
         let models: ModelsView;
         try {
           models = await bridge.listModels();
@@ -1184,6 +1251,65 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         // 会话列表刷新失败不影响主流程
       }
     },
+
+    // ---------- 批量工作台 ----------
+    setBatchKind: (kind) => {
+      setState((s) => ({ ...s, recipe: { ...s.recipe, kind }, scan: null, run: EMPTY_BATCH_RUN }));
+    },
+
+    patchBatchRecipe: (patch) => {
+      setState((s) => {
+        const recipe = { ...s.recipe, ...patch };
+        // 输入目录一换，旧清单描述的就是另一个文件夹：作废，逼用户重扫。
+        const stale = recipe.input_dir !== s.recipe.input_dir;
+        return { ...s, recipe, scan: stale ? null : s.scan, run: stale ? EMPTY_BATCH_RUN : s.run };
+      });
+    },
+
+    pickBatchInput: (dir) => getState().patchBatchRecipe({ input_dir: dir }),
+
+    pickBatchOutput: (dir) => getState().patchBatchRecipe({ output_dir: dir }),
+
+    scanBatchInput: async () => {
+      const { recipe } = getState();
+      if (recipe.input_dir.trim() === "") {
+        failKey("batch.need_dirs");
+        return;
+      }
+      setState({ scanBusy: true });
+      try {
+        const scan = await bridge.scanBatch(recipe.input_dir, recipe.kind);
+        // 新一次扫描意味着上一趟的明细作废：那批行属旧目录或旧尺度。
+        setState({ scan, run: EMPTY_BATCH_RUN });
+      } catch (error) {
+        setState({ scan: null });
+        failKey("batch.scan_failed", { error: String(error) });
+      } finally {
+        setState({ scanBusy: false });
+      }
+    },
+
+    runBatch: async () => {
+      const { recipe, scan, run } = getState();
+      if (recipe.input_dir.trim() === "" || recipe.output_dir.trim() === "") {
+        failKey("batch.need_dirs");
+        return;
+      }
+      if (!scan || !scanMatchesKind(scan, recipe.kind) || !canRunBatch(scan, run)) {
+        failKey("batch.need_scan");
+        return;
+      }
+      // 命令即刻返回、事件随后才来；先把按钮转上，免得连点开出两趟互踩。
+      setState({ run: { ...EMPTY_BATCH_RUN, running: true, total: scan.count } });
+      try {
+        await bridge.runBatch(recipe);
+      } catch (error) {
+        setState({ run: { ...EMPTY_BATCH_RUN, error: String(error) } });
+        failKey("batch.run_failed", { error: String(error) });
+      }
+    },
+
+    resetBatch: () => setState({ run: EMPTY_BATCH_RUN }),
   };
 });
 

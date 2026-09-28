@@ -7,6 +7,8 @@ mod mcp;
 mod state;
 mod workflow;
 
+mod batch;
+
 use tauri::Manager;
 
 pub fn run() {
@@ -60,6 +62,8 @@ pub fn run() {
             editor::editor_apply_ops,
             editor::editor_fill,
             editor::editor_paint_stroke,
+            batch::batch_scan,
+            batch::batch_run,
         ])
         .run(tauri::generate_context!())
         .expect("error while running AIPixel");

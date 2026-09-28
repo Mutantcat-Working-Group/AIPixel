@@ -17,12 +17,12 @@ import {
   MessageSquare,
   Play,
   ScanEye,
-  Sliders,
   Sparkles,
   X,
 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 
+import { Field, QuantizeFields } from "./QuantizeFields";
 import * as bridge from "../lib/bridge";
 import { briefToText, probeSummary, videoBriefToText } from "../lib/dock-format";
 import { renderUiText, translate, translateText, type Lang } from "../lib/i18n";
@@ -31,10 +31,8 @@ import { useT, type T } from "../lib/t";
 import type {
   DockKind,
   DockDraft,
-  FitMode,
   LandSpot,
   MigrateOrder,
-  PixelizeOptions,
   RefineTarget,
   TweenMode,
   VisionBrief,
@@ -94,15 +92,6 @@ async function pickFile(extensions: string[], name: string): Promise<string | nu
   return typeof picked === "string" ? picked : null;
 }
 
-function Field({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div className="dock-field">
-      <span className="dock-field-label">{label}</span>
-      {children}
-    </div>
-  );
-}
-
 function PathField({
   label,
   buttonLabel,
@@ -145,68 +134,6 @@ function PathField({
         {buttonLabel}
       </Button>
     </Field>
-  );
-}
-
-function QuantizeFields({
-  value,
-  onChange,
-}: {
-  value: PixelizeOptions;
-  onChange: (next: PixelizeOptions) => void;
-}) {
-  const t = useT();
-  return (
-    <details className="dock-advanced">
-      <summary>
-        <Sliders size={12} />
-        {t("dock.advanced")}
-      </summary>
-      <Field label={t("dock.max_colors", { count: value.max_colors })}>
-        <Slider
-          min={2}
-          max={64}
-          value={value.max_colors}
-          onChange={(next) => onChange({ ...value, max_colors: next })}
-        />
-      </Field>
-      <Field label={t("dock.alpha_cutoff", { count: value.alpha_threshold })}>
-        <Slider
-          min={0}
-          max={255}
-          value={value.alpha_threshold}
-          onChange={(next) => onChange({ ...value, alpha_threshold: next })}
-        />
-      </Field>
-      <div className="dock-flag">
-        <Switch
-          size="small"
-          checked={value.dither}
-          onChange={(next) => onChange({ ...value, dither: next })}
-        />
-        <span>{t("dock.dither")}</span>
-      </div>
-      <div className="dock-flag">
-        <Switch
-          size="small"
-          checked={value.expand_palette}
-          onChange={(next) => onChange({ ...value, expand_palette: next })}
-        />
-        <span>{t("dock.expand_palette")}</span>
-      </div>
-      <Field label={t("dock.fit")}>
-        <Segmented
-          size="small"
-          block
-          value={value.fit}
-          options={[
-            { label: t("fit.contain"), value: "contain" },
-            { label: t("fit.stretch"), value: "stretch" },
-          ]}
-          onChange={(next) => onChange({ ...value, fit: next as FitMode })}
-        />
-      </Field>
-    </details>
   );
 }
 
