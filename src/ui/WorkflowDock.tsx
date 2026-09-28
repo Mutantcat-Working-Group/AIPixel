@@ -33,7 +33,6 @@ import type {
   DockDraft,
   LandSpot,
   MigrateOrder,
-  ModelRole,
   RefineTarget,
   TweenMode,
   VisionBrief,
@@ -74,13 +73,14 @@ interface DockRow {
   output: string;
   readiness: { state: "ready" } | { state: "blocked"; missing: string[] };
   /** 这条流程实际由哪个模型跑；纯本机的流程没有，是 null。 */
-  servedBy: { role: ModelRole; label: string } | null;
+  servedBy: { label: string; detached: boolean } | null;
 }
 
-/** 面板里那句「由谁跑」。回落主模型时说清楚是主模型，别让用户以为背后藏了个模型。 */
-function servedText(served: { role: ModelRole; label: string }, t: T): string {
-  const key = served.role === "chat" ? "roles.served_fallback" : "roles.served";
-  return t(key, { model: served.label });
+/** 面板里那句「由谁跑」。拿主模型凑的要说清楚是主模型，别让用户以为背后藏了个模型。 */
+function servedText(served: { label: string; detached: boolean }, t: T): string {
+  return t(served.detached ? "roles.served" : "roles.served_fallback", {
+    model: served.label,
+  });
 }
 
 /** 缺的能力名 -> 界面词。Rust 只给 snake_case 标识，中文要说人话。 */
@@ -245,7 +245,7 @@ export default function WorkflowDock() {
         output: translateText(lang, `wf.${entry.kind}.output`, undefined, entry.output),
         readiness: entry.readiness,
         servedBy: entry.served_by_label
-          ? { role: entry.served_by, label: entry.served_by_label }
+          ? { label: entry.served_by_label, detached: entry.served_by_detached }
           : null,
       })),
       {

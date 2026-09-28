@@ -312,10 +312,10 @@ export interface WorkflowInfo {
 /** 目录项：WorkflowInfo 在 Rust 侧是 #[serde(flatten)]，所以前台看到的是同一层字段。 */
 export interface WorkflowEntry extends WorkflowInfo {
   readiness: Readiness;
-  /** 这条流程实际由哪个角色干活；角色没单独绑模型时是 chat。 */
-  served_by: ModelRole;
   /** 干活那个模型的名字，给面板显示「生图由 X 提供」。 */
   served_by_label: string;
+  /** 这个角色有没有单独绑过模型；false 表示正拿会话主模型凑。 */
+  served_by_detached: boolean;
 }
 
 /** 当前会话绑的模型跑不跑得动。 */

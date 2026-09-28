@@ -45,11 +45,10 @@ pub struct WorkflowEntry {
     #[serde(flatten)]
     pub info: agent_core::WorkflowInfo,
     pub readiness: agent_core::Readiness,
-    /// 这条流程实际由哪个角色干活。角色没单独绑模型时会话会说「主模型」，
-    /// 用户在面板里一眼看出生图和聊天是不是同一家。
-    pub served_by: agent_core::ModelRole,
-    /// 干活那个模型的 id 和名字。回落主模型时就是主模型那两个。
+    /// 干活那个模型的名字。回落主模型时就是主模型那个。
     pub served_by_label: String,
+    /// 这个角色有没有单独绑过模型。false 表示正拿主模型凑，UI 要换个说法。
+    pub served_by_detached: bool,
 }
 
 /// 视频探针结果。source 决定 UI 该说「抽帧」还是「这就是一串静帧」。
@@ -187,16 +186,18 @@ pub fn workflow_catalog(
         .map(|info| {
             let readiness = agent_core::readiness(info.kind, &caps);
             let role = ModelRole::for_workflow(info.kind);
-            let served = bindings
+            // 回落主模型时 label 给主模型的名字，detached 给 false：
+            // 界面上「由 X 跑」和「用主模型 X 跑」是两回事，别让用户以为藏了个模型。
+            let (served, detached) = bindings
                 .iter()
                 .find(|binding| binding.role == role)
-                .map(|binding| binding.model_label.clone())
+                .map(|binding| (binding.model_label.clone(), binding.detached))
                 .unwrap_or_default();
             WorkflowEntry {
                 info,
                 readiness,
-                served_by: role,
                 served_by_label: served,
+                served_by_detached: detached,
             }
         })
         .collect())
