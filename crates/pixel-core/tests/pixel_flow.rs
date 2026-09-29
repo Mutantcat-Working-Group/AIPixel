@@ -1137,6 +1137,119 @@ fn shader_canvas_table_form_draws_too() {
 }
 
 #[test]
+fn every_documented_api_name_resolves() {
+    // 工具说明里承诺的每个接口都得真的注册。真模型实测里撞过两次，同一类毛病：
+    // 文档写 ellipfill，实现只注册了 ellipsefill；文档写 width / height，实现只
+    // 注册了 canvas_w / canvas_h。名字对不上在 Rust 这边一声不吭，只在模型那一侧
+    // 静静地变成 nil，一个输出预算就这么烧掉了。这里逐个点名验，提示词以后加了
+    // 新接口也顺手补进来。
+    let mirrored = [
+        // 绘图
+        "pset",
+        "pget",
+        "line",
+        "rect",
+        "rectfill",
+        "ellipse",
+        "ellipfill",
+        "circle",
+        "circfill",
+        "flood",
+        "replace",
+        "outline",
+        "clear",
+        "stamp",
+        // 画布尺寸
+        "width",
+        "height",
+    ];
+    let bare = ["pal", "hex", "mix", "hsv", "alpha", "rand", "noise"];
+
+    let mut script = String::from("local mirrored = {\n");
+    for n in mirrored {
+        script.push_str("  '");
+        script.push_str(n);
+        script.push_str("',\n");
+    }
+    script.push_str("}\nlocal bare = {\n");
+    for n in bare {
+        script.push_str("  '");
+        script.push_str(n);
+        script.push_str("',\n");
+    }
+    script.push_str(
+        "}\nfor _, n in ipairs(mirrored) do\n  \
+         if _G[n] == nil then error('missing ' .. n) end\n  \
+         if canvas[n] == nil then error('missing canvas.' .. n) end\nend\n  \
+         for _, n in ipairs(bare) do\n  \
+         if _G[n] == nil then error('missing ' .. n) end\nend\n",
+    );
+    let mut doc = blank();
+    let layer = doc.layers[0].id.clone();
+    shader::run_shader(&mut doc, &layer, &script, false, &ShaderBudget::default())
+        .expect("提示词点名的接口必须全部可解析");
+}
+
+#[test]
+fn ellipse_fill_aliases_draw_identically() {
+    // ellipfill / ellipsefill / circlefill / ellipse(..., true) 是同一个填充实现的几个
+    // 入口。别名不能只是「存在」，还得画出跟正门一样的东西：空画面对模型来说是
+    // 一次静默失败，它没法从错误信息里看出自己换了个写法。
+    let mut doc = Document::new("alias", 32, 32).expect("32x32 within limits");
+    let layer = doc.layers[0].id.clone();
+    let frame = doc.frames[0].id.clone();
+    shader::run_shader(
+        &mut doc,
+        &layer,
+        r##"
+        local ink = '#FF004D'
+        ellipfill(0, 0, 9, 19, ink)
+        ellipsefill(11, 0, 20, 19, ink)
+        ellipse(22, 0, 31, 19, ink, true)
+        circlefill(15, 26, 5, ink)
+        "##,
+        false,
+        &ShaderBudget::default(),
+    )
+    .expect("填充别名都要能画");
+    let cel = doc.cel(&layer, &frame).unwrap();
+    let mut bands = [0usize; 3];
+    for (i, px) in cel.indices.iter().enumerate() {
+        if *px == 0 {
+            continue;
+        }
+        // 只统计三条色带所在的上 20 行，下面的 circlefill 不能混进来。
+        if i / 32 > 19 {
+            continue;
+        }
+        // 三条横向色带各占 10 列，中间留 1 列隔开，互不污染。
+        let x = i % 32;
+        match x {
+            0..=9 => bands[0] += 1,
+            11..=20 => bands[1] += 1,
+            22..=31 => bands[2] += 1,
+            _ => {}
+        }
+    }
+    assert_eq!(
+        bands[0], bands[1],
+        "ellipfill 与 ellipsefill 画出来的不一样"
+    );
+    assert_eq!(
+        bands[1], bands[2],
+        "ellipsefill 与 ellipse(..., true) 画出来的不一样"
+    );
+
+    let corner = cel
+        .indices
+        .iter()
+        .skip(22 * 32)
+        .filter(|px| **px != 0)
+        .count();
+    assert!(corner > 0, "circlefill 什么都没画");
+}
+
+#[test]
 fn shader_hand_written_rows_place_every_pixel() {
     // 工具说明里给模型的那份手写行示例必须真能跑：示例就是契约。
     let mut doc = blank();

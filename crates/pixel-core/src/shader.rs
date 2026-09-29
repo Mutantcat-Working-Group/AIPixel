@@ -179,8 +179,6 @@ impl Sandbox {
                 0.0
             },
         );
-        let _ = g.set("canvas_w", self.doc().width);
-        let _ = g.set("canvas_h", self.doc().height);
         let _ = g.set("layer", self.layer.borrow().clone());
     }
 
@@ -219,8 +217,28 @@ impl Sandbox {
         self.install_palette_functions()
             .map_err(ShaderError::from)?;
         self.install_canvas_functions().map_err(ShaderError::from)?;
+        self.install_dimension_globals()
+            .map_err(ShaderError::from)?;
         self.mirror_canvas_functions().map_err(ShaderError::from)?;
         self.install_instruction_guard();
+        Ok(())
+    }
+
+    /// 画布尺寸：run_shader 期间不会变，装沙箱时定一次。
+    /// 提示词承诺的是 `width` / `height` 与 `canvas.width` / `canvas.height`，
+    /// 四个名字都得在；canvas_w / canvas_h 只是给换了写法的模型留的别名。
+    /// 曾经只设了 canvas_w / canvas_h，模型照着提示词写 width 拿到 nil，
+    /// 一个条件判断就能把整张图画成空的。
+    fn install_dimension_globals(&self) -> mlua::Result<()> {
+        let globals = self.lua.globals();
+        let (w, h) = {
+            let doc = self.doc();
+            (doc.width, doc.height)
+        };
+        globals.set("width", w)?;
+        globals.set("height", h)?;
+        globals.set("canvas_w", w)?;
+        globals.set("canvas_h", h)?;
         Ok(())
     }
 
@@ -231,15 +249,19 @@ impl Sandbox {
         let globals = self.lua.globals();
         let canvas: Table = globals.get("canvas")?;
         for name in [
+            "width",
+            "height",
             "pset",
             "pget",
             "line",
             "rect",
             "rectfill",
             "ellipse",
+            "ellipfill",
             "ellipsefill",
             "circle",
             "circfill",
+            "circlefill",
             "flood",
             "replace",
             "outline",
@@ -529,6 +551,10 @@ impl Sandbox {
             );
             Ok(())
         })?;
+        // 提示词里写的是 ellipfill，这里却只注册了 ellipsefill：模型照着提示词写
+        // canvas.ellipfill(...) 拿到的是 nil，一整个输出预算就这么烧掉的。两个名字
+        // 都挂上，模型写哪个都算数。
+        globals.set("ellipfill", ellipfill.clone())?;
         globals.set("ellipsefill", ellipfill)?;
 
         let circle = self.canvas_fn(|doc, layer, frame, args: mlua::MultiValue| {
@@ -559,7 +585,10 @@ impl Sandbox {
             super::ops::draw_ellipse(cel, w, h, box_.0, box_.1, box_.2, box_.3, idx, true);
             Ok(())
         })?;
-        globals.set("circfill", circfill)?;
+        // circfill 的别名：文档给的是 circfill，但模型更熟 circlefill，
+        // 两种写法都收，别为一次命名出入白吃一个来回。
+        globals.set("circfill", circfill.clone())?;
+        globals.set("circlefill", circfill)?;
 
         let flood = self.canvas_fn(|doc, layer, frame, args: mlua::MultiValue| {
             let mut it = args.into_iter();
