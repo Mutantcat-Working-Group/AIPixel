@@ -34,6 +34,29 @@ body,
 #root {
   height: 100%;
   margin: 0;
+  overflow-x: clip;
+}
+
+/* 浮层（工具提示、下拉选单、弹出层）的 portal 容器要把整页的横向滚动彻底掐死。
+ *
+ * 上面的 overflow-x: clip 挡不住它们：rc-trigger 把浮层塞进一个挂在 body 下的
+ * 无名 div，气泡是 position: absolute、包含块落在初始包含块上，于是它绕过 body
+ * 的裁剪，一超出视口右缘就把 documentElement 的 scrollWidth 撑大 1~4px。
+ * 根元素上试过 clip/hidden/auto 各种组合都拦不住，实测只有把这个容器本身
+ * 变成一个视口大小、自身裁剪的层才管用。
+ *
+ * 只挑无名 div：antd 的模态框(.ant-modal-root)、消息(.ant-message)、
+ * 通知(.ant-notification)都带类名，不会被这条规则碰到。
+ * pointer-events: none 让全屏容器不挡点击，再给直接子元素还回来。 */
+body > div:not(#root):not([class]) {
+  position: fixed;
+  inset: 0;
+  overflow: clip;
+  pointer-events: none;
+}
+
+body > div:not(#root):not([class]) > * {
+  pointer-events: auto;
 }
 
 body {
@@ -1072,6 +1095,131 @@ body {
   gap: 4px;
   border-right: 1px solid var(--border);
   padding-right: 12px;
+}
+
+/* 设置页的高度天花板：两列各自滚动，谁都不许把弹窗顶出屏幕。
+   min() 保证小窗口下也留出标题栏与页脚；桌面端封在 612px 一屏内。 */
+.model-modal .ant-modal-body {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  gap: 16px;
+  padding-top: 16px;
+  max-height: min(612px, calc(100vh - 172px));
+  align-items: stretch;
+}
+
+.model-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 0;
+  border-right: 1px solid var(--border);
+  padding-right: 12px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.model-list .model-new {
+  flex: none;
+}
+
+/* 右栏：语言一行钉住，内容自己滚，底部动作条不跟着滚。 */
+.model-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  min-height: 0;
+}
+
+.model-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  min-width: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+}
+
+/* 设置项分组：一个标题 + 一块内容，横向排满右栏。 */
+.settings-section {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-panel-2);
+  padding: 10px 12px 4px;
+}
+
+.settings-section-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 8px;
+}
+
+.settings-section .section-hint {
+  font-size: 11px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.settings-blurb {
+  margin: 0 0 8px;
+  color: var(--text-faint);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.limit-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 6px 0;
+}
+
+.limit-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.limit-label {
+  font-size: 12px;
+}
+
+.limit-hint {
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.limit-reset {
+  display: flex;
+  justify-content: flex-end;
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+  padding-top: 8px;
+}
+
+/* 「关掉思考直接干活」这类一行说明的开关。 */
+.settings-switch-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.settings-switch-hint {
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1.45;
 }
 
 .model-row {

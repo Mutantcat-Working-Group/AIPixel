@@ -3,7 +3,7 @@
 
 use agent_core::{
     ActiveContext, AgentEvent, AgentSession, ApprovalDecision, Attachment, AttachmentRole,
-    Capabilities, Message, ModelConfig, ModelRole, PermissionMode, Protocol,
+    Capabilities, LoopLimits, Message, ModelConfig, ModelRole, PermissionMode, Protocol,
 };
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, State};
@@ -15,6 +15,19 @@ use crate::state::{default_document, AppState, ModelsView};
 #[tauri::command]
 pub fn agent_list_models(state: State<'_, AppState>) -> ModelsView {
     state.models_view()
+}
+
+/// 运行护栏当前值：续写、重试、纯思考各自封顶。
+#[tauri::command]
+pub fn agent_loop_limits(state: State<'_, AppState>) -> LoopLimits {
+    state.limits()
+}
+
+/// 改运行护栏。立即推到所有活着的会话，并落盘供下次启动读回。
+#[tauri::command]
+pub fn agent_set_loop_limits(state: State<'_, AppState>, limits: LoopLimits) -> LoopLimits {
+    state.set_limits(limits);
+    state.limits()
 }
 
 /// 拉 provider 的模型清单，供设置里「获取」后挑一个填入。
@@ -43,6 +56,7 @@ pub async fn model_fetch_models(
         model: String::new(),
         max_tokens: None,
         temperature: None,
+        disable_thinking: None,
         capabilities: Capabilities::default(),
     };
     agent_core::providers::list_models(&config)

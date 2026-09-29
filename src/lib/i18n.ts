@@ -66,7 +66,6 @@ export const zh = {
 
   // ---------- 对话面板 ----------
   "chat.title": "智能体",
-  "chat.running": "运行中",
   "chat.empty":
     "要一张精灵图、一套配色，或者一次着色器处理。画布是唯一的事实来源。",
   "chat.placeholder": "描述你想要的像素画...",
@@ -90,12 +89,31 @@ export const zh = {
   "chat.retry_tip": "这一轮没有跑完，重发刚才的话继续",
   "chat.stall":
     "已经 {secs} 秒没有新动静，可能卡住了。可以重发，也可以先中断。",
+  "chat.elapsed": "本轮已用 {mm}:{ss}",
   "agent.interrupted": "已中断这一轮",
   "agent.continuing": "回答到了输出上限，正在接着写（第 {done}/{max} 次）",
   "agent.lowering_tokens":
     "这个模型最多收 {cap} 个输出 token，已按它说的来，回答分几截拼起来",
   "agent.finished_whole": "这一段本来就已经写完了，没什么要补充的",
+  "agent.thinking_off_retry":
+    "这个模型把预算全花在思考上了，一个工具都没调；已关掉思考重问一次",
   "agent.retrying": "这次请求没成（{reason}），正在重试 {attempt}/{max}",
+  "agent.empty_message": "消息是空的：写点什么，或者附上一张图",
+  "agent.request_failed": "请求没成：{reason}",
+  "agent.turn_budget":
+    "这一轮改不动了：连着改 {rounds} 回，工具步数见顶。另发一句话接着来。",
+  "agent.tool_budget":
+    "这一轮改不动了：{steps} 个工具步之后见顶。另发一句话接着来。",
+  "agent.stalled":
+    "回复不再推进了：模型要么把写过的原样又念一遍，要么几乎没吐新东西。运行停在上面的位置。",
+  "agent.output_limit":
+    "续写了 {done} 次还是撞上输出上限。去设置里把 Max tokens 调大些，再把刚才的话发一遍。",
+  "agent.output_limit_empty":
+    "模型在撞上输出上限之前什么也没写出来。去设置里把 Max tokens 调大些。",
+  "agent.thinking_only":
+    "续写 {rounds} 次，模型把整个输出预算都花在思考上了，正文和工具调用一个都没有。去设置里把 Max tokens 调大，或者换一个更早动笔的模型。",
+  "agent.same_call_failed":
+    "同一个工具调用连着失败了三次，先停在这儿，你好改改请求。",
   "chat.tool_no_output": "（无输出）",
 
   // ---------- 文档面板 ----------
@@ -149,6 +167,8 @@ export const zh = {
   "settings.name": "名称",
   "settings.name_required": "名称不能为空",
   "settings.name_placeholder": "我的 Claude",
+  "settings.connection": "连接",
+  "settings.connection_hint": "连得上，后面的每一项才有意义",
   "settings.protocol": "协议",
   "settings.protocol.anthropic": "Anthropic Messages",
   "settings.protocol.openai": "OpenAI 兼容",
@@ -169,6 +189,7 @@ export const zh = {
   "settings.api_key_keep": "留空即保留已存储的密钥",
   "settings.api_key_placeholder": "sk-...",
   "settings.sampling": "采样",
+  "settings.sampling_hint": "按模型的脾气调；拿不准就留空",
   "settings.max_tokens": "Max tokens",
   "settings.max_tokens_auto": "已按 {model} 的常用上限填入，可自行修改",
   "settings.temperature": "Temperature",
@@ -199,6 +220,9 @@ export const zh = {
   "settings.cap.reasoning.hint":
     "模型会先输出推理内容（thinking），聊天里按思考块展示，结束再收起。",
   "settings.key_stored": "密钥已存在本机",
+  "settings.disable_thinking": "关掉思考，直接干活",
+  "settings.disable_thinking_hint":
+    "推理模型常把预算全花在打腹稿上，一个像素都不画。勾上：每轮都关，最跟手；不勾：由程序盯着，真出现「只想不动笔」就自己关了再问一次，顺便你还能看见思考过程。",
   "settings.no_key_stored": "尚未存储密钥",
   "settings.set_active": "设为激活",
   "settings.delete": "删除",
@@ -210,6 +234,20 @@ export const zh = {
   "about.repo": "源码仓库",
   "about.blurb":
     "像素资产生成的桌面智能体：模型自带 Provider，本机运行，无登录无计费。",
+  "settings.limits": "运行护栏",
+  "settings.limits_hint":
+    "把「续写、重发、一直只想不动笔」三件事各自封顶。填 0 表示关掉这项自动行为，失败会立刻现形。",
+  "settings.limits.continuations": "最多续写次数",
+  "settings.limits.continuations_hint":
+    "撞上输出上限后替用户接着写几次。像素画的脚本动辄几百行，撞线很常见。",
+  "settings.limits.retries": "失败最多重发",
+  "settings.limits.retries_hint":
+    "网络抖动、限流、服务端 5xx 这类换个时间就好的失败重发几次；请求本身写错不会重发。",
+  "settings.limits.reasoning": "纯思考最多几轮",
+  "settings.limits.reasoning_hint":
+    "连续几轮只吐推理、正文和工具调用一个都没有就收手。模型再轴也有停下的时刻。",
+  "settings.limits.saved": "已保存",
+  "settings.limits.reset": "恢复默认",
 
   // ---------- MCP 面板 ----------
   "mcp.title": "MCP 工具服务器",
@@ -418,6 +456,7 @@ export const zh = {
   "store.open_aip_failed": "打开 .aip 失败：{error}",
   "store.saved": "已保存 {name}",
   "store.save_failed": "保存失败：{error}",
+  "store.save_limits_failed": "保存运行护栏失败：{error}",
   "store.exported": "已导出 {name}",
   "store.export_failed": "导出失败：{error}",
   "store.read_aip_failed": "读取 .aip 文本失败：{error}",
@@ -555,7 +594,6 @@ export const en: Record<TKey, string> = {
   "sidebar.height": "H",
 
   "chat.title": "Agent",
-  "chat.running": "running",
   "chat.empty":
     "Ask for a sprite, a palette, or a shader pass. The canvas is the only source of truth.",
   "chat.placeholder": "Describe the pixel art you want...",
@@ -581,6 +619,7 @@ export const en: Record<TKey, string> = {
     "This round did not finish; resend your last message to continue",
   "chat.stall":
     "No new output for {secs}s. It may be stuck - resend, or interrupt this round.",
+  "chat.elapsed": "this round has been running for {mm}:{ss}",
   "agent.interrupted": "This round was interrupted",
   "agent.continuing":
     "The reply hit the output limit, continuing ({done} of {max})",
@@ -588,8 +627,26 @@ export const en: Record<TKey, string> = {
     "This model accepts at most {cap} output tokens; switched to that and the reply will be stitched together",
   "agent.finished_whole":
     "The reply already looks complete, nothing more to continue",
+  "agent.thinking_off_retry":
+    "This model spent the whole budget thinking and called no tool; retrying with thinking turned off",
   "agent.retrying":
     "That request failed ({reason}); retrying {attempt} of {max}",
+  "agent.empty_message": "The message is empty: write something, or attach an image",
+  "agent.request_failed": "The request failed: {reason}",
+  "agent.turn_budget":
+    "This round is done for: tool steps hit the ceiling after {rounds} edit(s). Send another message to keep going.",
+  "agent.tool_budget":
+    "This round is done for: tool steps hit the ceiling after {steps} step(s). Send another message to keep going.",
+  "agent.stalled":
+    "The reply stopped making progress: the model either repeated text it had already written or produced almost nothing new. The run stopped at the point shown above.",
+  "agent.output_limit":
+    "Still hitting the output limit after {done} continuation(s). Raise Max tokens in settings, then resend your last message.",
+  "agent.output_limit_empty":
+    "The model produced nothing before the output limit. Raise Max tokens in settings.",
+  "agent.thinking_only":
+    "After {rounds} continuation(s) the model has spent the whole output budget on reasoning without writing any text or making a tool call. Raise Max tokens in settings, or switch to a model that acts sooner.",
+  "agent.same_call_failed":
+    "The same tool call failed three times in a row. Stopping here so you can adjust the request.",
   "chat.tool_no_output": "(no output)",
 
   "doc.brush": "Brush",
@@ -643,6 +700,8 @@ export const en: Record<TKey, string> = {
   "settings.name": "Name",
   "settings.name_required": "Name is required",
   "settings.name_placeholder": "My Claude",
+  "settings.connection": "Connection",
+  "settings.connection_hint": "Nothing below means much until this connects",
   "settings.protocol": "Protocol",
   "settings.protocol.anthropic": "Anthropic Messages",
   "settings.protocol.openai": "OpenAI-compatible",
@@ -664,6 +723,7 @@ export const en: Record<TKey, string> = {
   "settings.api_key_keep": "Leave blank to keep stored key",
   "settings.api_key_placeholder": "sk-...",
   "settings.sampling": "Sampling",
+  "settings.sampling_hint": "Tune to the model's mood; leave blank if unsure",
   "settings.max_tokens": "Max tokens",
   "settings.max_tokens_auto":
     "Filled from the usual limit for {model}; edit it if you like",
@@ -699,6 +759,9 @@ export const en: Record<TKey, string> = {
   "settings.cap.reasoning.hint":
     "The model emits reasoning (thinking) first, shown as a thinking block that collapses when done.",
   "settings.key_stored": "key stored locally",
+  "settings.disable_thinking": "Skip thinking, just do the work",
+  "settings.disable_thinking_hint":
+    "Reasoning models often spend the whole budget on a draft and never draw a pixel. Checked: thinking is off every round, snappiest. Unchecked: the app watches for a think-but-never-draw round and retries with thinking off by itself, while you still get to see the reasoning.",
   "settings.no_key_stored": "no key stored",
   "settings.set_active": "Set active",
   "settings.delete": "Delete",
@@ -710,6 +773,20 @@ export const en: Record<TKey, string> = {
   "about.repo": "Source repository",
   "about.blurb":
     "A desktop agent for pixel assets: bring your own provider, everything runs on this machine, no sign-in, no billing.",
+  "settings.limits": "Run guard rails",
+  "settings.limits_hint":
+    "Cap continuation, retry, and pure-reasoning rounds separately. 0 turns that automatic behaviour off and the failure shows up immediately.",
+  "settings.limits.continuations": "Continuation cap",
+  "settings.limits.continuations_hint":
+    "How many times to continue for you after the output limit is hit. Pixel-art scripts run to hundreds of lines, so hitting the limit is routine.",
+  "settings.limits.retries": "Retry cap",
+  "settings.limits.retries_hint":
+    "How many times to resend after failures that a second attempt usually fixes - flaky network, rate limits, server 5xx. A malformed request is never retried.",
+  "settings.limits.reasoning": "Reasoning-only cap",
+  "settings.limits.reasoning_hint":
+    "Give up after this many rounds that produced nothing but reasoning, no answer and no tool call. Every model stops eventually.",
+  "settings.limits.saved": "Saved",
+  "settings.limits.reset": "Restore defaults",
 
   "mcp.title": "MCP tool servers",
   "mcp.close": "Close",
@@ -920,6 +997,7 @@ export const en: Record<TKey, string> = {
   "store.open_aip_failed": "could not open the .aip: {error}",
   "store.saved": "saved {name}",
   "store.save_failed": "save failed: {error}",
+  "store.save_limits_failed": "could not save the run guard rails: {error}",
   "store.exported": "exported {name}",
   "store.export_failed": "export failed: {error}",
   "store.read_aip_failed": "could not read the .aip text: {error}",

@@ -113,6 +113,15 @@ pub struct ModelConfig {
     pub max_tokens: Option<u32>,
     #[serde(default)]
     pub temperature: Option<f32>,
+    /// 关掉模型的思考（thinking）环节。
+    ///
+    /// `None` = 不干预：模型自己想就多想。但这会出事——LongCat、DeepSeek-R1
+    /// 这一类拿到工具也先把整份 Lua 在脑子里写完，一轮预算烧光、一个工具都没
+    /// 调，用户看到的是永远在思考的节点。所以 `None` 时 runner 仍留了一手：
+    /// 撞了输出上限又没调工具，就自动关思考重问一次（见 runner 的兜底）。
+    /// `Some(true)` = 每轮都关，最跟手；`Some(false)` = 用户要留着思考看。
+    #[serde(default)]
+    pub disable_thinking: Option<bool>,
     /// 用户声明的模型能力，决定哪些工作流可跑（见 workflows.rs）。
     #[serde(default)]
     pub capabilities: Capabilities,
@@ -214,6 +223,14 @@ pub struct ChatRequest {
     pub tools: Vec<ToolSpec>,
     pub max_tokens: u32,
     pub temperature: Option<f32>,
+    /// 这一发请求要不要关掉模型的思考环节。
+    ///
+    /// 由 `ModelConfig::disable_thinking` 与 runner 的自动兜底共同决定。
+    /// provider 按各自协议的官方写法翻译：OpenAI 兼容端点认
+    /// `thinking.type=disabled` 与 `chat_template_kwargs.enable_thinking=false`
+    /// （LongCat / 通义 / vLLM 这条 FaQ 走通了），Anthropic 认
+    /// `thinking.type=disabled`。
+    pub disable_thinking: bool,
     /// 是否把 assistant 的推理内容回灌给模型。
     ///
     /// DeepSeek-R1 一类的推理模型要求每轮都把上一轮的 `reasoning_content` 原样带回，
@@ -234,6 +251,48 @@ pub struct RunnerConfig {
     /// 系统提示词里 canvas RLE 窗口的字符预算。
     pub canvas_context_chars: usize,
     pub permission: PermissionMode,
+    /// 防死循环护栏：续写、重试、纯思考续写各自封顶。可在设置里改。
+    pub loop_limits: LoopLimits,
+}
+
+/// 运行护栏：把「续写、重试、只吐思考」三件事都封顶。
+///
+/// 模型再轴，这一轮也有收摊的时刻。没有这道闸，推理模型能把整轮预算全烧在
+/// 思考上，续写二十次还在想——用户盯着一个永远转圈的思考节点，什么也点不了。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LoopLimits {
+    /// 撞上输出上限后替用户自动续写几次。0 表示不续写，撞线就现形。
+    pub max_continuations: usize,
+    /// 一次请求失败后重发几次。0 表示失败立即现形。
+    pub max_retries: usize,
+    /// 连续几轮只吐推理、正文和工具调用一个都没有就收手。这条比续写总数更硬：
+    /// 「一直在想、始终不动笔」正是无限思考的形态，续写只会让它想得更久。
+    pub max_reasoning_continuations: usize,
+}
+
+impl LoopLimits {
+    /// 默认值。写成常量，好让 runner 的剧本测试按同一组数排 request。
+    pub const DEFAULT: LoopLimits = LoopLimits {
+        max_continuations: 20,
+        max_retries: 5,
+        max_reasoning_continuations: 2,
+    };
+
+    /// 把用户填的数收进合理区间。填 0 是合法意愿（关掉这项自动行为），
+    /// 填个十万只会把用户自己坑死，所以封顶。
+    pub fn clamped(mut self) -> Self {
+        self.max_continuations = self.max_continuations.min(50);
+        self.max_retries = self.max_retries.min(10);
+        self.max_reasoning_continuations = self.max_reasoning_continuations.min(10);
+        self
+    }
+}
+
+impl Default for LoopLimits {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
 }
 
 /// 图片附件的角色。快照只是上下文，参考图是用户的视觉真值——
@@ -283,6 +342,7 @@ impl Default for RunnerConfig {
             max_turns: 12,
             canvas_context_chars: 4096,
             permission: PermissionMode::Auto,
+            loop_limits: LoopLimits::default(),
         }
     }
 }
@@ -356,7 +416,7 @@ pub enum AgentEvent {
         turns: usize,
     },
     Error {
-        message: String,
+        message: UiText,
     },
     Interrupted,
 }

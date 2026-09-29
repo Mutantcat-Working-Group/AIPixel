@@ -118,6 +118,8 @@ pub fn brief_request(attachment: &Attachment, width: u32, height: u32) -> ChatRe
         temperature: None,
         // 简报是单轮请求，历史里没有推理内容可回灌。
         echo_reasoning: false,
+        // 读图简报同理：结论优先，省下的额度都给描述本身。
+        disable_thinking: true,
     }
 }
 
@@ -189,6 +191,7 @@ mod tests {
             model: "m".into(),
             max_tokens: None,
             temperature: None,
+            disable_thinking: None,
             capabilities: Default::default(),
         };
         let snap = Attachment {

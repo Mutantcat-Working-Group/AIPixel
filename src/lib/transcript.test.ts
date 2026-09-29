@@ -175,9 +175,9 @@ describe("reduceEvent", () => {
     expect(last.kind === "notice" && last.retry).toBe(true);
   });
 
-  // 续写是用户抱怨最狠的一处：状态说明只要变成独立条目，下一发 token
-  // 就会另起一个气泡，一轮回复被撕成两半，看着就像模型把话重写了一遍。
-  it("keeps a status notice inside the bubble it is streaming into", () => {
+  // 续写进度是后台机制，用户已经要求别再摆出来：那句话只会让人以为
+  // 模型在重写。聊天面板有时针和重试说明顶着，这一条就彻底不出现。
+  it("keeps continuation progress out of the transcript", () => {
     let entries = pushUserMessage([], "hi", []);
     entries = reduceEvent(entries, { kind: "token", text: "前半段" } as AgentEvent);
     entries = reduceEvent(entries, {
@@ -186,6 +186,28 @@ describe("reduceEvent", () => {
         key: "agent.continuing",
         vars: { done: 1, max: 20 },
         fallback: "continuing ({done} of {max})",
+      },
+    } as AgentEvent);
+
+    entries = reduceEvent(entries, { kind: "token", text: "后半段" } as AgentEvent);
+    expect(entries).toHaveLength(2);
+    const last = lastEntry(entries);
+    expect(last.kind).toBe("assistant");
+    expect(last.kind === "assistant" && last.text).toBe("前半段后半段");
+    expect(last.kind === "assistant" && last.caption).toBeUndefined();
+  });
+
+  // 状态说明一旦变成独立条目，下一发 token 就会另起一个气泡，
+  // 一轮回复被撕成两半，看着就像模型把话重写了一遍。
+  it("keeps a status notice inside the bubble it is streaming into", () => {
+    let entries = pushUserMessage([], "hi", []);
+    entries = reduceEvent(entries, { kind: "token", text: "前半段" } as AgentEvent);
+    entries = reduceEvent(entries, {
+      kind: "status",
+      message: {
+        key: "agent.thinking_off_retry",
+        vars: {},
+        fallback: "retrying with thinking turned off",
       },
     } as AgentEvent);
     expect(entries.some((entry) => entry.kind === "notice")).toBe(false);
@@ -197,7 +219,7 @@ describe("reduceEvent", () => {
     expect(last.kind).toBe("assistant");
     expect(last.kind === "assistant" && last.text).toBe("前半段后半段");
     expect(last.kind === "assistant" && last.caption).toBe(
-      "回答到了输出上限，正在接着写（第 1/20 次）",
+      "这个模型把预算全花在思考上了，一个工具都没调；已关掉思考重问一次",
     );
   });
 

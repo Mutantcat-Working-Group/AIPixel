@@ -31,6 +31,8 @@ pub async fn chat_once(
         temperature: config.temperature,
         // 单轮补写也可能挂着一截 reasoning，回灌口径跟着模型走。
         echo_reasoning: super::providers::echoes_reasoning(&config.model),
+        // 补写是接着断点往下写，思考只会把断点重复一遍。
+        disable_thinking: config.disable_thinking.unwrap_or(true),
     };
     let client = reqwest::Client::new();
     match config.protocol {
@@ -182,6 +184,7 @@ mod tests {
             model: "gpt".into(),
             max_tokens: None,
             temperature: None,
+            disable_thinking: None,
             capabilities: Default::default(),
         };
         let runtime = tokio::runtime::Builder::new_current_thread()

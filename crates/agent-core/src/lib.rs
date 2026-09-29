@@ -33,8 +33,8 @@ pub use mcp::{
 };
 pub use models::{
     ActiveContext, AgentEvent, ApprovalDecision, Attachment, AttachmentRole, Capabilities,
-    ChatRequest, ContentBlock, LlmEvent, Message, ModelConfig, PermissionMode, Protocol, Role,
-    RunnerConfig, ToolSpec, UiText,
+    ChatRequest, ContentBlock, LlmEvent, LoopLimits, Message, ModelConfig, PermissionMode,
+    Protocol, Role, RunnerConfig, ToolSpec, UiText,
 };
 pub use providers::{build_provider, EventStream, LlmProvider, ProviderError};
 pub use refine::{refine, RefineRequest, RefineTarget, RefinedPrompt};

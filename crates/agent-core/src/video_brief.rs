@@ -202,6 +202,8 @@ pub fn brief_request(
         temperature: None,
         // 简报是单轮请求，历史里没有推理内容可回灌。
         echo_reasoning: false,
+        // 简报要的是一段文字，别让模型先思前想后把 1500 额度烧光。
+        disable_thinking: true,
     }
 }
 
@@ -281,6 +283,7 @@ mod tests {
             model: "m".into(),
             max_tokens: None,
             temperature: None,
+            disable_thinking: None,
             capabilities: Default::default(),
         };
         // 端点不可达：真发出去会是 Network 错误，Config 错误才能证明没发。

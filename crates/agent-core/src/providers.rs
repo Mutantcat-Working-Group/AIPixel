@@ -796,7 +796,7 @@ impl LlmProvider for AnthropicProvider {
         if self.api_key.trim().is_empty() {
             return Err(ProviderError::Config("missing api key".into()));
         }
-        let body = json!({
+        let mut body = json!({
             "model": self.model,
             "max_tokens": req.max_tokens,
             "temperature": req.temperature,
@@ -809,6 +809,11 @@ impl LlmProvider for AnthropicProvider {
                 "input_schema": t.schema,
             })).collect::<Vec<_>>(),
         });
+        // Anthropic 默认就不思考，所以只在用户要求关的时候显式声明。
+        // 空字段不能写 null：端点会把 null 当非法值整条拒掉。
+        if req.disable_thinking {
+            body["thinking"] = json!({"type": "disabled"});
+        }
         let url = format!("{}/messages", self.base_url);
         let resp = self
             .client
@@ -850,7 +855,7 @@ impl LlmProvider for OpenAiCompatProvider {
         }
         let mut messages = vec![json!({"role": "system", "content": req.system})];
         messages.extend(to_openai_messages(&req.messages, req.echo_reasoning));
-        let body = json!({
+        let mut body = json!({
             "model": self.model,
             "max_tokens": req.max_tokens,
             "temperature": req.temperature,
@@ -866,6 +871,13 @@ impl LlmProvider for OpenAiCompatProvider {
                 },
             })).collect::<Vec<_>>(),
         });
+        // 关思考的两种写法都发：vLLM / 通义 / LongCat 走 chat_template_kwargs，
+        // 智谱一系走 thinking.type。认不出的端点当未知字段忽略，代价为零；
+        // 认出来的立刻从「想半天」切到「直接调工具」。
+        if req.disable_thinking {
+            body["thinking"] = json!({"type": "disabled"});
+            body["chat_template_kwargs"] = json!({"enable_thinking": false});
+        }
         let url = format!("{}/chat/completions", self.base_url);
         let resp = self
             .client

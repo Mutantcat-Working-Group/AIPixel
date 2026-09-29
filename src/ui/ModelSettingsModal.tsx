@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   Alert,
   Button,
@@ -11,10 +11,11 @@ import {
   Segmented,
   Tooltip,
 } from "antd";
-import { KeyRound, Plus, RefreshCw, Star, Trash2 } from "lucide-react";
+import { KeyRound, Plus, RefreshCw, RotateCcw, Star, Trash2 } from "lucide-react";
 
 import { useStore } from "../lib/store";
 import { maxTokensForModel, maxTokensHint } from "../lib/model-limits";
+import { DEFAULT_LOOP_LIMITS, type LoopLimits } from "../lib/types";
 import { LANG_OPTIONS, type Lang } from "../lib/i18n";
 import { useT } from "../lib/t";
 
@@ -44,6 +45,8 @@ interface FormShape {
   model: string;
   max_tokens: number | null;
   temperature: number | null;
+  /** 关掉思考的意愿。界面上只有两态：勾 = 每轮都关，不勾 = 交给程序判断。 */
+  disable_thinking: boolean;
   capabilities: Capabilities;
 }
 
@@ -69,6 +72,9 @@ function toForm(model: ModelView | null): FormShape {
       // 连思考带正文写到一半就被掐断，用户只会以为模型笨。
       max_tokens: maxTokensForModel("claude-sonnet-4-5"),
       temperature: null,
+      // 新模型默认「不干预」：有的模型关掉思考反而连工具都不会调，
+      // 谁更好得试过才知道，所以先留 null，让 runner 那次自动翻盘兜底。
+      disable_thinking: false,
       capabilities: { ...NO_CAPABILITIES },
     };
   }
@@ -81,16 +87,111 @@ function toForm(model: ModelView | null): FormShape {
     // 老配置没存 max_tokens 时，先按模型名给个常用上限，别让字段空着。
     max_tokens: model.max_tokens ?? maxTokensForModel(model.model),
     temperature: model.temperature,
+    disable_thinking: model.disable_thinking ?? false,
     capabilities: { ...model.capabilities },
   };
 }
 
-function ModelFragment({ title, hint }: { title: string; hint?: string }) {
+/** 设置项分组。右栏所有条目都归到某一组里，组与组之间留缝，扫一眼就找得到。 */
+function SettingsSection({
+  title,
+  hint,
+  children,
+}: {
+  title: string;
+  hint?: string;
+  children: ReactNode;
+}) {
   return (
-    <div className="doc-section-title">
-      <span>{title}</span>
-      {hint ? <span className="grow" style={{ textTransform: "none" }}>{hint}</span> : null}
-    </div>
+    <section className="settings-section">
+      <div className="settings-section-title">
+        <span>{title}</span>
+        {hint ? <span className="grow section-hint">{hint}</span> : null}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+/** 护栏的三个数字。Rust 会把越界的值夹回合理区间，回值才是真正生效的那份。 */
+function LimitsSection() {
+  const t = useT();
+  const limits = useStore((s) => s.loopLimits);
+  const saveLoopLimits = useStore((s) => s.saveLoopLimits);
+  // 存一下闪一下：护栏是即改即存的，没这点反馈用户不知道自己碰上没有。
+  const [justSaved, setJustSaved] = useState(false);
+
+  useEffect(() => {
+    if (!justSaved) return;
+    const timer = setTimeout(() => setJustSaved(false), 1500);
+    return () => clearTimeout(timer);
+  }, [justSaved]);
+
+  /** 改一个数就存一次：护栏的语义是「改完立刻生效」，不该等保存按钮。 */
+  function patch(key: keyof LoopLimits, value: number) {
+    void saveLoopLimits({ ...(limits ?? DEFAULT_LOOP_LIMITS), [key]: value });
+    setJustSaved(true);
+  }
+
+  const fields: { key: keyof LoopLimits; label: string; hint: string; max: number }[] = [
+    {
+      key: "max_continuations",
+      label: t("settings.limits.continuations"),
+      hint: t("settings.limits.continuations_hint"),
+      max: 50,
+    },
+    {
+      key: "max_retries",
+      label: t("settings.limits.retries"),
+      hint: t("settings.limits.retries_hint"),
+      max: 10,
+    },
+    {
+      key: "max_reasoning_continuations",
+      label: t("settings.limits.reasoning"),
+      hint: t("settings.limits.reasoning_hint"),
+      max: 10,
+    },
+  ];
+
+  return (
+    <SettingsSection title={t("settings.limits")}>
+      <p className="settings-blurb">{t("settings.limits_hint")}</p>
+      {fields.map((field) => (
+        <div className="limit-row" key={field.key}>
+          <div className="limit-text">
+            <span className="limit-label">{field.label}</span>
+            <span className="limit-hint">{field.hint}</span>
+          </div>
+          <InputNumber
+            min={0}
+            max={field.max}
+            value={limits ? limits[field.key] : ""}
+            disabled={!limits}
+            style={{ width: 96 }}
+            onChange={(value) => {
+              // 清空 InputNumber 拿到的是空串，那是「一个都不要」，按 0 收。
+              patch(field.key, typeof value === "number" ? value : 0);
+            }}
+          />
+        </div>
+      ))}
+      <div className="limit-reset">
+        <span className="grow inline-note">
+          {justSaved ? t("settings.limits.saved") : null}
+        </span>
+        <Button
+          size="small"
+          icon={<RotateCcw size={12} />}
+          onClick={() => {
+            void saveLoopLimits(DEFAULT_LOOP_LIMITS);
+            setJustSaved(true);
+          }}
+        >
+          {t("settings.limits.reset")}
+        </Button>
+      </div>
+    </SettingsSection>
   );
 }
 
@@ -221,6 +322,10 @@ export default function ModelSettingsModal() {
       model: values.model.trim(),
       max_tokens: values.max_tokens ?? null,
       temperature: values.temperature ?? null,
+      // 勾上 = Some(true)（每轮都关）；不勾 = null（交给 runner 的自动翻盘）。
+      // Some(false) 没有对应控件：那等于「明知它光想不动笔也要让它想」，
+      // 想看思考过程的人留着「会思考」勾选就够了。
+      disable_thinking: values.disable_thinking ? true : null,
       capabilities: values.capabilities ?? { ...NO_CAPABILITIES },
     };
     try {
@@ -280,7 +385,7 @@ export default function ModelSettingsModal() {
         </Button>
       </div>
 
-      <div className="model-form">
+      <div className="model-pane">
         <div className="model-lang">
           <span className="model-lang-label">{t("settings.language")}</span>
           <Segmented
@@ -290,7 +395,10 @@ export default function ModelSettingsModal() {
             onChange={(value) => setLang(value as Lang)}
           />
         </div>
-        <Form<FormShape> form={form} layout="vertical" requiredMark={false} preserve={false}>
+
+        {/* 右栏整块滚：分组标题、分工、护栏、关于都在里面，动作条钉在下面。 */}
+        <Form<FormShape> className="model-scroll" form={form} layout="vertical" requiredMark={false} preserve={false}>
+          <SettingsSection title={t("settings.connection")} hint={t("settings.connection_hint")}>
           <Form.Item
             name="label"
             label={t("settings.name")}
@@ -304,6 +412,14 @@ export default function ModelSettingsModal() {
           </Form.Item>
 
           <Form.Item
+            name="model"
+            label={t("settings.model")}
+            rules={[{ required: true, message: t("settings.model_required") }]}
+          >
+            <Input placeholder={t("settings.model_placeholder")} spellCheck={false} />
+          </Form.Item>
+
+          <Form.Item
             name="base_url"
             label={t("settings.base_url")}
             rules={[{ required: true, message: t("settings.base_url_required") }]}
@@ -311,13 +427,6 @@ export default function ModelSettingsModal() {
             <Input placeholder={t("settings.base_url_placeholder")} spellCheck={false} />
           </Form.Item>
 
-          <Form.Item
-            name="model"
-            label={t("settings.model")}
-            rules={[{ required: true, message: t("settings.model_required") }]}
-          >
-            <Input placeholder={t("settings.model_placeholder")} spellCheck={false} />
-          </Form.Item>
           <Form.Item name="api_key" label={t("settings.api_key")}>
             <Input.Password
               placeholder={
@@ -330,13 +439,6 @@ export default function ModelSettingsModal() {
             />
           </Form.Item>
 
-          <Form.Item
-            name="model"
-            label={t("settings.model")}
-            rules={[{ required: true, message: t("settings.model_required") }]}
-          >
-            <Input placeholder={t("settings.model_placeholder")} spellCheck={false} />
-          </Form.Item>
           <div className="model-fetch">
             <Button
               size="small"
@@ -361,7 +463,9 @@ export default function ModelSettingsModal() {
             {note ? <span className="model-fetch-note">{note}</span> : null}
           </div>
 
-          <ModelFragment title={t("settings.sampling")} />
+          </SettingsSection>
+
+          <SettingsSection title={t("settings.sampling")} hint={t("settings.sampling_hint")}>
           <Form.Item
             name="max_tokens"
             label={t("settings.max_tokens")}
@@ -376,10 +480,18 @@ export default function ModelSettingsModal() {
           <Form.Item name="temperature" label={t("settings.temperature")}>
             <InputNumber min={0} max={2} step={0.1} style={{ width: "100%" }} />
           </Form.Item>
-          <ModelFragment
+          <div className="settings-switch-row">
+            <Form.Item name="disable_thinking" valuePropName="checked" noStyle>
+              <Checkbox>{t("settings.disable_thinking")}</Checkbox>
+            </Form.Item>
+          </div>
+          <div className="settings-switch-hint">{t("settings.disable_thinking_hint")}</div>
+          </SettingsSection>
+
+          <SettingsSection
             title={t("settings.capabilities")}
             hint={t("settings.capabilities_hint")}
-          />
+          >
           <div className="cap-grid">
             {capabilityFields.map((field) => (
               <Tooltip key={field.key} title={field.hint}>
@@ -389,9 +501,9 @@ export default function ModelSettingsModal() {
               </Tooltip>
             ))}
           </div>
-        </Form>
+          </SettingsSection>
 
-        <ModelFragment title={t("roles.title")} hint={t("roles.hint")} />
+        <SettingsSection title={t("roles.title")} hint={t("roles.hint")}>
         {activeSession ? (
           <div className="role-list">
             {DETACHABLE_ROLES.map(({ role, labelKey }) => {
@@ -427,10 +539,40 @@ export default function ModelSettingsModal() {
         ) : (
           <div className="role-empty">{t("roles.session_needed")}</div>
         )}
+        </SettingsSection>
+
+        <LimitsSection />
+
+        <SettingsSection title={t("about.title")}>
+          <div className="about-block">
+            <p className="about-blurb">{t("about.blurb")}</p>
+            <div className="about-row">
+              <span className="about-key">{t("about.publisher")}</span>
+              <span className="about-val">{t("about.publisher_value")}</span>
+            </div>
+            <div className="about-row">
+              <span className="about-key">{t("about.site")}</span>
+              <a className="about-val" href={PUBLISHER_SITE} target="_blank" rel="noreferrer">
+                mutantcat.org
+              </a>
+            </div>
+            <div className="about-row">
+              <span className="about-key">{t("about.repo")}</span>
+              <a className="about-val" href={REPO_URL} target="_blank" rel="noreferrer">
+                {REPO_URL.replace("https://", "")}
+              </a>
+            </div>
+            <div className="about-row">
+              <span className="about-key">{t("about.version")}</span>
+              <span className="about-val">{__APP_VERSION__}</span>
+            </div>
+          </div>
+        </SettingsSection>
 
         {error ? <Alert type="error" message={error} showIcon /> : null}
+        </Form>
 
-        <div className="model-form-actions">
+      <div className="model-form-actions">
           <span className="inline-note">
             <KeyRound size={11} />
             {selected?.has_api_key ? t("settings.key_stored") : t("settings.no_key_stored")}
@@ -456,31 +598,6 @@ export default function ModelSettingsModal() {
               </Button>
             </>
           ) : null}
-        </div>
-
-        <ModelFragment title={t("about.title")} />
-        <div className="about-block">
-          <p className="about-blurb">{t("about.blurb")}</p>
-          <div className="about-row">
-            <span className="about-key">{t("about.publisher")}</span>
-            <span className="about-val">{t("about.publisher_value")}</span>
-          </div>
-          <div className="about-row">
-            <span className="about-key">{t("about.site")}</span>
-            <a className="about-val" href={PUBLISHER_SITE} target="_blank" rel="noreferrer">
-              mutantcat.org
-            </a>
-          </div>
-          <div className="about-row">
-            <span className="about-key">{t("about.repo")}</span>
-            <a className="about-val" href={REPO_URL} target="_blank" rel="noreferrer">
-              {REPO_URL.replace("https://", "")}
-            </a>
-          </div>
-          <div className="about-row">
-            <span className="about-key">{t("about.version")}</span>
-            <span className="about-val">{__APP_VERSION__}</span>
-          </div>
         </div>
       </div>
     </Modal>

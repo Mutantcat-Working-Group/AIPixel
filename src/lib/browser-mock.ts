@@ -18,6 +18,7 @@ import { publishLocal } from "./local-bus";
 import { rgbaToHex } from "./palette";
 import { compositeFrame } from "./render";
 import type {
+  LoopLimits,
   McpServerView,
   McpServersView,
   ModelView,
@@ -130,6 +131,7 @@ const MODEL: ModelView = {
   model: "gpt-4o-mini",
   max_tokens: 16384,
   temperature: 0.7,
+  disable_thinking: null,
   capabilities: { vision: true, image_gen: false, video: false, reasoning: true },
   has_api_key: true,
 };
@@ -234,6 +236,11 @@ const FETCHABLE = [
 
 let doc = makeDocument();
 let revision = 1;
+let LIMITS: LoopLimits = {
+  max_continuations: 20,
+  max_retries: 5,
+  max_reasoning_continuations: 2,
+};
 
 function mcpList(): McpServersView {
   const server: McpServerView = {
@@ -313,6 +320,11 @@ function handler(cmd: string, raw?: unknown): unknown {
   switch (cmd) {
     case "agent_list_models":
       return emptyModels ? { active_id: "", entries: [] } : { active_id: MODEL.id, entries: [MODEL] };
+    case "agent_loop_limits":
+      return LIMITS;
+    case "agent_set_loop_limits":
+      LIMITS = { ...(payload.limits as typeof LIMITS) };
+      return LIMITS;
     case "agent_document":
       return { id, revision, document: doc };
     case "agent_history":

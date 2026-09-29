@@ -236,6 +236,9 @@ export function reduceEvent(
       return next;
     }
     case "status": {
+      // 续写进度是后台机制：撞输出上限这种事情用户不需要看见两次
+      // （计时器和重试说明已经足够），只把「正在重发」这种要等的留在界面上。
+      if (event.message.key === "agent.continuing") return entries;
       const note = renderUiText(lang, event.message);
       // 正文正在往外流的时候，状态说明贴在同一个气泡的底部：另起一条 notice
       // 会把 live 气泡顶到最后一位之外，下一个 token 就换个新气泡接着写，
@@ -254,7 +257,13 @@ export function reduceEvent(
     case "error": {
       return [
         ...entries,
-        { key: key(), kind: "notice", text: event.message, isError: true, retry: true },
+        {
+          key: key(),
+          kind: "notice",
+          text: renderUiText(lang, event.message),
+          isError: true,
+          retry: true,
+        },
       ];
     }
     case "interrupted": {

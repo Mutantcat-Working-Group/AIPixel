@@ -77,6 +77,8 @@ export interface ModelConfig {
   model: string;
   max_tokens: number | null;
   temperature: number | null;
+  /** 关掉模型的思考环节。null = 不干预，只留 runner 那次自动翻盘。 */
+  disable_thinking?: boolean | null;
   capabilities: Capabilities;
 }
 
@@ -89,6 +91,7 @@ export interface ModelView {
   model: string;
   max_tokens: number | null;
   temperature: number | null;
+  disable_thinking: boolean | null;
   capabilities: Capabilities;
   has_api_key: boolean;
 }
@@ -175,6 +178,22 @@ export interface Attachment {
   data_base64: string;
 }
 
+/** 运行护栏：续写、重试、纯思考各自封顶。与 Rust 的 LoopLimits 字段名逐字对齐。
+ * 填 0 是合法意愿（关掉这项自动行为），所以不能用 undefined 表示「没填」。 */
+export interface LoopLimits {
+  max_continuations: number;
+  max_retries: number;
+  max_reasoning_continuations: number;
+}
+
+/** 护栏默认值。Rust 的 `LoopLimits::DEFAULT` 才是权威，这里只是「恢复默认」
+ * 按钮需要一份能写回去的镜像；两处不同步时以 Rust 为准。 */
+export const DEFAULT_LOOP_LIMITS: LoopLimits = {
+  max_continuations: 20,
+  max_retries: 5,
+  max_reasoning_continuations: 2,
+};
+
 /** AgentEvent 的 kind tag，snake_case。 */
 export type AgentEvent =
   | { kind: "status"; message: UiText }
@@ -191,7 +210,8 @@ export type AgentEvent =
   | { kind: "document_updated"; revision: number; document: PixelDocument }
   | { kind: "usage"; input_tokens: number | null; output_tokens: number | null }
   | { kind: "completed"; turns: number }
-  | { kind: "error"; message: string }
+  // 报错也是键控的：Rust 只给键和变量，界面语言跟着前端的字典走。
+  | { kind: "error"; message: UiText }
   | { kind: "interrupted" };
 
 export interface Usage {

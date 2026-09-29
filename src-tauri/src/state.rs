@@ -5,7 +5,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use agent_core::{AgentSession, Capabilities, McpRegistry, McpServerConfig, ModelConfig, Protocol};
+use agent_core::{
+    AgentSession, Capabilities, LoopLimits, McpRegistry, McpServerConfig, ModelConfig, Protocol,
+    RunnerConfig,
+};
 use pixel_core::document::Document;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
@@ -27,6 +30,22 @@ impl ModelsFile {
     }
 }
 
+/// 运行护栏配置文件。与模型配置分开存：改护栏不该牵动 api_key，
+/// 用户也方便把护栏单独发给别人复现一次「跑偏了」的现场。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LimitsFile {
+    #[serde(default)]
+    pub limits: LoopLimits,
+}
+
+impl Default for LimitsFile {
+    fn default() -> Self {
+        Self {
+            limits: LoopLimits::DEFAULT,
+        }
+    }
+}
+
 /// 回给前端的模型视图：不把 api_key 送到 webview，只告诉它「配过没有」。
 #[derive(Debug, Clone, Serialize)]
 pub struct ModelView {
@@ -37,6 +56,9 @@ pub struct ModelView {
     pub model: String,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
+    /// 要不要每轮都关掉思考。透出的是用户意愿本身：`null` = 不干预（保留
+    /// runner 那次自动翻盘），勾上 = 始终关，取消 = 用户要留着思考看。
+    pub disable_thinking: Option<bool>,
     /// 用户勾选的能力；只透出布尔，不涉及任何凭证。
     pub capabilities: Capabilities,
     pub has_api_key: bool,
@@ -51,6 +73,8 @@ pub struct ModelsView {
 pub struct AppState {
     sessions: Mutex<HashMap<String, Arc<AgentSession>>>,
     models: Mutex<ModelsFile>,
+    /// 运行护栏：续写、重试、纯思考的封顶值。所有会话共用一份。
+    limits: Mutex<LoopLimits>,
     /// MCP 服务器登记表：配置的唯一真相，mcp.json 只是它的落盘影子。
     mcp: Arc<McpRegistry>,
     config_dir: Mutex<PathBuf>,
@@ -62,6 +86,7 @@ impl Default for AppState {
         AppState {
             sessions: Mutex::new(HashMap::new()),
             models: Mutex::new(ModelsFile::default()),
+            limits: Mutex::new(LoopLimits::DEFAULT),
             mcp: Arc::new(McpRegistry::new()),
             config_dir: Mutex::new(PathBuf::new()),
             counter: Mutex::new(0),
@@ -79,6 +104,7 @@ impl AppState {
         std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create config dir: {e}"))?;
         *self.config_dir.lock().unwrap() = dir;
         self.load_models();
+        self.load_limits();
         self.schedule_mcp_recovery();
         Ok(())
     }
@@ -136,6 +162,30 @@ impl AppState {
         self.config_dir.lock().unwrap().join("models.json")
     }
 
+    fn limits_path(&self) -> PathBuf {
+        self.config_dir.lock().unwrap().join("limits.json")
+    }
+
+    fn load_limits(&self) {
+        let path = self.limits_path();
+        // 读不出来（不存在、字段错位、被手改坏）都退回默认值：护栏是兜底，
+        // 不该因为一个坏文件让整个工具起不来。
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        let Ok(file) = serde_json::from_str::<LimitsFile>(&text) else {
+            return;
+        };
+        *self.limits.lock().unwrap() = file.limits;
+    }
+
+    fn save_limits(&self) {
+        let snapshot = *self.limits.lock().unwrap();
+        if let Ok(text) = serde_json::to_string_pretty(&LimitsFile { limits: snapshot }) {
+            let _ = std::fs::write(self.limits_path(), text);
+        }
+    }
+
     fn load_models(&self) {
         let path = self.models_path();
         let Ok(text) = std::fs::read_to_string(&path) else {
@@ -168,6 +218,7 @@ impl AppState {
                     model: m.model.clone(),
                     max_tokens: m.max_tokens,
                     temperature: m.temperature,
+                    disable_thinking: m.disable_thinking,
                     capabilities: m.capabilities,
                     has_api_key: !m.api_key.trim().is_empty(),
                 })
@@ -190,6 +241,7 @@ impl AppState {
             model: String::new(),
             max_tokens: None,
             temperature: None,
+            disable_thinking: None,
             capabilities: Capabilities::default(),
         }
     }
@@ -285,15 +337,41 @@ impl AppState {
         self.sessions.lock().unwrap().keys().cloned().collect()
     }
 
+    /// 当前护栏值。启动时是默认值，用户在设置里改过就一直是改过的那份。
+    pub fn limits(&self) -> LoopLimits {
+        *self.limits.lock().unwrap()
+    }
+
+    /// 存护栏并推到所有活着的会话上。下一轮请求才会读到新值，
+    /// 已经在飞的那一轮按老规矩收摊——打断一次请求只会更难看。
+    pub fn set_limits(&self, limits: LoopLimits) {
+        let limits = limits.clamped();
+        *self.limits.lock().unwrap() = limits;
+        let sessions: Vec<Arc<AgentSession>> =
+            self.sessions.lock().unwrap().values().cloned().collect();
+        for session in sessions {
+            let mut cfg = session.runner_config();
+            cfg.loop_limits = limits;
+            session.set_runner_config(cfg);
+        }
+        self.save_limits();
+    }
+
     /// 建会话并按当前生效模型绑定 provider。
     pub fn create_session(&self, document: Document) -> Arc<AgentSession> {
         let mut counter = self.counter.lock().unwrap();
         *counter += 1;
         let id = format!("s{}", *counter);
         drop(counter);
+        // 新会话第一轮就得带上当前护栏：在这里漏掉，用户改完设置还得开个新会话才生效。
+        let runner_config = RunnerConfig {
+            loop_limits: self.limits(),
+            ..RunnerConfig::default()
+        };
         let session = Arc::new(
             AgentSession::new(id.clone(), self.active_config(), document)
-                .with_mcp_registry(self.mcp.clone()),
+                .with_mcp_registry(self.mcp.clone())
+                .with_runner_config(runner_config),
         );
         self.sessions
             .lock()

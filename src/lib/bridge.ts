@@ -18,6 +18,7 @@ import type {
   BatchScan,
   EditorOperation,
   InkColor,
+  LoopLimits,
   Message,
   McpServerConfig,
   McpServersView,
@@ -62,6 +63,16 @@ export function removeModel(id: string): Promise<ModelsView> {
 
 export function setActiveModel(id: string): Promise<ModelsView> {
   return invoke<ModelsView>("model_set_active", { id });
+}
+
+/** 运行护栏当前值：续写、重试、纯思考各自封顶。 */
+export function loopLimits(): Promise<LoopLimits> {
+  return invoke<LoopLimits>("agent_loop_limits");
+}
+
+/** 存运行护栏。Rust 会把它夹到合理区间再落盘，所以回值才是真正生效的那份。 */
+export function setLoopLimits(limits: LoopLimits): Promise<LoopLimits> {
+  return invoke<LoopLimits>("agent_set_loop_limits", { limits });
 }
 
 /** 拉 provider 的模型清单。id 只为「沿用本机已存密钥」而传，不参与请求本身。 */

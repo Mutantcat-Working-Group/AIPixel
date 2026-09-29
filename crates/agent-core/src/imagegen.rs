@@ -485,6 +485,7 @@ mod tests {
             model: "claude".into(),
             max_tokens: None,
             temperature: None,
+            disable_thinking: None,
             capabilities: Default::default(),
         };
         let gen = build_image_generator(&config);
@@ -505,6 +506,7 @@ mod tests {
             model: "m".into(),
             max_tokens: None,
             temperature: None,
+            disable_thinking: None,
             capabilities: Default::default(),
         };
         let gen = build_image_generator(&config);
@@ -642,6 +644,7 @@ mod tests {
             model: "mock-model".into(),
             max_tokens: None,
             temperature: None,
+            disable_thinking: None,
             capabilities: Default::default(),
         }
     }

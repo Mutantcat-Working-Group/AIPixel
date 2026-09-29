@@ -5,6 +5,7 @@
 //! - 模型永远不手写矩阵：所有绘制经由 `tools::execute`（ops / Lua 沙箱 / RLE 读回）。
 //! - 预算：`max_tool_steps`（单 turn 工具步数）、`max_turns`（工具跑完再来一问的次数）、
 //!   `max_tool_result_bytes`（回灌截断），外加「同一个失败调用连续 3 次」的退避保护。
+//! - 护栏：`loop_limits` 给续写、重试、纯思考续写分别封顶。模型再轴也有收摊的时刻。
 //! - 没说完的话：stop reason 是 `max_tokens` / `length` 就自动续写，最多 5 次；
 //!   请求失败（网络、假死）按 1s/2s/4s/8s 退避重发，最多 5 次。
 //! - 中断：流式期间按 120ms 轮询取消标志，`interrupt()` 立刻收尾并回 `Interrupted`。
@@ -90,7 +91,10 @@ impl IdleWatch {
 /// 取 20 而不是 5：按常用模型的 64k 上限算，这相当于一百三十万 token 的总产出，
 /// 对一段分镜脚本来说就是「写不完不收手」。真正的刹车是 `continuation_progressed`——
 /// 模型一旦开始原地复读，第一发就收，不会白烧二十次。
-const MAX_CONTINUATIONS: usize = 20;
+///
+#[cfg(test)]
+// 这只是默认值，用户在设置里能调；`LoopLimits::DEFAULT` 是同一组数的唯一出处。
+const MAX_CONTINUATIONS: usize = crate::models::LoopLimits::DEFAULT.max_continuations;
 
 /// 续写一次至少要吐出这么多个字符，否则算没推进。
 const MIN_CONTINUATION_GAIN: usize = 24;
@@ -133,18 +137,35 @@ fn resolve_max_tokens(user: Option<u32>, model: &str, ceiling: Option<u32>) -> u
 }
 
 /// 一次请求失败后最多重试几次：网络抖动、连接被代理掐断、流直接报错。
-const MAX_ROUND_RETRIES: usize = 5;
+///
+#[cfg(test)]
+// 同样只是默认值，用户能在设置里把它调到 0（失败立即现形）或更大。
+const MAX_ROUND_RETRIES: usize = crate::models::LoopLimits::DEFAULT.max_retries;
+
+/// 连续几轮只吐推理就收手。
+///
+/// 推理模型最常见的死法：整轮预算全烧在思考上，正文一个字没有，工具一个不调。
+/// 这种轮次当然值得续（见 `a_round_that_only_thought_is_still_progress`），
+/// 但续写的上限必须比正文续写紧得多——要三轮还在想，说明它根本不想动笔，
+#[cfg(test)]
+// 再要二十次也只是让用户盯着一个空转的思考节点。
+const MAX_REASONING_CONTINUATIONS: usize =
+    crate::models::LoopLimits::DEFAULT.max_reasoning_continuations;
 
 /// 这次失败值不值得重发。
 ///
 /// 网络抖、连接被代理掐、流解析到一半断了、限流 429、5xx——换个时间再来就好。
-/// 而 400/401/403/404 是请求本身就不被接受，重发五次只是让用户盯着五个
-/// 一模一样的报错干等半分钟。
+/// 而 400/401/404/413/422 是请求本身写错了：key 不对、模型名打错、路径没挂上，
+/// 原样重发多少次都是同一个报错，所以立刻现形，让用户去改配置。
+///
+/// 403 走另一条路：它看着像「服务器不答应」，可 `permission_denied_error` 里有
+/// 相当一部分是网关侧的限流窗口、令牌套餐切换、区域策略在作怪，等一等就放行。
+/// 宁可让用户等十几秒看到同一个 403，也不能把一条其实能跑通的请求判死。
 fn retryable(err: &ProviderError) -> bool {
     match err {
         ProviderError::Network(_) | ProviderError::Decode(_) => true,
         ProviderError::Http { status, .. } => {
-            (408..=429).contains(status) || (500..=599).contains(status)
+            matches!(*status, 403 | 408 | 409 | 425 | 429) || (500..=599).contains(status)
         }
         ProviderError::Config(_) => false,
     }
@@ -196,6 +217,17 @@ fn continuation_progressed(carried: &str, fresh: &str) -> bool {
 /// 重试退避：1s、2s、4s、8s，之后封顶。失败不该把用户晾在原地干等。
 fn retry_backoff(attempt: usize) -> Duration {
     Duration::from_millis(1000u64 << attempt.saturating_sub(1).min(3))
+}
+
+/// 重发前的退避等待。
+///
+/// 测试里整段跳过：一组五次重试真要等 23 秒，而假 provider 的剧本一秒就能走完。
+#[cfg(test)]
+async fn pause_before_retry(_attempt: usize) {}
+
+#[cfg(not(test))]
+async fn pause_before_retry(attempt: usize) {
+    tokio::time::sleep(retry_backoff(attempt)).await;
 }
 
 /// 一次回复是怎么收场的：模型自己说完了，还是被输出上限掐断了。
@@ -568,7 +600,7 @@ impl AgentSession {
             emit(
                 &tx,
                 AgentEvent::Error {
-                    message: "empty message".into(),
+                    message: UiText::new("agent.empty_message", "empty message"),
                 },
             );
             return;
@@ -610,6 +642,15 @@ impl AgentSession {
         let mut continuations = 0usize;
         let mut retries = 0usize;
 
+        // 关思考：用户钉死（Some）就照办；没钉死（None）先按模型默认来，
+        // 但保留一次自动翻盘的机会——见下面 retry 小循环里的兜底。
+        let pinned_thinking = {
+            let engine = self.engine.lock().unwrap();
+            engine.config.disable_thinking
+        };
+        let mut thinking_off = pinned_thinking.unwrap_or(false);
+        let mut thinking_off_tried = pinned_thinking.is_some();
+
         loop {
             if self.is_cancelled() {
                 emit(&tx, AgentEvent::Interrupted);
@@ -622,10 +663,11 @@ impl AgentSession {
                 emit(
                     &tx,
                     AgentEvent::Error {
-                        message: format!(
-                            "turn budget exhausted after {} round(s)",
-                            runner_config.max_turns
-                        ),
+                        message: UiText::new(
+                            "agent.turn_budget",
+                            "this turn ran out of rounds after {rounds} edit(s); start a new message to keep going",
+                        )
+                        .with("rounds", runner_config.max_turns as u64),
                     },
                 );
                 return;
@@ -641,6 +683,8 @@ impl AgentSession {
             let mut token_ceiling: Option<u32> = None;
             // provider 报的 stop reason 明明是「说完了」，结尾却断在半截。
             let mut inferred_cut = false;
+            // 连续几轮只吐推理、没动笔。护栏里的硬闸，理由见 MAX_REASONING_CONTINUATIONS。
+            let mut thinking_only = 0usize;
             // 重试与续写都收在这个小循环里。请求每一发都重装：历史里刚 push 的
             // 半截回复必须在这发请求里生效，不然就是白续一次。
             let mut raw: RoundRaw = loop {
@@ -649,7 +693,7 @@ impl AgentSession {
                     emit(&tx, AgentEvent::Interrupted);
                     return;
                 }
-                let request = self.chat_request(&runner_config, token_ceiling);
+                let request = self.chat_request(&runner_config, token_ceiling, thinking_off);
 
                 let stream = match provider.request(&request).await {
                     Ok(stream) => stream,
@@ -671,7 +715,7 @@ impl AgentSession {
                         }
                         // 发不出去：网络抖动、代理掐线、base_url 填错。比起把一句
                         // 「失败」摔在用户脸上，按退避重发更有人味。
-                        if retries < MAX_ROUND_RETRIES && retryable(&e) {
+                        if retries < runner_config.loop_limits.max_retries && retryable(&e) {
                             retries += 1;
                             emit(
                                 &tx,
@@ -679,17 +723,17 @@ impl AgentSession {
                                     message: retrying_status(
                                         &e.to_string(),
                                         retries,
-                                        MAX_ROUND_RETRIES,
+                                        runner_config.loop_limits.max_retries,
                                     ),
                                 },
                             );
-                            tokio::time::sleep(retry_backoff(retries)).await;
+                            pause_before_retry(retries).await;
                             continue;
                         }
                         emit(
                             &tx,
                             AgentEvent::Error {
-                                message: e.to_string(),
+                                message: request_failed(&e.to_string()),
                             },
                         );
                         return;
@@ -705,22 +749,54 @@ impl AgentSession {
                     return;
                 }
                 if let Some(failure) = raw.failure.take() {
-                    if retries < MAX_ROUND_RETRIES && raw.retryable_failure {
+                    if retries < runner_config.loop_limits.max_retries && raw.retryable_failure {
                         retries += 1;
                         emit(
                             &tx,
                             AgentEvent::Status {
-                                message: retrying_status(&failure, retries, MAX_ROUND_RETRIES),
+                                message: retrying_status(
+                                    &failure,
+                                    retries,
+                                    runner_config.loop_limits.max_retries,
+                                ),
                             },
                         );
-                        tokio::time::sleep(retry_backoff(retries)).await;
+                        pause_before_retry(retries).await;
                         continue;
                     }
-                    emit(&tx, AgentEvent::Error { message: failure });
+                    emit(
+                        &tx,
+                        AgentEvent::Error {
+                            message: request_failed(&failure),
+                        },
+                    );
                     return;
                 }
                 retries = 0;
                 // 这一轮确实收到了东西，失败额度重新算：下次失误仍该有五次机会。
+
+                // 模型拿着工具，却把一轮额度全烧在思考上，正事一件没干。这类模型
+                // （LongCat、DeepSeek-R1 一系）默认就爱想，得让它先把嘴闭上：
+                // 关掉思考重问一次，它立刻就调工具去了。整个 turn 只翻一次盘，
+                // 翻完还不行就照旧走续写那条路，别再翻第二次。
+                // 只认「正文一个字没有」：正文被掐断是另一种病，走续写，别抢。
+                if raw.stop == StopKind::Truncated
+                    && raw.accumulator.is_empty()
+                    && raw.text.is_empty()
+                    && !raw.reasoning.is_empty()
+                    && !request.tools.is_empty()
+                    && !thinking_off_tried
+                {
+                    thinking_off_tried = true;
+                    thinking_off = true;
+                    emit(
+                        &tx,
+                        AgentEvent::Status {
+                            message: thinking_off_status(),
+                        },
+                    );
+                    continue;
+                }
 
                 // 有的平台撞了上限也不吭声。文字断在半截就当它掐了：续写会把
                 // 剩下半截接上。猜错也不要紧，见收场处的处理。
@@ -734,7 +810,7 @@ impl AgentSession {
                 // 话没说完就接着问。前半截已经逐字推给前端了，续写只是继续追加，
                 // 用户看到的是一段完整输出，而不是半句摆在屏幕上。
                 if raw.stop == StopKind::Truncated && raw.resumable() {
-                    if continuations >= MAX_CONTINUATIONS {
+                    if continuations >= runner_config.loop_limits.max_continuations {
                         break raw;
                     }
                     // 这一轮写下的全部内容：推理算，正文也算。只认正文的话，
@@ -745,13 +821,28 @@ impl AgentSession {
                         stalled = true;
                         break raw;
                     }
+                    // 只吐推理没动笔：正文一个字没有，工具调用一个没发。这种续写
+                    // 要得着，但见好就收——再要下去它只会把下一轮预算也全烧在
+                    // 思考上，用户盯着的是一个永远不画画的思考节点。
+                    if raw.text.is_empty() && raw.accumulator.is_empty() {
+                        thinking_only += 1;
+                        if thinking_only > runner_config.loop_limits.max_reasoning_continuations {
+                            stalled = true;
+                            break raw;
+                        }
+                    } else {
+                        thinking_only = 0;
+                    }
                     carried.push_str(&fresh);
                     continuations += 1;
                     self.push_resume(&raw, &continue_nudge(&carried));
                     emit(
                         &tx,
                         AgentEvent::Status {
-                            message: continuing_status(continuations, MAX_CONTINUATIONS),
+                            message: continuing_status(
+                                continuations,
+                                runner_config.loop_limits.max_continuations,
+                            ),
                         },
                     );
                     continue;
@@ -767,19 +858,28 @@ impl AgentSession {
                 // 别拿一句报错把好好一条回复判成失败。
                 let wrong_guess = stalled && inferred_cut;
                 if !wrong_guess {
-                    let message = if stalled {
+                    let message = if thinking_only > 0 {
+                        // 无限思考：钱全烧在推理上，画一笔都没动。得把出路说清楚，
+                        // 不然用户只会反复重试同一条消息。
+                        stalled_thinking_message(thinking_only)
+                    } else if stalled {
                         // 「原样再写一遍」和「几乎没吐新东西」都走这一条，
                         // 话说得太死会冤枉了后者。
-                        "the reply stopped making progress: the model either repeated text it had already written or produced almost nothing new, so the run stopped at the point shown above"
-                            .to_string()
-                    } else if raw.resumable() {
-                        format!(
-                            "the reply still hit the output limit after {} continuation(s); raise Max tokens in model settings and resend your request",
-                            continuations
+                        UiText::new(
+                            "agent.stalled",
+                            "the reply stopped making progress: the model either repeated text it had already written or produced almost nothing new, so the run stopped at the point shown above",
                         )
+                    } else if raw.resumable() {
+                        UiText::new(
+                            "agent.output_limit",
+                            "the reply still hit the output limit after {done} continuation(s); raise Max tokens in model settings and resend your request",
+                        )
+                        .with("done", continuations as u64)
                     } else {
-                        "the model produced nothing before the output limit; raise Max tokens in model settings"
-                            .to_string()
+                        UiText::new(
+                            "agent.output_limit_empty",
+                            "the model produced nothing before the output limit; raise Max tokens in model settings",
+                        )
                     };
                     emit(&tx, AgentEvent::Error { message });
                     return;
@@ -881,7 +981,11 @@ impl AgentSession {
                     emit(
                         &tx,
                         AgentEvent::Error {
-                            message: format!("tool step budget exhausted after {steps} step(s)"),
+                            message: UiText::new(
+                                "agent.tool_budget",
+                                "this turn ran out of tool steps after {steps} step(s); start a new message to keep going",
+                            )
+                            .with("steps", steps as u64),
                         },
                     );
                     return;
@@ -996,7 +1100,10 @@ impl AgentSession {
                         emit(
                             &tx,
                             AgentEvent::Error {
-                                message: "the same tool call failed three times in a row; stopping so you can adjust the request".into(),
+                                message: UiText::new(
+                                    "agent.same_call_failed",
+                                    "the same tool call failed three times in a row; stopping so you can adjust the request",
+                                ),
                             },
                         );
                         return;
@@ -1026,7 +1133,7 @@ impl AgentSession {
     /// 组装一轮请求。抽出来是因为重试和续写都要重新发一次请求：
     /// 历史每条消息都锁一次会碎，合成一次才看得出「这一轮到底发了什么」。
     /// 锁顺序固定为 document -> active -> messages，全程一致，不会自锁。
-    fn chat_request(&self, cfg: &RunnerConfig, ceiling: Option<u32>) -> ChatRequest {
+    fn chat_request(&self, cfg: &RunnerConfig, ceiling: Option<u32>, disable_thinking: bool) -> ChatRequest {
         let doc = self.document.lock().unwrap();
         let active = self.active.lock().unwrap();
         let engine = self.engine.lock().unwrap();
@@ -1049,6 +1156,7 @@ impl AgentSession {
             // 而 provider 报过的上限是硬事实，谁小听谁。
             max_tokens: resolve_max_tokens(engine.config.max_tokens, &engine.config.model, ceiling),
             temperature: engine.config.temperature,
+            disable_thinking,
             // 推理模型要拿回上一轮的思考，不然续写时它会当新问题重想一遍。
             echo_reasoning: providers::echoes_reasoning(&engine.config.model),
         }
@@ -1318,12 +1426,44 @@ fn lowering_status(cap: u32) -> UiText {
     .with("cap", cap as u64)
 }
 
+/// 「光思考不干活，关掉思考再问一次」的状态条。
+fn thinking_off_status() -> UiText {
+    UiText::new(
+        "agent.thinking_off_retry",
+        "this model spent the whole budget thinking and called no tool; retrying with thinking turned off",
+    )
+}
+
 /// 「以为被掐断了，其实已经写完」的状态条。
 fn finished_whole_status() -> UiText {
     UiText::new(
         "agent.finished_whole",
         "the reply already looks complete, nothing more to continue",
     )
+}
+
+/// 请求彻底失败时摊在用户面前的那一条。Rust 只说键和原始原因，措辞走字典。
+fn request_failed(reason: &str) -> UiText {
+    // 报错里常裹着一整条 URL 或响应体，截一刀免得红卡片把聊天区撑爆。
+    let short: String = reason.chars().take(200).collect();
+    let short = if reason.chars().count() > 200 {
+        format!("{short}...")
+    } else {
+        short
+    };
+    UiText::new("agent.request_failed", "the request failed: {reason}").with("reason", short)
+}
+
+/// 「一直想、始终不动笔」的收场。
+///
+/// 这类失败最容易被用户误解成「工具坏了」，所以除了「只吐了思考」，
+/// 还要给出两条能自己走出去的路：把输出上限调大，或者换个更早动笔的模型。
+fn stalled_thinking_message(rounds: usize) -> UiText {
+    UiText::new(
+        "agent.thinking_only",
+        "after {rounds} continuation(s) the model has spent the whole output budget on reasoning without writing any text or making a tool call; raise Max tokens in model settings, or switch to a model that acts sooner",
+    )
+    .with("rounds", rounds as u64)
 }
 
 /// 工具结果首行摘要，用于 UI 工具卡片标题。
@@ -1480,6 +1620,8 @@ mod tests {
         // 就是「写不完不收手」。真正的刹车是原地复读检测。
         assert_eq!(MAX_CONTINUATIONS, 20);
         assert_eq!(MAX_ROUND_RETRIES, 5, "重试上限就是五次");
+        // 纯思考的闸比正文续写紧得多：这是「模型不想动笔」时的第一道刹车。
+        assert_eq!(MAX_REASONING_CONTINUATIONS, 2);
     }
 
     #[test]
@@ -1503,15 +1645,19 @@ mod tests {
     /// （空流一轮就收场），这样能把「掐断之后重发、重发完接着问」走到底。
     struct ScriptedProvider {
         scripts: Mutex<Vec<Vec<Result<LlmEvent, ProviderError>>>>,
+        /// 每一发请求带过来的关思考开关，按发车顺序记。要断言「光思考不干活
+        /// 时自动翻盘」就得看这个。
+        seen: Mutex<Vec<bool>>,
     }
 
     #[async_trait::async_trait]
     impl providers::LlmProvider for ScriptedProvider {
         async fn request(
             &self,
-            _req: &ChatRequest,
+            req: &ChatRequest,
         ) -> Result<providers::EventStream, ProviderError> {
             let script = self.scripts.lock().unwrap().remove(0);
+            self.seen.lock().unwrap().push(req.disable_thinking);
             Ok(Box::pin(futures_util::stream::iter(script)))
         }
     }
@@ -1519,11 +1665,22 @@ mod tests {
     /// 把会话的 provider 换成假货。engine 的 ModelConfig 原样留着：max_tokens
     /// 之类的差异不该影响续写逻辑本身。
     fn rewire(s: &AgentSession, scripts: Vec<Vec<Result<LlmEvent, ProviderError>>>) {
+        rewire_watch(s, scripts);
+    }
+
+    /// 同上，但把假 provider 交出来：测试要能回看每发请求带了什么。
+    fn rewire_watch(
+        s: &AgentSession,
+        scripts: Vec<Vec<Result<LlmEvent, ProviderError>>>,
+    ) -> Arc<ScriptedProvider> {
         let provider = Arc::new(ScriptedProvider {
             scripts: Mutex::new(scripts),
+            seen: Mutex::new(Vec::new()),
         });
+        let watched = Arc::clone(&provider);
         let config = s.engine.lock().unwrap().config.clone();
         *s.engine.lock().unwrap() = Engine { config, provider };
+        watched
     }
 
     /// 收集一场 turn 的全部出口：正文、状态键、工具名、是否收尾、报错。
@@ -1533,6 +1690,8 @@ mod tests {
         tools: Vec<String>,
         completed: bool,
         error: Option<String>,
+        /// 报错带的变量拼成的文本，用来看「这句报错到底交代了什么」。
+        error_detail: Option<String>,
     }
 
     fn drain(mut rx: tokio::sync::mpsc::UnboundedReceiver<AgentEvent>) -> Flow {
@@ -1542,6 +1701,7 @@ mod tests {
             tools: Vec::new(),
             completed: false,
             error: None,
+            error_detail: None,
         };
         while let Ok(event) = rx.try_recv() {
             match event {
@@ -1550,7 +1710,18 @@ mod tests {
                 AgentEvent::Status { message } => flow.statuses.push(message.key),
                 AgentEvent::ToolCall { name, .. } => flow.tools.push(name),
                 AgentEvent::Completed { .. } => flow.completed = true,
-                AgentEvent::Error { message } => flow.error = Some(message),
+                AgentEvent::Error { message } => {
+                    flow.error = Some(message.key.clone());
+                    let detail = message
+                        .vars
+                        .iter()
+                        .map(|(k, v)| format!("{k}={v}"))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    if !detail.is_empty() {
+                        flow.error_detail = Some(detail);
+                    }
+                }
                 _ => {}
             }
         }
@@ -1682,8 +1853,9 @@ mod tests {
         assert!(!flow.completed);
         assert!(flow.text.is_empty());
         assert!(flow.statuses.is_empty(), "不该有重试提示");
-        let error = flow.error.unwrap_or_default();
-        assert!(error.contains("401"), "{error}");
+        let detail = flow.error_detail.unwrap_or_default();
+        assert!(detail.contains("401"), "{detail}");
+        assert_eq!(flow.error.as_deref(), Some("agent.request_failed"));
         assert_eq!(s.messages.lock().unwrap().len(), 1, "只有用户那一句");
     }
 
@@ -1718,18 +1890,125 @@ mod tests {
                 status: 401,
                 body: String::new(),
             },
+        ] {
+            assert!(!retryable(&err), "{err} 不该重发");
+        }
+        // 403 看着像「服务器不答应」，实际多半是限流窗口或套餐切换：等一等就放行。
+        for err in [
             ProviderError::Http {
                 status: 403,
+                body: r#"{"error":{"code":"7","type":"permission_denied_error"}}"#.into(),
+            },
+            ProviderError::Http {
+                status: 409,
                 body: String::new(),
             },
             ProviderError::Http {
+                status: 425,
+                body: String::new(),
+            },
+        ] {
+            assert!(retryable(&err), "{err} 该重发");
+        }
+        // 剩下的 4xx 是请求本身写错了：重发多少次都是同一句报错。
+        for err in [
+            ProviderError::Http {
                 status: 404,
+                body: String::new(),
+            },
+            ProviderError::Http {
+                status: 413,
+                body: String::new(),
+            },
+            ProviderError::Http {
+                status: 422,
                 body: String::new(),
             },
             ProviderError::Config("no base url".into()),
         ] {
             assert!(!retryable(&err), "{err} 不该重发");
         }
+    }
+
+    /// 403「套餐不覆盖这个模型」要按重试对待：网关侧的限流窗口、套餐切换常以
+    /// 403 的形式出现，等一等就放行。重试满五次还不行才摊到用户脸上。
+    #[tokio::test]
+    async fn a_permission_denied_is_retried_before_it_is_shown_to_the_user() {
+        let s = session();
+        // ProviderError 不 Clone，用闭包现造：每一发都是同一个 403。
+        let denied = || {
+            ProviderError::Http {
+            status: 403,
+            body: r#"{"error":{"message":"model is not available in the current token plan","type":"permission_denied_error","code":"7"}}"#.into(),
+        }
+        };
+        rewire(
+            &s,
+            // 首发 + 五次重发：第六发才发现次数用尽，所以要备六份剧本。
+            (0..=MAX_ROUND_RETRIES)
+                .map(|_| vec![Err(denied())])
+                .collect(),
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("画一只猫".into(), Vec::new(), tx).await;
+        let flow = drain(rx);
+
+        assert_eq!(
+            flow.statuses.len(),
+            MAX_ROUND_RETRIES,
+            "每一次重试都要让用户看见"
+        );
+        assert!(
+            flow.statuses.iter().all(|k| k == "agent.retrying"),
+            "{:?}",
+            flow.statuses
+        );
+        assert!(!flow.completed, "五次都没成，不许悄悄收尾");
+        assert_eq!(flow.error.as_deref(), Some("agent.request_failed"));
+        let detail = flow.error_detail.unwrap_or_default();
+        assert!(detail.contains("403"), "报错要带上原文：{detail}");
+    }
+
+    /// 无限思考的刹车：连续几轮只吐推理、正文和工具调用一个都没有，就收摊。
+    /// 不然模型会把二十次续写全烧在思考上，用户看到的是一个永远不动笔的思考节点。
+    #[tokio::test]
+    async fn a_model_that_never_stops_thinking_is_cut_off_early() {
+        let s = session();
+        // 钉住「开着思考」：不然第一次死思考就被自动翻盘接走了，
+        // 测的就不是护栏本身。
+        s.engine.lock().unwrap().config.disable_thinking = Some(false);
+        let cap = s.runner_config().loop_limits.max_reasoning_continuations;
+        rewire(
+            &s,
+            (0..cap + 2)
+                .map(|i| {
+                    cut_after_thinking(&format!(
+                        "第 {i} 轮思考，还在想这只橘猫该怎么画，想了很久很久，一个字没写"
+                    ))
+                })
+                .collect(),
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("画一只猫".into(), Vec::new(), tx).await;
+        let flow = drain(rx);
+
+        assert!(!flow.completed, "死思考不许悄悄收尾");
+        assert_eq!(flow.statuses.len(), cap, "只许续到护栏上限，多一轮都不给");
+        assert_eq!(
+            flow.error.as_deref(),
+            Some("agent.thinking_only"),
+            "要说清是只吐了思考：{:?}",
+            flow.error
+        );
+        let detail = flow.error_detail.unwrap_or_default();
+        assert!(detail.contains(&format!("rounds={}", cap + 1)), "{detail}");
+        assert!(
+            flow.tools.is_empty(),
+            "思考到尾也没有工具调用：{:?}",
+            flow.tools
+        );
     }
 
     #[tokio::test]
@@ -1783,10 +2062,15 @@ mod tests {
             "{:?}",
             flow.statuses
         );
-        let error = flow.error.unwrap_or_default();
-        assert!(
-            error.contains("output limit"),
-            "报错要说清是输出上限：{error}"
+        assert_eq!(
+            flow.error.as_deref(),
+            Some("agent.output_limit"),
+            "报错要说清是输出上限"
+        );
+        assert_eq!(
+            flow.statuses.len(),
+            MAX_CONTINUATIONS,
+            "每续一次都要给用户一个进度提示"
         );
         // 用户那一句 + 二十套「半截回复 + 续写指令」；第二十一发是收摊前那一问，
         // 不再回灌，所以总数停在 41 条。用户能整段复制走自己续。
@@ -1817,10 +2101,10 @@ mod tests {
         // 只续了第一次就不再要了：后面那两发复读连同「说完了」都没发生。
         assert_eq!(flow.text, repeated.repeat(2));
         assert_eq!(flow.statuses, vec!["agent.continuing".to_string()]);
-        let error = flow.error.unwrap_or_default();
-        assert!(
-            error.contains("stopped making progress"),
-            "要说清是回复不再推进：{error}"
+        assert_eq!(
+            flow.error.as_deref(),
+            Some("agent.stalled"),
+            "要说清是回复不再推进"
         );
         // 用户那一句 + 第一次续写回灌的「半截回复 + 续写指令」，共三条。
         assert_eq!(s.messages.lock().unwrap().len(), 3);
@@ -1898,10 +2182,115 @@ mod tests {
                 model: "test".into(),
                 max_tokens: None,
                 temperature: None,
+                disable_thinking: None,
                 capabilities: Default::default(),
             },
             Document::new("t", 8, 8).unwrap(),
         )
+    }
+
+    /// 换一把钉死关思考的会话：用户要的是「别想，直接画」。
+    fn session_with_thinking_off() -> AgentSession {
+        let mut s = session();
+        let mut config = s.engine.lock().unwrap().config.clone();
+        config.disable_thinking = Some(true);
+        let provider = s.engine.lock().unwrap().provider.clone();
+        *s.engine.lock().unwrap() = Engine { config, provider };
+        s
+    }
+
+    /// 一整轮都烧在思考上、一个工具都没调：替用户翻一次盘，关掉思考再问。
+    /// 这是 LongCat、DeepSeek-R1 一系的常态——不翻这一下，用户盯到的是
+    /// 一个永远在思考的节点，画布上连一笔都没有。
+    #[tokio::test]
+    async fn a_thinking_only_turn_retries_once_with_thinking_off() {
+        let s = session();
+        let watched = rewire_watch(
+            &s,
+            vec![
+                cut_after_thinking("先把整只猫在脑子里过一遍"),
+                vec![
+                    Ok(LlmEvent::ToolUseStart {
+                        index: 0,
+                        id: "c1".into(),
+                        name: "pixel_run_shader".into(),
+                    }),
+                    Ok(LlmEvent::ToolInputDelta {
+                        index: 0,
+                        json_partial: "{}".into(),
+                    }),
+                    Ok(LlmEvent::Done {
+                        stop_reason: "tool_use".into(),
+                    }),
+                ],
+                done("画好了"),
+            ],
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("画一只猫".into(), Vec::new(), tx).await;
+        let flow = drain(rx);
+
+        assert_eq!(
+            watched.seen.lock().unwrap().as_slice(),
+            // 第一发照模型默认来，翻盘后那发带关思考；第三发是工具结果回灌后的
+            // 追问，翻盘在本 turn 内一直生效。
+            &[false, true, true],
+            "第一发照模型默认来，翻盘后那发才带关思考",
+        );
+        assert!(
+            flow.statuses.contains(&"agent.thinking_off_retry".to_string()),
+            "用户该知道我们关了思考：{:?}",
+            flow.statuses,
+        );
+        assert_eq!(flow.tools, vec!["pixel_run_shader".to_string()]);
+        assert!(flow.completed, "{:?}", flow.error);
+    }
+
+    /// 钉死的选择不翻案：用户要关思考，第一发就得带着这个开关过去，
+    /// 也别弹那句「替你关了」的状态条——那本来就是他选的。
+    #[tokio::test]
+    async fn a_pinned_thinking_off_choice_reaches_the_first_request() {
+        let s = session_with_thinking_off();
+        let watched = rewire_watch(&s, vec![done("不思考直接画")]);
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("画一只猫".into(), Vec::new(), tx).await;
+        let flow = drain(rx);
+
+        assert_eq!(watched.seen.lock().unwrap().as_slice(), &[true]);
+        assert!(
+            !flow.statuses.contains(&"agent.thinking_off_retry".to_string()),
+            "用户自己选的不该再弹状态条：{:?}",
+            flow.statuses,
+        );
+        assert!(flow.completed, "{:?}", flow.error);
+    }
+
+    /// 反过来：用户想看思考过程，就别替他关。撞上限也走续写那条老路。
+    #[tokio::test]
+    async fn a_thinking_on_choice_is_never_overridden() {
+        let mut s = session();
+        s.engine.lock().unwrap().config.disable_thinking = Some(false);
+        let watched = rewire_watch(
+            &s,
+            vec![
+                cut_after_thinking("想"),
+                cut_after_thinking("接着想"),
+                cut_after_thinking("还在想"),
+            ],
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("画一只猫".into(), Vec::new(), tx).await;
+        let flow = drain(rx);
+
+        assert_eq!(
+            watched.seen.lock().unwrap().as_slice(),
+            &[false, false],
+            "钉了「开着思考」就不该翻盘",
+        );
+        assert!(flow.error.is_some(), "光思考不干活最终要有个交代");
     }
 
     fn model_with(id: &str, caps: Capabilities) -> ModelConfig {
@@ -1914,6 +2303,7 @@ mod tests {
             model: "test".into(),
             max_tokens: None,
             temperature: None,
+            disable_thinking: None,
             capabilities: caps,
         }
     }

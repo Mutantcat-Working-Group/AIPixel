@@ -56,6 +56,7 @@ import type {
   Usage,
   StrokeCell,
   InkColor,
+  LoopLimits,
 } from "./types";
 
 import {
@@ -134,6 +135,8 @@ interface StoreState extends DocumentSnapshot, WorkflowState, BatchState {
   activeId: string | null;
   entries: TranscriptEntry[];
   running: boolean;
+  /** 本轮对话开始的时间戳（ms）。运行中给聊天面板当计时起点，停下来就清。 */
+  runStartedAt: number | null;
   /** 主循环还在跑，但很久没有新事件了。只是提醒，不动数据、不替你中断。 */
   stalled: boolean;
   usage: Usage | null;
@@ -156,6 +159,8 @@ interface StoreState extends DocumentSnapshot, WorkflowState, BatchState {
   mcpBusy: boolean;
   /** 界面语言。默认中文，用户可在设置里改成英语；只影响这一层，不回灌 Rust。 */
   lang: Lang;
+  /** 运行护栏当前值；为 null 表示还没读过 Rust。 */
+  loopLimits: LoopLimits | null;
 }
 
 export interface StoreActions {
@@ -177,6 +182,8 @@ export interface StoreActions {
   upsertModel: (config: ModelConfig) => Promise<void>;
   removeModel: (id: string) => Promise<void>;
   activateModel: (id: string) => Promise<void>;
+  refreshLoopLimits: () => Promise<void>;
+  saveLoopLimits: (limits: LoopLimits) => Promise<void>;
   /** 拉 provider 的模型清单，供设置界面挑一个填入；失败把原文抛回界面。 */
   fetchProviderModels: (params: {
     id?: string | null;
@@ -411,7 +418,11 @@ function pushUndo(stack: PixelDocument[], doc: PixelDocument): PixelDocument[] {
 export const useStore = create<StoreState & StoreActions>()((setState, getState) => {
   /** 键控失败：措辞跟着当前界面语言走，Rust 的原文当 {error} 追在后面。 */
   function failKey(key: TKey, vars?: TVARS) {
-    setState({ notice: { text: translate(getState().lang, key, vars), isError: true }, running: false });
+    setState({
+      notice: { text: translate(getState().lang, key, vars), isError: true },
+      running: false,
+      runStartedAt: null,
+    });
   }
 
   /** 一段本机成功提示（载入、保存）。不是错误，所以不进 fail 那条路。 */
@@ -507,6 +518,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         setState({
           entries: sealTranscript(reduceEvent(state.entries, raw, state.lang)),
           running: false,
+          runStartedAt: null,
           stalled: false,
           // 一轮收尾，挂着没批的调用跟着作废——别让下一轮还看见这张票。
           pendingApproval: null,
@@ -598,6 +610,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     frameIndex: 0,
     entries: emptyTranscript(),
     running: false,
+    runStartedAt: null,
     stalled: false,
     usage: null,
     lastQuery: null,
@@ -613,6 +626,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     mcpServers: EMPTY_MCP,
     mcpOpen: false,
     mcpBusy: false,
+    loopLimits: null,
     workflows: [],
     catalogReady: false,
     kind: "image_gen",
@@ -653,6 +667,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
           models = EMPTY_MODELS;
         }
         setState({ models });
+        await getState().refreshLoopLimits();
         let mcpServers: McpServersView;
         try {
           mcpServers = await bridge.listMcpServers();
@@ -688,6 +703,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         activeId: id,
         entries: emptyTranscript(),
         running: false,
+        runStartedAt: null,
         stalled: false,
         usage: null,
         lastQuery: null,
@@ -706,6 +722,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         activeId: info.id,
         entries: emptyTranscript(),
         running: false,
+        runStartedAt: null,
         stalled: false,
         usage: null,
         lastQuery: null,
@@ -793,6 +810,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         ),
         attachments: [],
         running: true,
+        runStartedAt: Date.now(),
         stalled: false,
         lastQuery: { text: trimmed, attachments },
         notice: null,
@@ -849,6 +867,25 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     activateModel: async (id) => {
       const models = await bridge.setActiveModel(id);
       setState({ models });
+    },
+
+    refreshLoopLimits: async () => {
+      try {
+        setState({ loopLimits: await bridge.loopLimits() });
+      } catch {
+        // 读不回来就沿用当前界面上的值：护栏是兜底，不该因为一次读失败把界面打空。
+      }
+    },
+
+    saveLoopLimits: async (next) => {
+      // 先按界面显示：Rust 会把越界的值夹回来，回值才是真正生效的那份。
+      setState({ loopLimits: next });
+      try {
+        setState({ loopLimits: await bridge.setLoopLimits(next) });
+      } catch (error) {
+        failKey("store.save_limits_failed", { error: String(error) });
+        await getState().refreshLoopLimits();
+      }
     },
 
     fetchProviderModels: async (params) => bridge.fetchModelList(params),

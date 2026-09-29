@@ -24,6 +24,27 @@ import type { ApprovalDecision, PendingAttachment, TranscriptEntry } from "../li
 
 const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "webp", "gif"];
 
+/** 本轮对话的计时器：跑起来之后每秒走一格，停下来归零。 */
+function TurnTimer() {
+  const t = useT();
+  const startedAt = useStore((s) => s.runStartedAt);
+  const running = useStore((s) => s.running);
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!running || startedAt === null) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [running, startedAt]);
+
+  if (!running || startedAt === null) return null;
+  const total = Math.max(0, Math.floor((now - startedAt) / 1000));
+  const mm = String(Math.floor(total / 60)).padStart(2, "0");
+  const ss = String(total % 60).padStart(2, "0");
+  return <span className="chat-running">{t("chat.elapsed", { mm, ss })}</span>;
+}
+
 function AttachChip({ item }: { item: PendingAttachment }) {
   const t = useT();
   return (
@@ -256,7 +277,7 @@ export default function ChatPanel() {
         <MessageSquare size={13} />
         <strong>{t("chat.title")}</strong>
         <span className="grow" />
-        {running ? <span className="chat-running">{t("chat.running")}</span> : null}
+        <TurnTimer />
       </div>
 
       <div className="panel-body transcript" ref={scrollRef}>
