@@ -364,6 +364,93 @@ mod tests {
         }
     }
 
+    /// 把若干 OpenAI SSE 数据块依次喂给解析器，收集所有事件（跨块累加 ToolCall 状态）。
+    fn openai_stream(chunks: &[&str]) -> Vec<LlmEvent> {
+        let mut acc = ToolAcc::default();
+        let mut out = vec![];
+        for c in chunks {
+            out.extend(openai_parse(c, &mut acc).expect("chunk parses"));
+        }
+        out
+    }
+
+    fn tool_starts(events: &[LlmEvent]) -> Vec<(String, String)> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                LlmEvent::ToolUseStart { id, name, .. } => Some((id.clone(), name.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn tool_args(events: &[LlmEvent]) -> String {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                LlmEvent::ToolInputDelta { json_partial, .. } => Some(json_partial.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 中转把 id 和 name 拆进不同分片：老代码会静默丢掉整条 tool call，表现为"模型
+    /// 要画却没触发任何工具"。现在按分片累加，到齐才发 start，args 一个字节都不丢。
+    #[test]
+    fn a_tool_call_split_across_chunks_still_assembles() {
+        let ev = openai_stream(&[
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"","arguments":""}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"pixel_run_shader"}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"x\":"}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"1}"}}]}}]}"#,
+        ]);
+        assert_eq!(
+            tool_starts(&ev),
+            vec![("call_1".to_string(), "pixel_run_shader".to_string())]
+        );
+        assert_eq!(tool_args(&ev), "{\"x\":1}");
+        // start 必须早于任何 arguments 分片，否则 runner 会把它丢进不存在的槽。
+        let start = ev
+            .iter()
+            .position(|e| matches!(e, LlmEvent::ToolUseStart { .. }))
+            .unwrap();
+        let first_arg = ev
+            .iter()
+            .position(|e| matches!(e, LlmEvent::ToolInputDelta { .. }))
+            .unwrap();
+        assert!(
+            start < first_arg,
+            "ToolUseStart 必须早于任何 arguments 分片"
+        );
+    }
+
+    /// 更极端：arguments 比 name 先到。先缓存，name 到齐发 start 时按序补发。
+    #[test]
+    fn arguments_arriving_before_the_name_are_buffered_not_dropped() {
+        let ev = openai_stream(&[
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_9","function":{"arguments":"{\"a\":"}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"draw","arguments":"7}"}}]}}]}"#,
+        ]);
+        assert_eq!(
+            tool_starts(&ev),
+            vec![("call_9".to_string(), "draw".to_string())]
+        );
+        assert_eq!(tool_args(&ev), "{\"a\":7}");
+    }
+
+    /// 正常一片到齐的老路子不能回归。
+    #[test]
+    fn a_tool_call_in_one_chunk_still_assembles() {
+        let ev = openai_stream(&[
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"apply","arguments":"{}"}}]}}]}"#,
+        ]);
+        assert_eq!(
+            tool_starts(&ev),
+            vec![("c".to_string(), "apply".to_string())]
+        );
+        assert_eq!(tool_args(&ev), "{}");
+    }
+
     #[test]
     fn a_provider_that_names_its_ceiling_gets_clamped_to_it() {
         // 中转站嫌我们给的 max_tokens 太大，顺手告诉我们它允许多少。
@@ -530,11 +617,78 @@ fn frame_data(frame: &str) -> Option<String> {
 /// provider 特定的增量解析累积状态。
 #[derive(Default)]
 struct ToolAcc {
-    names: HashMap<usize, (String, String)>, // index -> (id, name)
-    started: std::collections::HashSet<usize>,
+    /// index -> 流式 tool call 分片累加器。
+    calls: HashMap<usize, StreamToolCall>,
     stop: String,
     input_tokens: Option<u32>,
     output_tokens: Option<u32>,
+}
+
+/// 一个流式 tool call 的分片累加器，OpenAI 与 Anthropic 两条 parser 共用。
+///
+/// 有的 OpenAI 兼容中转会把 id 和 function.name 拆进不同 SSE 分片，甚至 arguments 比
+/// name 先到。老逻辑要求首片同时带 id+name 才登记 start，否则整条 tool call 被静默吞掉：
+/// 模型明明要画，却一个工具都没触发。现在按分片累加——id/name 到齐才发 ToolUseStart，
+/// start 之前先行到达的 arguments 先缓存并按序补发，绝不比 ToolUseStart 早一步。
+#[derive(Default)]
+struct StreamToolCall {
+    id: String,
+    name: String,
+    started: bool,
+    /// ToolUseStart 之前到达的 arguments 分片，start 时一次性按序补发。
+    pre_args: String,
+}
+
+impl StreamToolCall {
+    /// 累加 id/name 分片；首次两者齐备就发 `ToolUseStart`，并补发之前缓存的 arguments。
+    fn feed(
+        &mut self,
+        index: usize,
+        id: Option<&str>,
+        name: Option<&str>,
+        out: &mut Vec<LlmEvent>,
+    ) {
+        // 已 start 后中转可能重发 id/name，忽略即可。
+        if self.started {
+            return;
+        }
+        if let Some(id) = id {
+            self.id.push_str(id);
+        }
+        if let Some(name) = name {
+            self.name.push_str(name);
+        }
+        if self.id.is_empty() || self.name.is_empty() {
+            return; // 还没到齐，继续等下一片。
+        }
+        self.started = true;
+        out.push(LlmEvent::ToolUseStart {
+            index,
+            id: self.id.clone(),
+            name: self.name.clone(),
+        });
+        if !self.pre_args.is_empty() {
+            out.push(LlmEvent::ToolInputDelta {
+                index,
+                json_partial: std::mem::take(&mut self.pre_args),
+            });
+        }
+    }
+
+    /// arguments 分片：started 之后直接转发，否则先缓存，绝不早于 ToolUseStart。
+    fn feed_args(&mut self, index: usize, args: &str, out: &mut Vec<LlmEvent>) {
+        if args.is_empty() {
+            return;
+        }
+        if self.started {
+            out.push(LlmEvent::ToolInputDelta {
+                index,
+                json_partial: args.to_string(),
+            });
+        } else {
+            self.pre_args.push_str(args);
+        }
+    }
 }
 
 type ParseFn = fn(&str, &mut ToolAcc) -> Result<Vec<LlmEvent>, ProviderError>;
@@ -635,12 +789,14 @@ fn anthropic_parse(payload: &str, acc: &mut ToolAcc) -> Result<Vec<LlmEvent>, Pr
                         .and_then(|s| s.as_str())
                         .unwrap_or("")
                         .to_string();
-                    acc.names.insert(idx, (id.clone(), name.clone()));
-                    acc.started.insert(idx);
+                    let slot = acc.calls.entry(idx).or_default();
+                    slot.id = id;
+                    slot.name = name;
+                    slot.started = true;
                     vec![LlmEvent::ToolUseStart {
                         index: idx,
-                        id,
-                        name,
+                        id: slot.id.clone(),
+                        name: slot.name.clone(),
                     }]
                 }
                 _ => vec![],
@@ -752,24 +908,11 @@ fn openai_parse(payload: &str, acc: &mut ToolAcc) -> Result<Vec<LlmEvent>, Provi
                     let index = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
                     let id = tc.get("id").and_then(|s| s.as_str());
                     let name = tc["function"].get("name").and_then(|s| s.as_str());
-                    if !acc.started.contains(&index) {
-                        if let (Some(id), Some(name)) = (id, name) {
-                            acc.names.insert(index, (id.to_string(), name.to_string()));
-                            acc.started.insert(index);
-                            out.push(LlmEvent::ToolUseStart {
-                                index,
-                                id: id.to_string(),
-                                name: name.to_string(),
-                            });
-                        }
-                    }
-                    if let Some(args) = tc["function"].get("arguments").and_then(|s| s.as_str()) {
-                        if !args.is_empty() {
-                            out.push(LlmEvent::ToolInputDelta {
-                                index,
-                                json_partial: args.to_string(),
-                            });
-                        }
+                    let args = tc["function"].get("arguments").and_then(|s| s.as_str());
+                    let slot = acc.calls.entry(index).or_default();
+                    slot.feed(index, id, name, &mut out);
+                    if let Some(args) = args {
+                        slot.feed_args(index, args, &mut out);
                     }
                 }
             }
