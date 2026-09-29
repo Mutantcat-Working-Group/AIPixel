@@ -109,6 +109,50 @@ describe("reduceEvent", () => {
     expect(lastEntry(interrupted).kind).toBe("notice");
   });
 
+  it("leaves no dangling caret when one turn is split by tool calls", () => {
+    // 真实时序：正文 → 工具 → 正文 → 工具 → 正文，五段里四段是 assistant。
+    // 只封最后一个的话，前面几段的蓝色光标会一直闪。
+    let entries = pushUserMessage([], "画个猫", []);
+    entries = reduceEvent(entries, { kind: "token", text: "先画身体" } as AgentEvent);
+    entries = reduceEvent(entries, {
+      kind: "tool_call",
+      id: "t1",
+      name: "pixel_run_shader",
+      input: {},
+    } as AgentEvent);
+    entries = reduceEvent(entries, {
+      kind: "tool_result",
+      id: "t1",
+      name: "pixel_run_shader",
+      summary: "ok",
+      is_error: false,
+    } as AgentEvent);
+    entries = reduceEvent(entries, { kind: "token", text: "再画腿" } as AgentEvent);
+    entries = reduceEvent(entries, {
+      kind: "tool_call",
+      id: "t2",
+      name: "pixel_run_shader",
+      input: {},
+    } as AgentEvent);
+    entries = reduceEvent(entries, {
+      kind: "token",
+      text: "完成",
+    } as AgentEvent);
+
+    const blocks = entries.filter((entry) => entry.kind === "assistant");
+    expect(blocks.map((entry) => entry.kind === "assistant" && entry.text)).toEqual([
+      "先画身体",
+      "再画腿",
+      "完成",
+    ]);
+
+    const sealed = sealTranscript(entries);
+    expect(sealed.filter((entry) => entry.kind === "assistant").every((entry) => !entry.live)).toBe(
+      true,
+    );
+    expect(sealed.some((entry) => entry.kind === "pending")).toBe(false);
+  });
+
   it("marks a failed tool result as an error and stops it being live", () => {
     let entries = reduceEvent([], {
       kind: "tool_call",

@@ -58,6 +58,14 @@ struct ApprovalSlot {
 /// 不设这条线的话 `stream.next()` 会永远挂住，前端只剩一个思考节点空转。
 const STREAM_IDLE_LIMIT: Duration = Duration::from_secs(180);
 
+/// 「整轮一个工具都没调」时最多催几次。
+///
+/// 模型偶尔会犯一种很亏的毛病：用户让它画东西，它动嘴不动手，讲两句
+/// 「已完成」就收场。用户拿到一句汇报，画布上却一片空白。这种轮次得
+/// 当场拦住再问一次。催的次数必须封顶，不然一个轴模型能把整轮预算
+/// 全耗在互相瞪眼上。
+const MAX_TOOL_NUDGES: usize = 2;
+
 /// 流静默计时器：记下最后一次见到字节的时刻，答一句「是不是该判死刑了」。
 #[derive(Debug, Clone, Copy)]
 struct IdleWatch {
@@ -631,6 +639,8 @@ impl AgentSession {
         // 进入 turn 时快照一份预算，避免中途改设置导致行为漂移。
         // mut：Ask 模式下用户点「本次放行」会把它降级成 Auto，只影响本 turn。
         let mut runner_config = self.runner_config();
+        // 这句话是不是在要图。纯聊天不必催，见 asks_for_artwork。
+        let art_requested = asks_for_artwork(&text);
         let mut steps = 0usize;
         let mut last_failure: Option<(String, String)> = None;
         let mut failure_streak = 0usize;
@@ -641,6 +651,8 @@ impl AgentSession {
         let mut logical_rounds = 0usize;
         let mut continuations = 0usize;
         let mut retries = 0usize;
+        // 整轮零工具调用时催过几次。见 MAX_TOOL_NUDGES。
+        let mut tool_nudges = 0usize;
 
         // 关思考：用户钉死（Some）就照办；没钉死（None）先按模型默认来，
         // 但保留一次自动翻盘的机会——见下面 retry 小循环里的兜底。
@@ -789,6 +801,16 @@ impl AgentSession {
                 {
                     thinking_off_tried = true;
                     thinking_off = true;
+                    // 翻盘成功要把结论留住。只翻本 turn 内的一个局部变量的话，
+                    // 用户发下一句话时又得先烧掉一整轮预算，看同一句「已关掉思考」
+                    // 再看同一段光想不干的推理——那是纯浪费。
+                    // 只写本次运行内的会话状态，不动 models.json 里的模型定义：
+                    // 那是用户手改的东西，不该被一次兜底悄悄改写。
+                    let mut engine = self.engine.lock().unwrap();
+                    if engine.config.disable_thinking.is_none() {
+                        engine.config.disable_thinking = Some(true);
+                    }
+                    drop(engine);
                     emit(
                         &tx,
                         AgentEvent::Status {
@@ -954,8 +976,29 @@ impl AgentSession {
                     .push(Message::assistant(blocks));
             }
 
-            // 没有工具调用：这一轮就是最终答复。
+            // 没有工具调用。这一轮多半就是最终答复，但有一种例外必须当场拦住：
+            // 模型整轮一笔没画，光说了几句就宣布「已完成」。那是纯空转——用户
+            // 拿到一句汇报，画布上却什么也没多。只在「本 turn 一个工具都没跑过」
+            // 时才催，免得把正常的收尾提问也当成没干活。
             if calls.is_empty() {
+                if steps == 0
+                    && tool_nudges < MAX_TOOL_NUDGES
+                    && art_requested
+                    && !looks_like_a_question(&raw.text)
+                {
+                    tool_nudges += 1;
+                    self.messages
+                        .lock()
+                        .unwrap()
+                        .push(Message::user_text(tool_nudge()));
+                    emit(
+                        &tx,
+                        AgentEvent::Status {
+                            message: nudging_tools_status(),
+                        },
+                    );
+                    continue;
+                }
                 emit(
                     &tx,
                     AgentEvent::Usage {
@@ -1439,6 +1482,97 @@ fn thinking_off_status() -> UiText {
     )
 }
 
+/// 催「光说话不干活」的模型动手。这句是给模型看的，用英文写：提示词是英文。
+fn tool_nudge() -> String {
+    "You replied with text only and called no tool, so nothing on the canvas changed. Your turn is not finished: the available canvas tools include pixel_run_shader and pixel_apply_operations. Do the work now - if the request is about artwork, end this reply with the tool call that draws it. Reply with text alone only if you genuinely need one piece of information from the user before you can edit the canvas."
+        .to_string()
+}
+
+/// 用户这句话是不是在要图。
+///
+/// 只在「用户要画、模型却光说不练」时才催它动手。纯聊天（问配色怎么配、
+/// 问这个工具怎么使）用文字收尾是天经地义，一催就凭空多出一段废话，
+/// 反而更吵。判漏了顶多退回老行为——直接收尾；判错了才真闹心，
+/// 所以宁可保守，也不要把每次问答都当成画画。
+fn asks_for_artwork(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // 问句是在等解释，不是在等一个工具调用。
+    if trimmed.contains('?') || trimmed.contains('？') {
+        return false;
+    }
+    // 「画」字在中文里太常见（计划、蓝图、画布、策划），只在它不属于这些词时才认。
+    for (i, _) in trimmed.match_indices('画') {
+        let prev: Option<char> = trimmed[..i].chars().next_back();
+        let next: Option<char> = trimmed[i + '画'.len_utf8()..].chars().next();
+        let borrowed = matches!(
+            prev,
+            Some('计') | Some('谋') | Some('策') | Some('蓝') | Some('构') | Some('规')
+        ) || next == Some('布');
+        if !borrowed {
+            return true;
+        }
+    }
+    const ZH: [&str; 14] = [
+        "绘制",
+        "涂",
+        "描一",
+        "做个",
+        "做一张",
+        "来一张",
+        "来一幅",
+        "生成",
+        "改成",
+        "换个",
+        "加一",
+        "去掉",
+        "删掉",
+        "重画",
+    ];
+    for word in ZH {
+        if trimmed.contains(word) {
+            return true;
+        }
+    }
+    const EN: [&str; 11] = [
+        "draw", "paint", "sketch", "render", "generate", "colour", "color", "make", "create",
+        "add", "replace",
+    ];
+    let lower = trimmed.to_lowercase();
+    let bytes = lower.as_bytes();
+    for word in EN {
+        let mut from = 0usize;
+        while let Some(at) = lower[from..].find(word) {
+            let start = from + at;
+            let end = start + word.len();
+            let before_ok = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
+            let after_ok = end >= bytes.len() || !bytes[end].is_ascii_alphanumeric();
+            if before_ok && after_ok {
+                return true;
+            }
+            from = start + 1;
+        }
+    }
+    false
+}
+
+/// 这一串字是不是在问用户问题。
+///
+/// 澄清提问是合法收尾，不该被催。判据刻意放宽：宁可漏催一次（回到
+/// 老行为，直接收尾），也不能把用户真正需要回答的问题一口吞掉。
+fn looks_like_a_question(text: &str) -> bool {
+    text.contains('?') || text.contains('？')
+}
+
+fn nudging_tools_status() -> UiText {
+    UiText::new(
+        "agent.nudging_tools",
+        "这个模型光说话没动手，已催它直接调工具",
+    )
+}
+
 /// 「以为被掐断了，其实已经写完」的状态条。
 fn finished_whole_status() -> UiText {
     UiText::new(
@@ -1502,6 +1636,46 @@ mod tests {
         // 收到字节就重打表：思考再久也不能算卡住。
         watch.touch();
         assert!(!watch.expired());
+    }
+
+    #[test]
+    fn only_art_requests_count_as_art_requests() {
+        // 要图的：中英双语、带不带主语都算。
+        for yes in [
+            "画一只猫",
+            "给我画5帧橘猫奔跑",
+            "重新画这个头盔",
+            "绘制一个宝箱",
+            "涂个背景",
+            "做个五帧的行走循环",
+            "来一张西瓜",
+            "生成一把剑",
+            "draw a 32x32 knight",
+            "DRAW 4 walking frames",
+            "make me a run cycle",
+            "add a shadow under it",
+            "把配色改成冷色",
+        ] {
+            assert!(asks_for_artwork(yes), "这句在要图：{yes}");
+        }
+        // 不要图的：纯聊天、提问、以及「画」字被另用的词。
+        for no in [
+            "",
+            "   ",
+            "解释一下这个面板怎么用",
+            "这段配色什么意思",
+            "怎么导出 aseprite",
+            "画布上现在有什么",
+            "下一版准备怎么规划",
+            "这是不是一个蓝图",
+            "你觉得用什么颜色好？",
+            "现在几点了？",
+            "withdraw that change",
+            "what does this drawer do",
+            "帮我看看这个文件",
+        ] {
+            assert!(!asks_for_artwork(no), "这句不在要图：{no}");
+        }
     }
 
     #[test]
@@ -1778,7 +1952,8 @@ mod tests {
         );
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        s.run_turn("画一只猫".into(), Vec::new(), tx).await;
+        s.run_turn("解释一下这个面板怎么用".into(), Vec::new(), tx)
+            .await;
         let flow = drain(rx);
 
         assert!(flow.completed, "两轮续写之后该正常收尾：{:?}", flow.error);
@@ -1792,7 +1967,8 @@ mod tests {
         rewire(&s, vec![cut("前半段"), done("后半段")]);
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        s.run_turn("画一只猫".into(), Vec::new(), tx).await;
+        s.run_turn("解释一下这个面板怎么用".into(), Vec::new(), tx)
+            .await;
         let flow = drain(rx);
 
         // 两截该原样接上，中间的续写指令只走历史，不能挤到用户眼前。
@@ -1827,7 +2003,8 @@ mod tests {
         );
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        s.run_turn("画一只猫".into(), Vec::new(), tx).await;
+        s.run_turn("解释一下这个面板怎么用".into(), Vec::new(), tx)
+            .await;
         let flow = drain(rx);
 
         assert_eq!(flow.text, "通了", "重发一次就该拿到正文");
@@ -2029,7 +2206,8 @@ mod tests {
         );
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        s.run_turn("画一只猫".into(), Vec::new(), tx).await;
+        s.run_turn("解释一下这个面板怎么用".into(), Vec::new(), tx)
+            .await;
         let flow = drain(rx);
 
         assert_eq!(flow.text, "换了条路");
@@ -2253,6 +2431,106 @@ mod tests {
         assert!(flow.completed, "{:?}", flow.error);
     }
 
+    /// 光说话不干活：模型讲两句「已完成」就想收场，画布上一笔没有。
+    /// 这种轮次必须当场催一次，催到它真调工具为止。
+    #[tokio::test]
+    async fn a_turn_that_only_talked_is_nudged_into_acting() {
+        let s = session();
+        rewire(
+            &s,
+            vec![
+                done("I'll draw a 5-frame orange cat run cycle."),
+                vec![
+                    Ok(LlmEvent::ToolUseStart {
+                        index: 0,
+                        id: "c1".into(),
+                        name: "pixel_run_shader".into(),
+                    }),
+                    Ok(LlmEvent::ToolInputDelta {
+                        index: 0,
+                        json_partial: "{}".into(),
+                    }),
+                    Ok(LlmEvent::Done {
+                        stop_reason: "tool_use".into(),
+                    }),
+                ],
+                done("五帧奔跑画完了"),
+            ],
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("画5帧橘猫奔跑".into(), Vec::new(), tx).await;
+        let flow = drain(rx);
+
+        assert!(
+            flow.statuses.contains(&"agent.nudging_tools".to_string()),
+            "催过就得让用户看见：{:?}",
+            flow.statuses,
+        );
+        assert_eq!(flow.tools, vec!["pixel_run_shader".to_string()]);
+        assert!(flow.completed, "{:?}", flow.error);
+        // 催问自己也进历史，不然模型看不到「你刚才什么都没做」。
+        let pushed = s
+            .messages
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| matches!(m.role, super::super::models::Role::User))
+            .count();
+        assert!(pushed >= 2, "除了用户原话，还得有一条催问：{pushed}");
+    }
+
+    /// 澄清提问是合法收尾：问完就该停下等用户回话，不能催。
+    #[tokio::test]
+    async fn a_clarifying_question_is_left_alone() {
+        let s = session();
+        rewire(&s, vec![done("想要侧视还是四分之三视角？")]);
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("画只猫".into(), Vec::new(), tx).await;
+        let flow = drain(rx);
+
+        assert!(
+            !flow.statuses.contains(&"agent.nudging_tools".to_string()),
+            "提问不该被催：{:?}",
+            flow.statuses,
+        );
+        assert!(flow.completed, "{:?}", flow.error);
+    }
+
+    /// 催也有尽头：催满两次还不动手，就照原样收尾报给用户，
+    /// 别把一个轴模型惯成无限循环。
+    #[tokio::test]
+    async fn a_turn_that_never_acts_stops_after_the_nudge_budget() {
+        let s = session();
+        rewire(
+            &s,
+            vec![
+                done("I'll draw it."),
+                done("Now the cycle."),
+                done("It is done."),
+                vec![
+                    Ok(LlmEvent::Token("算了，直接收尾".into())),
+                    Ok(LlmEvent::Done {
+                        stop_reason: "end_turn".into(),
+                    }),
+                ],
+            ],
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("画5帧橘猫".into(), Vec::new(), tx).await;
+        let flow = drain(rx);
+
+        let nudges = flow
+            .statuses
+            .iter()
+            .filter(|k| *k == "agent.nudging_tools")
+            .count();
+        assert_eq!(nudges, 2, "催满两次就收手：{:?}", flow.statuses);
+        assert!(flow.completed, "{:?}", flow.error);
+    }
+
     /// 钉死的选择不翻案：用户要关思考，第一发就得带着这个开关过去，
     /// 也别弹那句「替你关了」的状态条——那本来就是他选的。
     #[tokio::test]
@@ -2261,7 +2539,8 @@ mod tests {
         let watched = rewire_watch(&s, vec![done("不思考直接画")]);
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        s.run_turn("画一只猫".into(), Vec::new(), tx).await;
+        s.run_turn("解释一下这个面板怎么用".into(), Vec::new(), tx)
+            .await;
         let flow = drain(rx);
 
         assert_eq!(watched.seen.lock().unwrap().as_slice(), &[true]);
@@ -2270,6 +2549,27 @@ mod tests {
                 .statuses
                 .contains(&"agent.thinking_off_retry".to_string()),
             "用户自己选的不该再弹状态条：{:?}",
+            flow.statuses,
+        );
+        assert!(flow.completed, "{:?}", flow.error);
+    }
+
+    /// 纯聊天用文字收尾是天经地义：问用法、问配色都不能催。
+    #[tokio::test]
+    async fn a_plain_chat_reply_is_left_alone() {
+        let s = session();
+        rewire(
+            &s,
+            vec![done("右上角那个图标是导出，点它有 aseprite 和 PNG 两种。")],
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("导出按钮在哪".into(), Vec::new(), tx).await;
+        let flow = drain(rx);
+
+        assert!(
+            !flow.statuses.contains(&"agent.nudging_tools".to_string()),
+            "纯聊天不该被催：{:?}",
             flow.statuses,
         );
         assert!(flow.completed, "{:?}", flow.error);
@@ -2620,7 +2920,8 @@ mod tests {
         );
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        s.run_turn("画一只猫".into(), Vec::new(), tx).await;
+        s.run_turn("解释一下这个面板怎么用".into(), Vec::new(), tx)
+            .await;
         let flow = drain(rx);
 
         assert!(flow.error.is_none(), "{:?}", flow.error);
@@ -2657,7 +2958,8 @@ mod tests {
         );
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        s.run_turn("画一只猫".into(), Vec::new(), tx).await;
+        s.run_turn("解释一下这个面板怎么用".into(), Vec::new(), tx)
+            .await;
         let flow = drain(rx);
 
         assert!(flow.error.is_none(), "{:?}", flow.error);

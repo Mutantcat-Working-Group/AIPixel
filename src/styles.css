@@ -23,6 +23,36 @@
   box-sizing: border-box;
 }
 
+/*
+ * 桌面工具的指针手势是「选像素」，不是「选字」。顶栏、侧栏、状态条、帧条、
+ * 图层行、调色板这些界面零件一律不许划选——深色 UI 上拖过一排按钮就是一片
+ * 蓝色高亮，很脏，拖到边界还会把滚动条带出来。
+ * 真正给人复制的内容（回复正文、工具 JSON、.aip 文本）在下面显式放开。
+ */
+.app,
+.gate,
+.gate * {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.assistant-body,
+.reasoning-body,
+.stream-caption,
+.entry-user .bubble,
+.entry-notice span,
+.tool-body,
+.tool-body pre,
+.approval-input,
+.approval-input pre,
+.aip-text,
+.chat-empty,
+input,
+textarea {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
 /* 通用弹性填充：面板头、工具条、脚注里反复用到。 */
 .grow {
   flex: 1;
@@ -279,6 +309,15 @@ body {
   gap: 14px;
 }
 
+/*
+ * flex 子项默认有 min-height: auto，最低也要放得下内容；把内容收起来的
+ * .entry-tool 带 overflow: hidden，于是它的「内容高度」被算成 0，多行工具块
+ * 会被压成一根细线。flex: none 让每条记录都保持自己的自然高度。
+ */
+.transcript > * {
+  flex: none;
+}
+
 .entry-user {
   align-self: flex-end;
   max-width: min(76%, 640px);
@@ -316,6 +355,129 @@ body {
   white-space: pre-wrap;
   word-break: break-word;
   color: var(--text);
+}
+
+/*
+ * Markdown 正文的排版。间距刻意压得很紧：聊天气泡里段落间距一大，
+ * 三行话就撑成一张卡片，反而更难读。
+ */
+.md > :first-child {
+  margin-top: 0;
+}
+
+.md > :last-child {
+  margin-bottom: 0;
+}
+
+.md p {
+  margin: 0 0 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.md h1,
+.md h2,
+.md h3,
+.md h4 {
+  margin: 10px 0 5px;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.4;
+  color: var(--text);
+}
+
+.md ul,
+.md ol {
+  margin: 0 0 6px;
+  padding-left: 18px;
+}
+
+.md li {
+  margin: 2px 0;
+}
+
+.md li > p {
+  margin: 0;
+}
+
+.md-code {
+  padding: 1px 4px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg-panel-2);
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 0.92em;
+  word-break: break-all;
+}
+
+.md-pre {
+  position: relative;
+  margin: 0 0 6px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: #0a0d12;
+  overflow: auto;
+  max-width: 100%;
+}
+
+.md-pre code {
+  display: block;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre;
+  color: var(--text-dim);
+}
+
+.md-lang {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--text-faint);
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: lowercase;
+}
+
+.md-quote {
+  margin: 0 0 6px;
+  padding: 1px 0 1px 9px;
+  border-left: 2px solid var(--accent);
+  color: var(--text-dim);
+}
+
+.md-rule {
+  margin: 8px 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+
+/* 表格：横向滚动留着，但绝不把气泡撑破。 */
+.md-table {
+  margin: 0 0 6px;
+  border-collapse: collapse;
+  font-size: 12px;
+  max-width: 100%;
+}
+
+.md-table th,
+.md-table td {
+  padding: 3px 7px;
+  border: 1px solid var(--border);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.md-table th {
+  background: var(--bg-panel-2);
+  color: var(--text-dim);
+  font-weight: 600;
+}
+
+.md-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
 }
 
 .entry-tool {
@@ -702,9 +864,46 @@ body {
   border: 0;
   background: none;
   color: inherit;
-  cursor: pointer;
+  cursor: default;
   font: inherit;
   text-align: left;
+}
+
+/* 改名是个不显眼但总要用的动作：铅笔平时藏着，行被选中或悬停才现身。 */
+.layer-rename-btn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  opacity: 0;
+}
+
+.layer-row:hover .layer-rename-btn,
+.layer-row.active .layer-rename-btn,
+.layer-rename-btn:focus-visible {
+  opacity: 1;
+}
+
+.layer-rename-btn:hover {
+  background: var(--bg-panel-2);
+  color: var(--accent);
+}
+
+/* 正在改名：输入框顶掉整个名字区，id 让位，省下每一寸横向空间。 */
+.layer-rename.ant-input {
+  flex: 1;
+  min-width: 0;
+  height: 20px;
+  padding: 0 4px;
+  font-size: 12px;
 }
 
 .layer-row .layer-id {

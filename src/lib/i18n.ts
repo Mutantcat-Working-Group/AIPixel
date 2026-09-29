@@ -95,6 +95,7 @@ export const zh = {
   "agent.lowering_tokens":
     "这个模型最多收 {cap} 个输出 token，已按它说的来，回答分几截拼起来",
   "agent.finished_whole": "这一段本来就已经写完了，没什么要补充的",
+  "agent.nudging_tools": "这个模型光说话没动手，已催它直接调工具",
   "agent.thinking_off_retry":
     "这个模型把预算全花在思考上了，一个工具都没调；已关掉思考重问一次",
   "agent.retrying": "这次请求没成（{reason}），正在重试 {attempt}/{max}",
@@ -139,6 +140,7 @@ export const zh = {
   "doc.layer_up": "上移这一图层，盖在更多图层之上",
   "doc.layer_down": "下移这一图层，被更多图层盖住",
   "doc.layer_visible": "显示或隐藏这一图层。隐藏只为看清底下，内容不丢。",
+  "doc.layer_rename": "给这个图层换个名字，回车落库、Esc 收手",
   "doc.layer_opacity": "不透明度",
   "doc.palette": "配色范围",
   "doc.transparent": "透明（索引 0）。用画笔时即擦除。",
@@ -627,6 +629,8 @@ export const en: Record<TKey, string> = {
     "This model accepts at most {cap} output tokens; switched to that and the reply will be stitched together",
   "agent.finished_whole":
     "The reply already looks complete, nothing more to continue",
+  "agent.nudging_tools":
+    "This model replied with words but made no edit; nudging it to call a tool",
   "agent.thinking_off_retry":
     "This model spent the whole budget thinking and called no tool; retrying with thinking turned off",
   "agent.retrying":
@@ -672,6 +676,7 @@ export const en: Record<TKey, string> = {
   "doc.layer_down": "Move this layer down so more layers cover it",
   "doc.layer_visible":
     "Show or hide this layer. Hiding only hides it, nothing is lost.",
+  "doc.layer_rename": "Rename this layer. Enter saves, Escape cancels",
   "doc.layer_opacity": "Opacity",
   "doc.palette": "Color range",
   "doc.transparent": "Transparent (index 0). With the brush it erases.",

@@ -1,5 +1,14 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { Button, ColorPicker, InputNumber, Segmented, Select, Slider, Tooltip } from "antd";
+import {
+  Button,
+  ColorPicker,
+  Input,
+  InputNumber,
+  Segmented,
+  Select,
+  Slider,
+  Tooltip,
+} from "antd";
 import {
   ArrowLeft,
   ArrowDown,
@@ -17,6 +26,7 @@ import {
   Pause,
   Play,
   Plus,
+  Pencil,
   Trash2,
   Undo2,
 } from "lucide-react";
@@ -312,6 +322,30 @@ export default function DocumentPanel() {
   const topLayer = activeLayerIndex < 0 || activeLayerIndex >= layerCount - 1;
   const bottomLayer = activeLayerIndex <= 0;
   const opacityPercent = Math.round(((activeLayer?.opacity ?? 255) / 255) * 100);
+
+  // 图层重命名：就地改，回车落库、Esc 收手，失焦当取消。
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  // renamingRef 是权威：失焦提交时会随 Input 卸载一起触发，那时 state 已经清了，
+  // 闭包里读到的仍是旧值，名字照样落库。以 ref 为准，取消先把 ref 抹掉。
+  const renamingRef = useRef<string | null>(null);
+  const beginRename = (layerId: string, currentName: string) => {
+    renamingRef.current = layerId;
+    setRenamingId(layerId);
+    setRenameDraft(currentName);
+  };
+  const commitRename = () => {
+    const layerId = renamingRef.current;
+    renamingRef.current = null;
+    setRenamingId(null);
+    if (layerId) void useStore.getState().renameLayer(layerId, renameDraft);
+  };
+  const cancelRename = () => {
+    renamingRef.current = null;
+    setRenamingId(null);
+    setRenameDraft("");
+  };
+
   // 落笔色统一成 ink：橡皮恒为透明，画笔跟随调色板选择。
   const ink: InkColor = tool === "eraser" ? null : (active.color ?? null);
   const canPlay = frames.length > 1;
@@ -436,6 +470,7 @@ export default function DocumentPanel() {
             // 瓦片平铺：每格都是同一幅画，帧层与笔迹层各有一份，
             // 只有中间那一格接管指针——回声格是用来看的，不是用来点的。
             <div
+              ref={tilesRef}
               className="canvas-tiles"
               style={{
                 gridTemplateColumns: `repeat(${tileMode}, ${document.width * scale}px)`,
@@ -541,14 +576,57 @@ export default function DocumentPanel() {
                   {layer.visible ? <Eye size={13} /> : <EyeOff size={13} />}
                 </button>
               </Tooltip>
-              <button
-                type="button"
+              {/* 原来是个 <button>：改名要往里塞输入框和改名按钮，
+                  套 button 不合法，整块改成 div。 */}
+              <div
                 className="layer-name"
                 onClick={() => useStore.getState().setActiveLayer(layer.id)}
               >
-                <span className="layer-id">{layer.id}</span>
-                <span className="grow">{layer.name}</span>
-              </button>
+                {renamingId === layer.id ? (
+                  <Input
+                    autoFocus
+                    size="small"
+                    className="layer-rename"
+                    onClick={(event) => event.stopPropagation()}
+                    value={renameDraft}
+                    onChange={(event) => setRenameDraft(event.target.value)}
+                    onPressEnter={commitRename}
+                    onBlur={() => commitRename()}
+                    onDoubleClick={(event) => event.stopPropagation()}
+                    onKeyDown={(event) => {
+                      // Esc 走 keydown：preventDefault 拦下的是「清空」不是交给窗口的快捷键。
+                      if (event.key === "Escape") {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        cancelRename();
+                      }
+                    }}
+                  />
+                ) : (
+                  <>
+                    <span className="layer-id">{layer.id}</span>
+                    <span
+                      className="grow layer-label"
+                      onDoubleClick={() => beginRename(layer.id, layer.name)}
+                    >
+                      {layer.name}
+                    </span>
+                    <Tooltip title={t("doc.layer_rename")}>
+                      <button
+                        type="button"
+                        className="layer-rename-btn"
+                        aria-label={t("doc.layer_rename")}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          beginRename(layer.id, layer.name);
+                        }}
+                      >
+                        <Pencil size={11} />
+                      </button>
+                    </Tooltip>
+                  </>
+                )}
+              </div>
             </div>
           ))}
           {activeLayer ? (

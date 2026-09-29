@@ -394,6 +394,42 @@ fn document_rejects_oversized_canvas() {
     assert!(Document::new("huge", 2048, 16).is_err());
 }
 
+/// 前端把编辑器操作按 serde 内部 tag 发过来。tag 名必须和 TypeScript 侧
+/// `EditorOperation` 的 `op` 字段逐字一致：改一边忘了另一边，图层改名
+/// 就会在前端「成功」、在后端静默失败。
+#[test]
+fn editor_operations_deserialize_from_the_webview_wire_form() {
+    let renamed: PixelOperation = serde_json::from_value(serde_json::json!({
+        "op": "rename_layer",
+        "id": "L0",
+        "name": "主角层",
+    }))
+    .expect("rename_layer arrives with its snake_case tag");
+    match renamed {
+        PixelOperation::RenameLayer { id, name } => {
+            assert_eq!(id, "L0");
+            assert_eq!(name, "主角层");
+        }
+        other => panic!("rename_layer 解成了别的变体：{other:?}"),
+    }
+
+    // 没给 name 的 set_layer_properties 必须能解：字段是可选的，缺了就是不动。
+    let partial: PixelOperation = serde_json::from_value(serde_json::json!({
+        "op": "set_layer_properties",
+        "id": "L0",
+        "visible": false,
+    }))
+    .expect("set_layer_properties tolerates a missing opacity");
+    assert!(matches!(
+        partial,
+        PixelOperation::SetLayerProperties {
+            visible: Some(false),
+            opacity: None,
+            ..
+        }
+    ));
+}
+
 #[test]
 fn exported_animation_lands_on_disk_and_reads_back() {
     use image::AnimationDecoder;

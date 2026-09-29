@@ -265,6 +265,8 @@ export interface StoreActions {
   setLayerVisible: (layerId: string, visible: boolean) => Promise<void>;
   /** 图层不透明度 0..255，与 Rust Layer::opacity 同一量纲。 */
   setLayerOpacity: (layerId: string, opacity: number) => Promise<void>;
+  /** 图层名：空名字等于没改，交给 Rust 的原名顶着。 */
+  renameLayer: (layerId: string, name: string) => Promise<void>;
   /** 沿绘制顺序挪一格：delta +1 = 后绘制，盖在更多图层之上。 */
   moveLayer: (delta: number) => Promise<void>;
   /** 回退一步编辑器改动：撤销栈见底就什么都不做。 */
@@ -1042,7 +1044,9 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       const requested = getState().revision;
       const frameIndex = getState().frameIndex;
       try {
-        const url = await bridge.pngUrl(id, frameIndex > 0 ? frameIndex : undefined);
+        // 第 0 帧也必须显式带上：后端收到 None 会把所有帧横向铺开，
+        // 画布里就会出现一条被拉长的帧序列。
+        const url = await bridge.pngUrl(id, frameIndex);
         if (getState().revision === requested) setState({ pngUrl: url });
       } catch (error) {
         failKey("store.render_failed", { error: String(error) });
@@ -1446,6 +1450,15 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     setLayerOpacity: async (layerId, opacity) => {
       const next = Math.max(0, Math.min(255, Math.round(opacity)));
       await getState().runEditorOps([{ op: "set_layer_properties", id: layerId, opacity: next }]);
+    },
+
+    renameLayer: async (layerId, name) => {
+      const trimmed = name.trim();
+      // 空白名一律当取消：不留一个看不见的空图层，也别为一个空串走一趟后端。
+      if (trimmed === "") return;
+      const current = getState().document?.layers.find((layer) => layer.id === layerId);
+      if (!current || current.name === trimmed) return;
+      await getState().runEditorOps([{ op: "rename_layer", id: layerId, name: trimmed }]);
     },
 
     moveLayer: async (delta) => {

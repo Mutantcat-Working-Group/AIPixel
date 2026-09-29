@@ -137,12 +137,11 @@ export function pushNotice(
 
 function sealLiveAssistant(entries: TranscriptEntry[]): TranscriptEntry[] {
   const next = [...entries];
-  for (let i = next.length - 1; i >= 0; i -= 1) {
+  // 一轮里可能留下多个还没封口的 assistant：模型吐一段话 → 调工具 → 再吐一段，
+  // 两段末尾都带着 live 光标。只封最后一个的话，前面那个会一直闪。
+  for (let i = 0; i < next.length; i += 1) {
     const entry = next[i];
-    if (entry.kind === "assistant" && entry.live) {
-      next[i] = { ...entry, live: false };
-      break;
-    }
+    if (entry.kind === "assistant" && entry.live) next[i] = { ...entry, live: false };
   }
   return next;
 }
@@ -205,10 +204,11 @@ export function reduceEvent(
     }
     case "tool_call": {
       // 模型上一步没吐字直接调工具：占位先撤，别留着假气泡占地方。
-      const base =
-        entries[entries.length - 1]?.kind === "pending" ? entries.slice(0, -1) : entries;
+      // 同一轮里，正文可以被工具调用切成好几段。这里先把前面那段封口：
+      // 不封的话它一直算 live，两个气泡同时闪光标，turn 结束也只封得到最后一个。
+      const sealed = sealLiveAssistant(entries).filter((entry) => entry.kind !== "pending");
       return [
-        ...base,
+        ...sealed,
         {
           key: key(),
           kind: "tool",
@@ -286,9 +286,9 @@ export function reduceEvent(
 
 /** turn 结束（完成 / 报错 / 中断）后的收尾：封口所有 live 条目。 */
 export function sealTranscript(entries: TranscriptEntry[]): TranscriptEntry[] {
-  // 占位只剩一轮收尾都没变成真内容（空回复 / 直接断掉）：直接抹掉，不残留假气泡。
-  const withoutPending = entries
-    .filter((entry, index) => !(entry.kind === "pending" && index === entries.length - 1));
+  // 占位节点一轮收尾都没变成真内容（空回复 / 直接断掉）：直接抹掉，不残留假气泡。
+  // 占位只会由紧随其后的事件（token / reasoning / tool_call）顶掉，收尾时还留着就是死的。
+  const withoutPending = entries.filter((entry) => entry.kind !== "pending");
   return sealLiveAssistant(withoutPending).map((entry) =>
     entry.kind === "reasoning" && entry.live ? { ...entry, live: false } : entry,
   );

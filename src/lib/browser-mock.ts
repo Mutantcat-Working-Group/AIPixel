@@ -394,6 +394,26 @@ function handler(cmd: string, raw?: unknown): unknown {
       return revision;
     }
     case "editor_apply_ops":
+      // 编辑器直接下的结构与帧操作。假后端不能整批吞掉：名字改了界面不动，
+      // 预览就成了「功能看着有、实际没接上」。只挑影响可视结果的几类真做。
+      for (const op of (payload.ops ?? []) as Record<string, unknown>[]) {
+        const id = op.id as string | undefined;
+        if (op.op === "rename_layer" && id) {
+          const layer = doc.layers.find((item) => item.id === id);
+          if (layer && typeof op.name === "string") layer.name = op.name;
+        }
+        if (op.op === "set_layer_properties" && id) {
+          const layer = doc.layers.find((item) => item.id === id);
+          if (layer) {
+            if (typeof op.visible === "boolean") layer.visible = op.visible;
+            if (typeof op.opacity === "number") layer.opacity = op.opacity;
+          }
+        }
+        if (op.op === "set_frame_duration" && id) {
+          const frame = doc.frames.find((item) => item.id === id);
+          if (frame && typeof op.duration_ms === "number") frame.duration_ms = op.duration_ms;
+        }
+      }
       revision += 1;
       broadcast();
       return revision;
