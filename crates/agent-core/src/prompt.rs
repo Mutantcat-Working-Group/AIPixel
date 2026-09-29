@@ -27,7 +27,7 @@ If the request is ambiguous, or you would need to clear or overwrite existing pi
 
 RETRY RULE: when a tool fails, its error names the failing operation index, the operation, the script problem, or the exact size mismatch. Fix that specific spot and resubmit; never resubmit unchanged arguments.
 
-BRIEF PLANNING: two or three sentences on layout and palette are enough - then act. Do not reason row by row or restate the plan; spend the output budget on the script or operations.
+BRIEF PLANNING: two or three sentences on layout and palette are enough - then act. Do not reason row by row or restate the plan; spend the output budget on the script or operations. Keep private reasoning inside that same few sentences and end it the moment the plan is clear: reasoning and drawing are paid for out of one budget, and a turn that runs out inside its own reasoning has not drawn a single pixel. When the request already names a subject, a frame count, or a size, you know enough - go straight to the script.
 NEVER NARRATE (the rule most replies break): no announcements of intent ("I will draw...", "let me create the frames...", "now the run cycle..."), no restating the request, no summarising your own script back to the user. Narration costs the exact budget the script needs. A reply that ends without the tool call it needed has produced nothing.
 
 PIXEL ART CRAFT - apply whenever you draw:
@@ -122,5 +122,43 @@ pub fn default_active(doc: &pixel_core::Document) -> ActiveContext {
         layer,
         frame,
         color: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 组装出来的提示词必须四样俱全：工艺规则、本轮分流、两张对照表、当前画布。
+    /// 少任何一样，模型那一轮就少了对应的眼睛——这类接线错了运行时很难发现，
+    /// 所以在这里钉死。
+    #[test]
+    fn the_assembled_prompt_carries_every_section() {
+        let doc = pixel_core::Document::new("t", 8, 8).unwrap();
+        let prompt = build_system_prompt(
+            &doc,
+            "L0",
+            "F0",
+            Some("#f2a03d"),
+            4000,
+            "TURN ROUTING: the user asked for a tile map, style 16-bit platformer",
+            "CRAFT NOTES - color ramp: build 3-5 steps per material",
+        );
+
+        // 静态规则：turn order、Lua API、像素工艺。
+        assert!(prompt.contains("OUTPUT BUDGET AND TURN ORDER"), "缺行动顺序约束");
+        assert!(prompt.contains("LUA CANVAS API"), "缺 Lua 接口说明");
+        assert!(prompt.contains("PIXEL ART CRAFT"), "缺像素工艺规则");
+        // 推理预算：这轮加的那句得在里面。
+        assert!(prompt.contains("reasoning and drawing are paid for out of one budget"));
+        // 本轮分流与知识条目。
+        assert!(prompt.contains("TURN ROUTING"));
+        assert!(prompt.contains("CRAFT NOTES"));
+        // 两张对照表：颜色名（中英 + hex）和美术术语。
+        assert!(prompt.contains("COLOR NAMES"));
+        assert!(prompt.contains("ART VOCABULARY"));
+        // 实时画布与当前画笔色。
+        assert!(prompt.contains("Current canvas context:"));
+        assert!(prompt.contains("#f2a03d"), "当前画笔色要告诉模型");
     }
 }

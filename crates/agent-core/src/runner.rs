@@ -158,6 +158,13 @@ fn resolve_max_tokens(user: Option<u32>, model: &str, ceiling: Option<u32>) -> u
 // 同样只是默认值，用户能在设置里把它调到 0（失败立即现形）或更大。
 const MAX_ROUND_RETRIES: usize = crate::models::LoopLimits::DEFAULT.max_retries;
 
+/// 「整轮只写了一篇推理」的长度门槛，字符数。
+///
+/// 平台不报截断时，光看 stop reason 认不出这种轮次。这个阈值比一段正常思考
+/// 长得多：真想清楚了的模型写个三五行就动笔了，写到这里还没动的，就是把
+/// 预算烧空了。
+const REASONING_ONLY_CHARS: usize = 600;
+
 /// 连续几轮只吐推理就收手。
 ///
 /// 推理模型最常见的死法：整轮预算全烧在思考上，正文一个字没有，工具一个不调。
@@ -1113,10 +1120,10 @@ impl AgentSession {
                 // 关掉思考重问一次，它立刻就调工具去了。整个 turn 只翻一次盘，
                 // 翻完还不行就照旧走续写那条路，别再翻第二次。
                 // 只认「正文一个字没有」：正文被掐断是另一种病，走续写，别抢。
-                if raw.stop == StopKind::Truncated
-                    && raw.accumulator.is_empty()
-                    && raw.text.is_empty()
-                    && !raw.reasoning.is_empty()
+                // 平台不报截断的就认长度：没正文、没工具、却写了一长篇推理，
+                // 也是同一副药。阈值放在正常思考的长度之上，免得误伤真想清楚了
+                // 只是话少的模型。
+                if burned_down_to_reasoning(&raw)
                     && !request.tools.is_empty()
                     && !thinking_off_tried
                 {
@@ -2004,6 +2011,17 @@ fn thinking_off_status() -> UiText {
         "agent.thinking_off_retry",
         "this model spent the whole budget thinking and called no tool; retrying with thinking turned off",
     )
+}
+
+/// 这一轮是不是「只说推理没干正事」：正文一个字没有、工具一个没调，只有推理。
+///
+/// 认两种：provider 报了的截断，和它没报、但推理长到把预算烧空了的。
+/// 正文被掐断是另一种病，走续写那条路，不在这里抢。
+fn burned_down_to_reasoning(raw: &RoundRaw) -> bool {
+    if !raw.text.is_empty() || !raw.accumulator.is_empty() || raw.reasoning.is_empty() {
+        return false;
+    }
+    raw.stop == StopKind::Truncated || raw.reasoning.chars().count() >= REASONING_ONLY_CHARS
 }
 
 /// 催「光说话不干活」的模型动手。这句是给模型看的，用英文写：提示词是英文。
@@ -3081,6 +3099,91 @@ mod tests {
         // 「画一只猫」什么都没定出来，就不该摆分流节点：空节点只是噪声。
         assert_eq!(flow.tools, vec!["pixel_run_shader".to_string()]);
         assert!(flow.completed, "{:?}", flow.error);
+    }
+
+    /// 平台不报截断的翻盘：stop reason 说「说完啦」，其实整轮预算都烧在推理里。
+    /// 只按 stop reason 判断的话，这种平台每次都要先白烧一轮，用户看着就是
+    /// 永远在思考、永远不动笔。
+    #[tokio::test]
+    async fn a_finished_round_that_only_thought_also_retries_with_thinking_off() {
+        let s = session();
+        let long_thought = "想".repeat(REASONING_ONLY_CHARS + 40);
+        let watched = rewire_watch(
+            &s,
+            vec![
+                vec![
+                    Ok(LlmEvent::Reasoning(long_thought)),
+                    Ok(LlmEvent::Done {
+                        stop_reason: "end_turn".into(),
+                    }),
+                ],
+                vec![
+                    Ok(LlmEvent::ToolUseStart {
+                        index: 0,
+                        id: "c1".into(),
+                        name: "pixel_run_shader".into(),
+                    }),
+                    Ok(LlmEvent::ToolInputDelta {
+                        index: 0,
+                        json_partial: "{}".into(),
+                    }),
+                    Ok(LlmEvent::Done {
+                        stop_reason: "tool_use".into(),
+                    }),
+                ],
+                done("画好了"),
+            ],
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("画一只猫".into(), Vec::new(), tx).await;
+        let flow = drain(rx);
+
+        assert!(
+            flow.statuses
+                .contains(&"agent.thinking_off_retry".to_string()),
+            "不报截断的长思考也该关掉思考重问：{:?}",
+            flow.statuses,
+        );
+        assert_eq!(
+            watched.seen.lock().unwrap().as_slice(),
+            &[false, true, true],
+            "翻盘后该带着关思考重发",
+        );
+        assert_eq!(flow.tools, vec!["pixel_run_shader".to_string()]);
+        assert!(flow.completed, "{:?}", flow.error);
+    }
+
+    /// 想清楚了就动笔的模型不许被误伤：短推理 + 正常收尾，不动它的思考开关。
+    #[tokio::test]
+    async fn a_short_reasoning_round_is_left_alone() {
+        let s = session();
+        let watched = rewire_watch(
+            &s,
+            vec![vec![
+                Ok(LlmEvent::Reasoning("这个问题是在问面板，不是在要图".into())),
+                Ok(LlmEvent::Done {
+                    stop_reason: "end_turn".into(),
+                }),
+            ]],
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("这个面板怎么用？".into(), Vec::new(), tx).await;
+        let flow = drain(rx);
+
+        assert_eq!(
+            watched.seen.lock().unwrap().as_slice(),
+            &[false],
+            "照模型默认来，不许偷偷改开关：{:?}",
+            watched.seen.lock().unwrap(),
+        );
+        assert!(
+            !flow.statuses
+                .contains(&"agent.thinking_off_retry".to_string()),
+            "没烧预算就不该翻盘：{:?}",
+            flow.statuses,
+        );
     }
 
     /// 光说话不干活：模型讲两句「已完成」就想收场，画布上一笔没有。

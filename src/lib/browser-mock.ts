@@ -425,13 +425,70 @@ function broadcast(): void {
   fire(AGENT_EVENT_CHANNEL, { kind: "document_updated", revision, document: doc });
 }
 
-/** 假后端在聊天里播一段「思考 -> 答复」的演示流，纯浏览器里能直接看成色。 */
+/** 假后端在聊天里播一段「思考 -> 分流 -> 落笔 -> 答复」的演示流，纯浏览器里能直接看成色。
+ * 事件类型与 Rust 主循环广播的一致（含工具调用与结果），折叠块的高度因此能量到真实值。 */
 function demoTurn(): void {
+  const planInput = {
+    reference_mode: "style",
+    intent: "tile-map",
+    art_style: "16-bit platformer",
+    mood: "cozy",
+    knowledge: ["color ramp", "tile seam"],
+  };
   const frames = [
     { at: 0, kind: "reasoning", text: "先看画布结构和需要改动的区域。" },
     { at: 420, kind: "reasoning", text: "\n中间那格改成橙色，其余保持原样。" },
-    { at: 840, kind: "token", text: "我来把这格涂成橙色。" },
-    { at: 1300, kind: "completed", turns: 1 },
+    { at: 520, kind: "tool_call", id: "demo-c1", name: "pixel_plan", input: planInput },
+    {
+      at: 620,
+      kind: "tool_result",
+      id: "demo-c1",
+      name: "pixel_plan",
+      summary: "意图：瓦片地图 · 风格：16-bit platformer",
+      is_error: false,
+    },
+    {
+      at: 700,
+      kind: "tool_call",
+      id: "demo-c2",
+      name: "pixel_apply_operations",
+      input: {
+        layers: [
+          {
+            name: "L0",
+            operations: [
+              { op: "rect", x: 8, y: 5, w: 4, h: 4, color: "3" },
+              { op: "pixel", x: 9, y: 6, color: "2" },
+            ],
+          },
+        ],
+      },
+    },
+    {
+      at: 840,
+      kind: "tool_result",
+      id: "demo-c2",
+      name: "pixel_apply_operations",
+      summary: "已写入 1 个图层、2 个操作",
+      is_error: false,
+    },
+    {
+      at: 1000,
+      kind: "token",
+      text: [
+        "## 这一轮做了什么",
+        "",
+        "- 图层 `L0`：把中间 4x4 填成调色板 3 号色，中心点提亮",
+        "- 瓦片底图 1x1 生效，边界像素留在格内",
+        "",
+        "**配色**沿用 `sweetie16`，1. 暖橙 `#f2a03d` 2. 亮黄 `#f7e26b`",
+        "",
+        "```lua",
+        "rectfill(8, 5, 11, 8, pal(3))",
+        "```",
+      ].join("\n"),
+    },
+    { at: 1400, kind: "completed", turns: 1 },
   ] as const;
   for (const frame of frames) {
     setTimeout(() => fire(AGENT_EVENT_CHANNEL, frame), frame.at);
