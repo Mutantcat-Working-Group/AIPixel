@@ -206,12 +206,12 @@ pub fn parse_updates(input: &Value) -> Result<Vec<ReferenceUpdate>, String> {
                     .map(|v| v as usize)
                     .unwrap_or(fallback);
                 if index == 0 {
-                    return Err(format!(
-                        "pixel_plan: 'index' is 1-based; 0 is not an image number"
-                    ));
+                    return Err(
+                        "pixel_plan: 'index' is 1-based; 0 is not an image number".to_string()
+                    );
                 }
                 let raw = map.get("mode").and_then(Value::as_str).ok_or_else(|| {
-                    format!("pixel_plan: every entry needs a 'mode' of style or full")
+                    "pixel_plan: every entry needs a 'mode' of style or full".to_string()
                 })?;
                 let because = map
                     .get("because")

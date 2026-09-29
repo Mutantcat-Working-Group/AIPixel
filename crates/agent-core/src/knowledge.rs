@@ -233,7 +233,7 @@ pub fn retrieve(query: &str, limit: usize) -> Vec<&'static KnowledgeEntry> {
             (score > 0).then_some((score, entry))
         })
         .collect();
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
     scored.into_iter().take(limit).map(|(_, e)| e).collect()
 }
 
