@@ -63,8 +63,8 @@ jobs:
             checksums-md5.txt
             checksums-sha1.txt
 
-  # 桌面安装包全部由 CI 出：mac 出 universal dmg，win 出 NSIS，
-  # linux 出 AppImage + deb。签名、语言、管理员权限都写在 tauri.conf.json
+  # 桌面安装包全部由 CI 出：mac 出 x64/arm64 dmg，win 出 x64/arm64 NSIS，
+  # linux 出 x64/arm64 AppImage + deb。签名、语言、管理员权限都写在 tauri.conf.json
   # 和自定义 NSIS 模板里，CI 只是照配置编，不额外传参。
   desktop:
     name: desktop ${{ matrix.name }}
@@ -76,12 +76,24 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: macos
-            os: macos-14
-          - name: windows
+          - name: macos-x64
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+          - name: macos-arm64
+            os: macos-15
+            target: aarch64-apple-darwin
+          - name: windows-x64
             os: windows-latest
-          - name: linux
-            os: ubuntu-24.04
+            target: x86_64-pc-windows-msvc
+          - name: windows-arm64
+            os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+          - name: linux-x64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - name: linux-arm64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -115,15 +127,10 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
-      # GitHub 已经不再发布 Intel mac 镜像，x86_64 只能留在 arm64 runner 上交叉。
-      # 补一个 target 直接出 universal 包：一份 dmg 同时吃 Apple Silicon 和 Intel，
-      # 比出两份原生包省掉一整套 Rust 编译。
-      - name: Add Intel target for the universal macOS bundle
-        if: runner.os == 'macOS'
-        run: rustup target add x86_64-apple-darwin
-
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
       # Hosted runner 上没有代码签名证书，现场签一张自签名的，不然 Windows 只能
       # 出无签名安装包。签名材料和 signtool 路径写进 GITHUB_ENV 给后面用。
@@ -180,11 +187,7 @@ jobs:
           # appimagetool 自身是个 AppImage，缺 libfuse 的 runner 上靠这个跑起来
           APPIMAGE_EXTRACT_AND_RUN: "1"
         run: |
-          if [ "${RUNNER_OS}" = "macOS" ]; then
-            pnpm tauri build --target universal-apple-darwin
-          else
-            pnpm tauri build
-          fi
+          pnpm tauri build --target ${{ matrix.target }}
 
       # bundle 的落点会随 --target 在 target/release 与 target/<triple>/release
       # 之间漂，而且 cargo workspace 的 target 落在仓库根、不在 src-tauri 下，
