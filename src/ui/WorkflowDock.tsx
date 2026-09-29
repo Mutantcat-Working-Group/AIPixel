@@ -24,10 +24,12 @@ import { open } from "@tauri-apps/plugin-dialog";
 
 import { Field, QuantizeFields } from "./QuantizeFields";
 import FramePicker from "./FramePicker";
+import LayerPicker from "./LayerPicker";
 import * as bridge from "../lib/bridge";
 import { briefToText, probeSummary, videoBriefToText } from "../lib/dock-format";
 import { isModelBacked, servedLineText, type ServedBy } from "../lib/dock-served";
 import { resolveFrameId } from "../lib/frame-pick";
+import { resolveImageSize, SIZE_OPTIONS as IMAGE_SIZE_OPTIONS } from "../lib/image-size";
 import { renderUiText, translate, translateText, type Lang } from "../lib/i18n";
 import { useStore } from "../lib/store";
 import { useT, type T } from "../lib/t";
@@ -54,7 +56,7 @@ const KIND_ICONS: Record<DockKind, ReactNode> = {
   quantize: <Grid2x2 size={13} />,
 };
 
-const SIZE_OPTIONS = ["512x512", "768x768", "1024x1024", "1024x576", "576x1024"];
+const SIZE_OPTIONS = IMAGE_SIZE_OPTIONS;
 
 const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "webp", "gif"];
 const VIDEO_EXTENSIONS = ["mp4", "mov", "webm", "mkv", "avi", "m4v"];
@@ -487,6 +489,20 @@ function ImageGenPanel({ gated }: { gated: boolean }) {
     draft.genFrame,
     active.frame || frameIds[0] || null,
   );
+  // 尺寸三段口径在这一处折成 "WxH"：跟随画布要知道当前画布多大，自定义要 snap 到 32。
+  const resolvedSize = resolveImageSize(
+    draft,
+    document?.width ?? 0,
+    document?.height ?? 0,
+  );
+  const sizeNoteText =
+    draft.sizeMode === "preset"
+      ? t("dock.size_hint_preset", { size: resolvedSize })
+      : t("dock.size_hint_scaled", {
+          w: document?.width ?? 0,
+          h: document?.height ?? 0,
+          size: resolvedSize,
+        });
 
   return (
     <>
@@ -499,14 +515,66 @@ function ImageGenPanel({ gated }: { gated: boolean }) {
           onChange={(event) => patchDraft({ prompt: event.target.value })}
         />
       </Field>
-      <Field label={t("dock.size")}>
-        <Select
+      <Field label={t("dock.size_mode")}>
+        <Segmented
           size="small"
-          value={draft.size}
-          options={SIZE_OPTIONS.map((size) => ({ label: size, value: size }))}
-          onChange={(next) => patchDraft({ size: next })}
+          block
+          value={draft.sizeMode}
+          options={[
+            { label: t("size.preset"), value: "preset" },
+            { label: t("size.canvas"), value: "canvas" },
+            { label: t("size.custom"), value: "custom" },
+          ]}
+          onChange={(next) =>
+            patchDraft({ sizeMode: next as DockDraft["sizeMode"] })
+          }
         />
       </Field>
+      {draft.sizeMode === "preset" ? (
+        <Field label={t("dock.size")}>
+          <Select
+            size="small"
+            value={draft.size}
+            options={SIZE_OPTIONS.map((size) => ({ label: size, value: size }))}
+            onChange={(next) => patchDraft({ size: next })}
+          />
+        </Field>
+      ) : null}
+      {draft.sizeMode === "custom" ? (
+        <Field label={t("dock.custom_size")}>
+          <div className="dock-size-pair">
+            <InputNumber
+              size="small"
+              style={{ width: "100%" }}
+              min={256}
+              max={1536}
+              step={32}
+              value={draft.sizeW}
+              onChange={(next) => patchDraft({ sizeW: next ?? 1024 })}
+            />
+            <span className="dock-size-x">x</span>
+            <InputNumber
+              size="small"
+              style={{ width: "100%" }}
+              min={256}
+              max={1536}
+              step={32}
+              value={draft.sizeH}
+              onChange={(next) => patchDraft({ sizeH: next ?? 1024 })}
+            />
+          </div>
+        </Field>
+      ) : null}
+      <p className="dock-note dock-size-note">{sizeNoteText}</p>
+      {document && document.layers.length > 1 ? (
+        <Field label={t("dock.gen_layer")}>
+          <LayerPicker
+            document={document}
+            value={draft.genLayer}
+            onChange={(next) => patchDraft({ genLayer: next })}
+          />
+        </Field>
+      ) : null}
       <Field label={t("dock.reference_source")}>
         <Segmented
           size="small"
@@ -578,10 +646,12 @@ function ImageGenPanel({ gated }: { gated: boolean }) {
         onClick={() =>
           void runWorkflow("image_gen", {
             prompt: draft.prompt,
-            size: draft.size,
+            size: resolvedSize,
             // 只把选中的那一源发出去：两个都给会让 Rust 报歧义，那是调用方的错。
             reference_frame: draft.genSource === "frame" ? referenceFrame : null,
             reference_path: draft.genSource === "file" ? draft.genPath : null,
+            // 空串等于「激活图层」，和 Rust 的 None 对齐。
+            layer: draft.genLayer || null,
             spot: draft.spot,
             duration_ms: draft.durationMs,
             options: draft.options,
@@ -910,11 +980,13 @@ function TweenPanel({ gated, frameCount }: { gated: boolean; frameCount: number 
 
 function QuantizePanel({ gated }: { gated: boolean }) {
   const t = useT();
+  const document = useStore((s) => s.document);
   const path = useStore((s) => s.dockDraft.quantizePath);
   const options = useStore((s) => s.dockDraft.options);
   const patchDraft = useStore((s) => s.patchDraft);
   const runPixelize = useStore((s) => s.runPixelize);
   const surfaceError = useStore((s) => s.surfaceError);
+  const layer = useStore((s) => s.dockDraft.quantizeLayer);
 
   async function quantize() {
     if (!path) return;
@@ -925,6 +997,7 @@ function QuantizePanel({ gated }: { gated: boolean }) {
         image_base64: attachment.data_base64,
         media_type: attachment.media_type,
         options,
+        layer: layer || null,
       });
     } catch (error) {
       surfaceError(error instanceof Error ? error.message : String(error));
@@ -934,13 +1007,22 @@ function QuantizePanel({ gated }: { gated: boolean }) {
   return (
     <>
       <PathField
-        label={t("dock.source")}
-        buttonLabel={t("dock.pick_image")}
-        extensions={IMAGE_EXTENSIONS}
-        value={path}
-        onPick={(picked) => patchDraft({ quantizePath: picked })}
-        onClear={() => patchDraft({ quantizePath: null })}
-      />
+      label={t("dock.source")}
+      buttonLabel={t("dock.pick_image")}
+      extensions={IMAGE_EXTENSIONS}
+      value={path}
+      onPick={(picked) => patchDraft({ quantizePath: picked })}
+      onClear={() => patchDraft({ quantizePath: null })}
+    />
+    {document && document.layers.length > 1 ? (
+      <Field label={t("dock.gen_layer")}>
+        <LayerPicker
+          document={document}
+          value={layer}
+          onChange={(next) => patchDraft({ quantizeLayer: next })}
+        />
+      </Field>
+    ) : null}
       <QuantizeFields value={options} onChange={(next) => patchDraft({ options: next })} />
       <Button
         block

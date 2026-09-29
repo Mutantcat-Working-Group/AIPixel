@@ -32,16 +32,27 @@ impl ModelsFile {
 
 /// 运行护栏配置文件。与模型配置分开存：改护栏不该牵动 api_key，
 /// 用户也方便把护栏单独发给别人复现一次「跑偏了」的现场。
+/// MCP 总开关也住在这里：它和护栏一样是「这一台机器怎么跑」的选择，
+/// 都不随模型定义走，也不该因为换个模型就被重置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LimitsFile {
     #[serde(default)]
     pub limits: LoopLimits,
+    /// MCP 总开关。默认开着：装了服务器的人不用多一步，
+    /// 不想让模型碰外部工具的人在设置里一次关干净。
+    #[serde(default = "mcp_on_by_default")]
+    pub mcp_enabled: bool,
+}
+
+fn mcp_on_by_default() -> bool {
+    true
 }
 
 impl Default for LimitsFile {
     fn default() -> Self {
         Self {
             limits: LoopLimits::DEFAULT,
+            mcp_enabled: true,
         }
     }
 }
@@ -75,6 +86,9 @@ pub struct AppState {
     models: Mutex<ModelsFile>,
     /// 运行护栏：续写、重试、纯思考的封顶值。所有会话共用一份。
     limits: Mutex<LoopLimits>,
+    /// MCP 总开关。false 时新会话不挂注册表，活着的会话当场摘掉——
+    /// 「关掉」必须当轮生效，否则用户以为关了就一定没在传。
+    mcp_enabled: Mutex<bool>,
     /// MCP 服务器登记表：配置的唯一真相，mcp.json 只是它的落盘影子。
     mcp: Arc<McpRegistry>,
     config_dir: Mutex<PathBuf>,
@@ -87,6 +101,7 @@ impl Default for AppState {
             sessions: Mutex::new(HashMap::new()),
             models: Mutex::new(ModelsFile::default()),
             limits: Mutex::new(LoopLimits::DEFAULT),
+            mcp_enabled: Mutex::new(true),
             mcp: Arc::new(McpRegistry::new()),
             config_dir: Mutex::new(PathBuf::new()),
             counter: Mutex::new(0),
@@ -177,11 +192,16 @@ impl AppState {
             return;
         };
         *self.limits.lock().unwrap() = file.limits;
+        *self.mcp_enabled.lock().unwrap() = file.mcp_enabled;
     }
 
     fn save_limits(&self) {
         let snapshot = *self.limits.lock().unwrap();
-        if let Ok(text) = serde_json::to_string_pretty(&LimitsFile { limits: snapshot }) {
+        let mcp_enabled = *self.mcp_enabled.lock().unwrap();
+        if let Ok(text) = serde_json::to_string_pretty(&LimitsFile {
+            limits: snapshot,
+            mcp_enabled,
+        }) {
             let _ = std::fs::write(self.limits_path(), text);
         }
     }
@@ -376,11 +396,37 @@ impl AppState {
                 .with_runner_config(runner_config)
                 .with_order(order),
         );
+        // 总开关关着就别挂：新会话从第一轮起就看不见外部工具。
+        if !*self.mcp_enabled.lock().unwrap() {
+            session.set_mcp_registry(None);
+        }
         self.sessions
             .lock()
             .unwrap()
             .insert(id.clone(), session.clone());
         session
+    }
+
+    /// MCP 总开关的当前值。
+    pub fn mcp_enabled(&self) -> bool {
+        *self.mcp_enabled.lock().unwrap()
+    }
+
+    /// 开/关 MCP，并当场作用到所有活着的会话。
+    /// 关的时候摘掉注册表而不是留着不读：模型下一轮看到的工具清单就是真实能力，
+    /// 悬着一份「看得见但调不动」的注册表只会让模型反复撞墙。
+    pub fn set_mcp_enabled(&self, enabled: bool) {
+        *self.mcp_enabled.lock().unwrap() = enabled;
+        let sessions: Vec<Arc<AgentSession>> =
+            self.sessions.lock().unwrap().values().cloned().collect();
+        for session in sessions {
+            session.set_mcp_registry(if enabled {
+                Some(self.mcp.clone())
+            } else {
+                None
+            });
+        }
+        self.save_limits();
     }
 
     pub fn drop_session(&self, id: &str) {
@@ -391,4 +437,31 @@ impl AppState {
 /// 默认画布：64x64 单图层单帧。
 pub fn default_document() -> Document {
     Document::new("untitled", 64, 64).expect("64x64 stays within document limits")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_mcp_switch_governs_both_new_and_living_sessions() {
+        // 默认开着：装了服务器的人不该再多一步。
+        let state = AppState::default();
+        assert!(state.mcp_enabled());
+        let first = state.create_session(default_document());
+        assert!(first.mcp_attached(), "默认状态下新会话要接外部工具");
+
+        // 关掉：活着的那个当场摘掉，新来的也不再挂。
+        state.set_mcp_enabled(false);
+        assert!(
+            !first.mcp_attached(),
+            "关掉必须当轮生效，不是下个会话才生效"
+        );
+        assert!(!state.create_session(default_document()).mcp_attached());
+
+        // 再开回来：双向都要通，否则开关只能关不能开。
+        state.set_mcp_enabled(true);
+        assert!(first.mcp_attached(), "重新打开要装回同一个共享注册表");
+        assert!(state.create_session(default_document()).mcp_attached());
+    }
 }

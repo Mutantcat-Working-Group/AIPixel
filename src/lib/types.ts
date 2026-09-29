@@ -31,6 +31,10 @@ export interface Layer {
   name: string;
   visible: boolean;
   opacity: number;
+  /** 这一层认领的配色范围，指向 `document.palettes` 里某一套。 */
+  palette_id: string;
+  /** 配色锁：锁上就只许用范围内的颜色，越界颜色由 Rust 就近归队。 */
+  locked: boolean;
 }
 
 export interface Frame {
@@ -52,7 +56,17 @@ export interface PixelDocument {
   layers: Layer[];
   frames: Frame[];
   cels: Record<string, Record<string, Cel>>;
+  /** 文档里的命名配色范围库：内置加用户自建。图层按 id 认领。 */
+  palettes: NamedPalette[];
   revision: number;
+}
+
+/** 一套命名配色范围。`builtin` 的改不得，用户想改就先复制一份。 */
+export interface NamedPalette {
+  id: string;
+  name: string;
+  colors: Rgba[];
+  builtin: boolean;
 }
 
 export type ContentBlock =
@@ -159,6 +173,10 @@ export interface SessionInfo {
   width: number;
   height: number;
   revision: number;
+  /** 用户改过的显示名；null = 拿默认编号显示。 */
+  title: string | null;
+  /** 侧边栏排序位。用户拖动过的顺序必须原样端出来，不能拿 id 字典序顶替。 */
+  order: number;
 }
 
 /** 会话里的一种模型分工。chat 就是会话主模型，另外三个能另绑一个。 */
@@ -263,6 +281,9 @@ export type ToolName =
 /** 审批的三种决定，对应 Rust ApprovalDecision 的 snake_case 拼写。 */
 export type ApprovalDecision = "approve" | "reject" | "approve_all";
 
+/** 设置弹窗的三页。模型一页管「连谁」，护栏一页管「怎么跑」，关于一页管「这是谁」。 */
+export type SettingsTab = "models" | "guardrails" | "about";
+
 /** 主循环停在工具调用上等决定时，前端持的这张票（字段转成前端习惯的 camelCase）。 */
 export interface PendingApproval {
   callId: string;
@@ -286,7 +307,18 @@ export type EditorOperation =
   | { op: "rename_layer"; id: string; name: string }
   | { op: "set_layer_properties"; id: string; visible?: boolean | null; opacity?: number | null }
   | { op: "add_palette_colors"; colors: string[] }
-  | { op: "set_palette"; colors: string[] };
+  | { op: "set_palette"; colors: string[] }
+  // ---- 命名配色范围 ----
+  // 复制一套现成的当起点：`from` 是内置预设时 Rust 落点是副本，原套一个色都不动。
+  | { op: "create_palette"; name: string; from?: string | null; colors?: string[]; layer?: string | null; id?: string | null }
+  // 内置删不得，还被某层引用着的也删不得，Rust 会拒。
+  | { op: "delete_palette"; id: string }
+  | { op: "rename_palette"; id: string; name: string }
+  | { op: "add_palette_color"; id: string; color: string }
+  | { op: "remove_palette_color"; id: string; index: number }
+  // 换层的配色范围；Rust 会把这一层的像素就地收进新范围。
+  | { op: "set_layer_palette"; layer: string; palette_id: string }
+  | { op: "set_layer_locked"; layer: string; locked: boolean };
 
 /** 落笔颜色：hex 字面量；null = 擦回透明（索引 0）。 */
 export type InkColor = string | null;
@@ -466,9 +498,17 @@ export interface ImageGenParams {
   /** 垫图帧：把文档里这一帧合成交给模型，与 reference_path 互斥。 */
   reference_frame?: string | null;
   options?: PixelizeOptions | null;
+  /** 落到哪个图层；省略用当前激活图层。 */
+  layer?: string | null;
   spot?: LandSpot;
   duration_ms?: number;
 }
+
+/** 探测结论：能（带通路）、不能（带原因）、不知道。三态，不让前端替用户下结论。 */
+export type ImageSupport =
+  | { state: "yes"; transport: string }
+  | { state: "no"; reason: string }
+  | { state: "unknown"; reason: string };
 
 export interface VideoFramesParams {
   path: string;
@@ -496,8 +536,17 @@ export interface WorkflowOutcome {
  */
 export interface DockDraft {
   prompt: string;
-  /** 形如 "1024x1024"，只有 chat modalities 传输认这个。 */
+  /** 尺寸怎么定：预设 / 跟画布宽高比 / 自己敲。 */
+  sizeMode: "preset" | "canvas" | "custom";
+  /** sizeMode 为 preset 时的预设值，形如 "1024x1024"。 */
   size: string;
+  /** sizeMode 为 custom 时的手敲宽高，发给模型前拼成 "WxH"。 */
+  sizeW: number;
+  sizeH: number;
+  /** 生图落到哪一层；空 = 激活图层。 */
+  genLayer: string;
+  /** 位图量化落到哪一层；空 = 激活图层。 */
+  quantizeLayer: string;
   genPath: string | null;
   /** 垫图从哪来。画布帧才是「改这一帧」：磁盘那张可能是旧导出。 */
   genSource: "none" | "file" | "frame";

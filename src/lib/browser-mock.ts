@@ -15,12 +15,13 @@ import { mockIPC } from "@tauri-apps/api/mocks";
 
 import { AGENT_EVENT_CHANNEL } from "./bridge";
 import { publishLocal } from "./local-bus";
-import { rgbaToHex } from "./palette";
+import { PALETTE_PRESETS, parseHex, rgbaToHex } from "./palette";
 import { compositeFrame } from "./render";
 import type {
   LoopLimits,
   McpServerView,
   McpServersView,
+  NamedPalette,
   ModelView,
   PixelDocument,
   Rgba,
@@ -66,6 +67,20 @@ const PALETTE: Rgba[] = HEX.map((hex) => ({
   a: 255,
 }));
 
+/**
+ * 预览文档里的配色范围库。和 Rust 的 `builtin_palettes()` 同一批 id，
+ * 这样预览里打开的面板、能改的范围、新建的副本都跟真机一个形状。
+ */
+const PREVIEW_PALETTES: NamedPalette[] = PALETTE_PRESETS.map((preset) => ({
+  id: preset.id,
+  name: preset.name,
+  colors: preset.colors.flatMap((hex) => {
+    const parsed = parseHex(hex);
+    return parsed ? [parsed] : [];
+  }),
+  builtin: true,
+}));
+
 const SLOT = "123456789abcdefghijklmnopqrstuvwxyz";
 
 /** 一颗居中的爱心，10x8，'.' 处透明。帧 2、3 只是往下沉一格，预览里看得出在跳。 */
@@ -106,7 +121,10 @@ function makeDocument(): PixelDocument {
     width: WIDTH,
     height: HEIGHT,
     palette: PALETTE,
-    layers: [{ id: "L0", name: "Layer 1", visible: true, opacity: 255 }],
+    layers: [
+      { id: "L0", name: "Layer 1", visible: true, opacity: 255, palette_id: "sweetie16", locked: false },
+    ],
+    palettes: PREVIEW_PALETTES,
     frames: [
       { id: "F0", duration_ms: 120 },
       { id: "F1", duration_ms: 120 },
@@ -146,6 +164,8 @@ const MCP_TRANSPORT = {
 };
 
 function makeSession(revision: number): SessionInfo {
+  // 浏览器预览只有一条会话，但 title / order 都要给：侧栏的改名和排序要靠它们。
+  const title = sessionTitle;
   const roles = (["chat", "image_gen", "vision", "video"] as const).map((role) => ({
     role,
     model_id: MODEL.id,
@@ -160,6 +180,8 @@ function makeSession(revision: number): SessionInfo {
     width: WIDTH,
     height: HEIGHT,
     revision,
+    title,
+    order: 1,
   };
 }
 
@@ -241,6 +263,11 @@ let LIMITS: LoopLimits = {
   max_retries: 5,
   max_reasoning_continuations: 2,
 };
+
+/** MCP 总开关在浏览器预览里的状态。默认开着，和 Rust 的默认值一致。 */
+let MCP_ON = true;
+// 预览里只有一条会话，但改名得能看见：显示名留住，重列时才带得上。
+let sessionTitle: string | null = null;
 
 function mcpList(): McpServersView {
   const server: McpServerView = {
@@ -325,6 +352,13 @@ function handler(cmd: string, raw?: unknown): unknown {
     case "agent_set_loop_limits":
       LIMITS = { ...(payload.limits as typeof LIMITS) };
       return LIMITS;
+    case "agent_mcp_enabled":
+      return MCP_ON;
+    case "agent_set_mcp_enabled":
+      // 浏览器预览里真假端点都没有，但只要记住开关本身：
+      // 设置界面的反馈、以及「关了之后工具清单变不变」都指着这个值。
+      MCP_ON = Boolean(payload.enabled);
+      return MCP_ON;
     case "agent_document":
       return { id, revision, document: doc };
     case "agent_history":
@@ -353,6 +387,15 @@ function handler(cmd: string, raw?: unknown): unknown {
       return makeSession(revision);
     case "session_drop":
       return null;
+    case "session_rename": {
+      // 空白名当取消：侧栏改回默认编号，别留一个空标题。
+      const title = (payload.title as string | null) ?? "";
+      sessionTitle = title.trim() === "" ? null : title;
+      return makeSession(revision);
+    }
+    case "session_reorder":
+      // 一条会话排不出花样，但顺序必须是确定地「没变」，侧栏才不会花屏。
+      return null;
     case "model_set_active":
     case "model_upsert":
       return { active_id: MODEL.id, entries: [MODEL] };
@@ -360,6 +403,15 @@ function handler(cmd: string, raw?: unknown): unknown {
       return { active_id: "", entries: [] };
     case "model_fetch_models":
       return FETCHABLE;
+    case "model_probe_image": {
+      // 浏览器预览没有真端点：按模型名演一遍三种结论，够看清按钮的三种反馈。
+      const probe = payload as unknown as { model?: string };
+      if (!probe.model) return { state: "unknown", reason: "no_model" };
+      if (/image|draw|paint|flux|sd|dall|seedream|imagen/.test(probe.model)) {
+        return { state: "yes", transport: "images" };
+      }
+      return { state: "no", reason: "text_only" };
+    }
     case "agent_sync_document":
       revision += 1;
       return { revision };

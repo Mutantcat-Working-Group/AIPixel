@@ -117,6 +117,9 @@ pub struct ImageGenParams {
     pub reference_frame: Option<String>,
     #[serde(default)]
     pub options: Option<PixelizeOptions>,
+    /// 落到哪个图层。省略用当前激活图层；多图层文档里这是常改的一项。
+    #[serde(default)]
+    pub layer: Option<String>,
     #[serde(default)]
     pub spot: LandSpot,
     #[serde(default = "default_frame_duration")]
@@ -326,6 +329,7 @@ pub async fn workflow_image_gen(
             doc,
             &active,
             LandRequest {
+                layer: params.layer.as_deref(),
                 spot: params.spot,
                 after: None,
                 duration_ms: params.duration_ms,
@@ -409,6 +413,7 @@ pub async fn workflow_video_frames(
                 doc,
                 &active,
                 LandRequest {
+                    layer: None,
                     spot: LandSpot::NewFrame,
                     after: after.clone(),
                     duration_ms: params.duration_ms,
@@ -801,6 +806,8 @@ fn media_type_for(path: &std::path::Path) -> String {
 /// 一次落图的全部输入。合成一个结构而不是散一串参数：
 /// 「落在哪儿」「按什么量化」「图是什么」本来就是同一件事。
 struct LandRequest<'a> {
+    /// 目标图层；None 表示当前激活图层。
+    layer: Option<&'a str>,
     spot: LandSpot,
     /// NewFrame 时新帧的锚点；None 表示追加到激活帧之后。
     /// 连续抽帧必须一帧接一帧，不能每次都插回同一个锚点后面。
@@ -818,8 +825,14 @@ fn land_bitmap(
     active: &ActiveContext,
     req: LandRequest<'_>,
 ) -> Result<LandedImage, String> {
+    // 图层显式指定就用指定的：用户在面板里挑的那一层，别拿激活层覆盖他的选择。
+    let layer = match req.layer {
+        Some(id) if doc.layers.iter().any(|l| l.id == id) => id.to_string(),
+        Some(id) => return Err(format!("unknown layer: {id}")),
+        None => active.layer.clone(),
+    };
     let (layer, frame) = match req.spot {
-        LandSpot::ActiveCel => (active.layer.clone(), active.frame.clone()),
+        LandSpot::ActiveCel => (layer, active.frame.clone()),
         LandSpot::NewFrame => {
             let anchor = req.after.as_deref().unwrap_or(&active.frame);
             let position = doc
@@ -843,7 +856,7 @@ fn land_bitmap(
                 .ok_or("the new frame did not land after the anchor")?
                 .id
                 .clone();
-            (active.layer.clone(), created)
+            (layer, created)
         }
     };
     let report = pixelize::pixelize_into_cel(
@@ -894,6 +907,7 @@ mod tests {
             &mut d,
             &active(),
             LandRequest {
+                layer: None,
                 spot: LandSpot::NewFrame,
                 after: None,
                 duration_ms: 100,
@@ -911,6 +925,7 @@ mod tests {
             &mut d,
             &active(),
             LandRequest {
+                layer: None,
                 spot: LandSpot::NewFrame,
                 after: Some(first.frame.clone()),
                 duration_ms: 100,
@@ -936,6 +951,7 @@ mod tests {
             &mut d,
             &active(),
             LandRequest {
+                layer: None,
                 spot: LandSpot::ActiveCel,
                 after: None,
                 duration_ms: 100,
@@ -950,6 +966,72 @@ mod tests {
         assert_eq!(landed.layer, "L0");
         assert_eq!(d.frames.len(), 1);
         assert_eq!(landed.report.colors_used, 1);
+    }
+
+    #[test]
+    fn a_named_layer_lands_where_the_user_pointed_not_on_the_active_one() {
+        // 面板里挑的那一层大于激活层：用户指向哪儿就落哪儿。
+        let mut d = doc();
+        ops::apply_batch(
+            &mut d,
+            &[PixelOperation::CreateLayer {
+                after: None,
+                name: Some("outline".into()),
+                id: None,
+            }],
+        )
+        .unwrap();
+        let target = d
+            .layers
+            .last()
+            .expect("create_layer appends one")
+            .id
+            .clone();
+        let opts = PixelizeOptions::default();
+        let bytes = decode_base64_bare(&red_png_b64());
+        let (rgba, w, h) = decode::decode_image(&bytes, "image/png").unwrap();
+        let landed = land_bitmap(
+            &mut d,
+            &active(),
+            LandRequest {
+                layer: Some(&target),
+                spot: LandSpot::ActiveCel,
+                after: None,
+                duration_ms: 100,
+                rgba: &rgba,
+                width: w,
+                height: h,
+                opts: &opts,
+            },
+        )
+        .unwrap();
+        assert_eq!(landed.layer, target);
+        assert_eq!(landed.frame, "F0");
+        // 落进去的是那一层，激活层上还是空的。
+        assert!(d.cels["L0"]["F0"].indices.iter().all(|i| *i == 0));
+        assert!(d.cels[&target]["F0"].indices.iter().any(|i| *i != 0));
+    }
+
+    #[test]
+    fn an_unknown_layer_is_reported_before_anything_is_drawn() {
+        let mut d = doc();
+        let opts = PixelizeOptions::default();
+        let err = land_bitmap(
+            &mut d,
+            &active(),
+            LandRequest {
+                layer: Some("L9"),
+                spot: LandSpot::ActiveCel,
+                after: None,
+                duration_ms: 100,
+                rgba: &[0, 0, 0, 0],
+                width: 0,
+                height: 0,
+                opts: &opts,
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("unknown layer"), "{err}");
     }
 
     #[test]

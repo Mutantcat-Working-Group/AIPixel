@@ -6,7 +6,7 @@ import { create } from "zustand";
 import { renderUiText, translate, type Lang, type TVARS, type TKey } from "./i18n";
 import * as bridge from "./bridge";
 import type { ExportFormat } from "./bridge";
-import { hexesOf, nearestHex } from "./palette";
+import { PALETTE_PRESETS, hexesOf, nearestHex, parseHex } from "./palette";
 import {
   emptyTranscript,
   historyToTranscript,
@@ -30,8 +30,10 @@ import type {
   DockKind,
   DockDraft,
   ImageGenParams,
+  ImageSupport,
   McpServerConfig,
   McpServersView,
+  NamedPalette,
   ModelConfig,
   ModelsView,
   ModelRole,
@@ -45,6 +47,7 @@ import type {
   RefinedPrompt,
   RefineTarget,
   SessionInfo,
+  SettingsTab,
   TweenParams,
   VideoBrief,
   VideoFramesParams,
@@ -69,6 +72,22 @@ import {
   type BatchRun,
 } from "./batch";
 
+/**
+ * 内置配色范围的界面镜像，色值与 Rust 的 `builtin_palettes()` 逐字一致。
+ * id 也照抄：图层认领用的是同一套 id，两边对不上就指不到地方。
+ * 只在「文档里没带 palettes」时兜底（早期 .aip、浏览器 preview）。
+ */
+const BUILTIN_PALETTES: NamedPalette[] = PALETTE_PRESETS.map((preset) => ({
+  id: preset.id,
+  name: preset.name,
+  colors: preset.colors.flatMap((hex) => {
+    const parsed = parseHex(hex);
+    // 内置色写错是不可能的事；真写错了就少一个色，也别让整个文档打不开。
+    return parsed ? [parsed] : [];
+  }),
+  builtin: true,
+}));
+
 export interface DocumentSnapshot {
   document: PixelDocument | null;
   revision: number;
@@ -76,6 +95,15 @@ export interface DocumentSnapshot {
   /** 已经渲染过 PNG 的 revision，用来丢弃过期的异步结果。 */
   pngRevision: number;
   frameIndex: number;
+}
+
+/**
+ * 会话排序：先按用户在侧边栏摆好的顺序位，同值时退回 id 字典序保证确定性。
+ * Rust 本身已按 order 返回，这里再兜一次是防着新建会话还没落排序位、
+ * 以及浏览器预览里没有真后端的情况。
+ */
+function sortSessions(list: SessionInfo[]): SessionInfo[] {
+  return [...list].sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
 }
 
 /** 工作流面板的状态。目录跟着会话走：会话换绑模型，能力就变。 */
@@ -161,6 +189,10 @@ interface StoreState extends DocumentSnapshot, WorkflowState, BatchState {
   lang: Lang;
   /** 运行护栏当前值；为 null 表示还没读过 Rust。 */
   loopLimits: LoopLimits | null;
+  /** MCP 总开关。true = 模型看得见用户自配的外部工具。 */
+  mcpEnabled: boolean;
+  /** 设置弹窗停在哪一页：模型 / 行为护栏 / 关于。 */
+  settingsTab: SettingsTab;
 }
 
 export interface StoreActions {
@@ -169,6 +201,10 @@ export interface StoreActions {
   selectSession: (id: string) => Promise<void>;
   createSession: (width?: number, height?: number) => Promise<void>;
   removeSession: (id: string) => Promise<void>;
+  /** 改侧边栏显示名。空白名 Rust 当取消处理。 */
+  renameSession: (id: string, title: string) => Promise<void>;
+  /** 拖动排序后整批上报新次序；数组就是排好后的 id 列表。 */
+  reorderSessions: (ids: string[]) => Promise<void>;
   bindSessionModel: (modelId: string) => Promise<void>;
   /** 给生图 / 识图 / 读视频之一另绑一个模型。 */
   bindSessionRole: (role: ModelRole, modelId: string) => Promise<void>;
@@ -194,6 +230,20 @@ export interface StoreActions {
   refreshMcp: () => Promise<void>;
   openMcp: () => void;
   closeMcp: () => void;
+  /** 读一次 MCP 总开关。 */
+  refreshMcpEnabled: () => Promise<void>;
+  /** 开/关 MCP。Rust 当场作用到活着的会话，回值才是生效的那份。 */
+  setMcpEnabled: (enabled: boolean) => Promise<void>;
+  /** 探测这个模型能不能出图；只回结论，不改任何设置。 */
+  probeImage: (params: {
+    id?: string | null;
+    baseUrl: string;
+    apiKey: string;
+    protocol: Protocol;
+    model: string;
+  }) => Promise<ImageSupport>;
+  /** 切设置页。 */
+  setSettingsTab: (tab: SettingsTab) => void;
   upsertMcpServer: (config: McpServerConfig) => Promise<void>;
   removeMcpServer: (name: string) => Promise<void>;
   connectMcpServer: (name: string) => Promise<void>;
@@ -255,6 +305,21 @@ export interface StoreActions {
   runEditorOps: (ops: EditorOperation[], frameHint?: number) => Promise<number | null>;
   /** 换配色范围：整幅按就近色重映射进新调色板，画面留住、颜色归队。 */
   setPaletteColors: (colors: string[]) => Promise<boolean>;
+  /** 复制一套现成的配色范围当起点（内置预设走副本），再把当前层指过去。 */
+    forkPalette: (fromId: string, name: string, layerId?: string) => Promise<void>;
+  /** 从零起一套；不给名字就沿用 Rust 的兜底命名。 */
+    createPalette: (name: string, colors: string[], layerId?: string) => Promise<void>;
+  /** 删掉一套自定义范围。内置的、还被引用的，Rust 会拒。 */
+  deletePalette: (id: string) => Promise<void>;
+  renamePalette: (id: string, name: string) => Promise<void>;
+  /** 往范围里添一个颜色。已经有这个色就当无事发生。 */
+  addPaletteColor: (id: string, color: string) => Promise<void>;
+  /** 从范围里拿掉一个颜色；画面不动，只是以后不许再用了。 */
+  removePaletteColor: (id: string, index: number) => Promise<void>;
+  /** 把某一层指到另一套范围上；这一层的像素就地收进新范围。 */
+  setLayerPalette: (layerId: string, paletteId: string) => Promise<void>;
+  /** 配色锁。锁上=只许用范围内的颜色，AI 也不能越界。 */
+  setLayerLocked: (layerId: string, locked: boolean) => Promise<void>;
   addFrame: () => Promise<void>;
   duplicateFrame: () => Promise<void>;
   deleteFrame: () => Promise<void>;
@@ -326,7 +391,12 @@ const DEFAULT_OPTIONS: PixelizeOptions = {
 
 const INITIAL_DOCK_DRAFT: DockDraft = {
   prompt: "",
+  sizeMode: "preset",
   size: "1024x1024",
+  sizeW: 1024,
+  sizeH: 1024,
+  genLayer: "",
+  quantizeLayer: "",
   genPath: null,
   genSource: "none",
   genFrame: "",
@@ -644,6 +714,9 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     dockDraft: INITIAL_DOCK_DRAFT,
     composeRequest: null,
     lang: storedLang(),
+    // MCP 默认开着：关掉要在设置里明确按一下，而不是因为一次读失败悄悄消失。
+    mcpEnabled: true,
+    settingsTab: "models",
     recipe: DEFAULT_BATCH_RECIPE,
     scan: null,
     scanBusy: false,
@@ -669,6 +742,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
           models = EMPTY_MODELS;
         }
         setState({ models });
+        await getState().refreshMcpEnabled();
         await getState().refreshLoopLimits();
         let mcpServers: McpServersView;
         try {
@@ -688,7 +762,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
           const created = await bridge.createSession();
           sessions = [created];
         }
-        sessions.sort((a, b) => a.id.localeCompare(b.id));
+        sessions = sortSessions(sessions);
         const first = sessions[sessions.length - 1];
         if (first) {
           setState({ sessions, activeId: first.id });
@@ -720,7 +794,8 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       const document = width && height ? blankDocument(width, height) : undefined;
       const info = await bridge.createSession(document);
       setState({
-        sessions: [...getState().sessions, info].sort((a, b) => a.id.localeCompare(b.id)),
+        // 新会话按顺序位追加：Rust 会把它的 order 排在已有会话之后。
+        sessions: sortSessions([...getState().sessions, info]),
         activeId: info.id,
         entries: emptyTranscript(),
         running: false,
@@ -903,6 +978,59 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     openMcp: () => setState({ mcpOpen: true }),
 
     closeMcp: () => setState({ mcpOpen: false }),
+
+    refreshMcpEnabled: async () => {
+      try {
+        setState({ mcpEnabled: await bridge.mcpEnabled() });
+      } catch {
+        // 读不回来就按开着显示：用户看到的开关该和他上一次设的一致。
+      }
+    },
+
+    setMcpEnabled: async (enabled) => {
+      try {
+        // 回值才算生效：Rust 可能拒掉（比如磁盘写不进去），界面上要跟着回值走。
+        setState({ mcpEnabled: await bridge.setMcpEnabled(enabled) });
+      } catch (error) {
+        failKey("store.set_mcp_enabled_failed", { error: String(error) });
+        await getState().refreshMcpEnabled();
+      }
+    },
+
+    probeImage: async (params) => bridge.probeImageCapability(params),
+
+    setSettingsTab: (tab) => setState({ settingsTab: tab }),
+
+    renameSession: async (id, title) => {
+      try {
+        const info = await bridge.renameSession(id, title);
+        setState({
+          sessions: sortSessions(
+            getState().sessions.map((session) => (session.id === id ? info : session)),
+          ),
+        });
+      } catch (error) {
+        failKey("store.rename_session_failed", { error: String(error) });
+      }
+    },
+
+    reorderSessions: async (ids) => {
+      // 先按新次序显示再上报：拖动已经是个明确意图，等后端反而会看着像卡住。
+      const known = new Map(getState().sessions.map((session) => [session.id, session]));
+      const ordered: SessionInfo[] = [];
+      for (const id of ids) {
+        const hit = known.get(id);
+        // 拖进来的 id 可能已经不在了（删过会话），少一个不补位，剩下照原次序。
+        if (hit) ordered.push(hit);
+      }
+      setState({ sessions: ordered });
+      try {
+        await bridge.reorderSessions(ids);
+      } catch (error) {
+        failKey("store.reorder_sessions_failed", { error: String(error) });
+      }
+      await getState().refreshSessions();
+    },
 
     upsertMcpServer: async (config) => {
       setState({ mcpBusy: true });
@@ -1414,6 +1542,60 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       return revision !== null;
     },
 
+    forkPalette: async (fromId, name, layerId) => {
+      // layerId 不传就跟着激活层走；配色区伺候的是别层时，显式把它带过来。
+      const target = layerId ?? getState().active.layer;
+      if (!target) return;
+      // 改内置预设的唯一入口：Rust 落点是副本，原套一个色都不动。
+      // 顺带把当前层指过去——用户改的就是眼前这一层的范围。
+      await getState().runEditorOps([
+        {
+          op: "create_palette",
+          name,
+          from: fromId,
+          colors: [],
+          layer: target,
+        },
+      ]);
+    },
+
+    createPalette: async (name, colors, layerId) => {
+      const target = layerId ?? getState().active.layer;
+      if (!target) return;
+      await getState().runEditorOps([
+        { op: "create_palette", name, colors, layer: target },
+      ]);
+    },
+
+    deletePalette: async (id) => {
+      await getState().runEditorOps([{ op: "delete_palette", id }]);
+    },
+
+    renamePalette: async (id, name) => {
+      const trimmed = name.trim();
+      if (trimmed === "") return;
+      await getState().runEditorOps([{ op: "rename_palette", id, name: trimmed }]);
+    },
+
+    addPaletteColor: async (id, color) => {
+      const hex = color.trim();
+      if (hex === "") return;
+      await getState().runEditorOps([{ op: "add_palette_color", id, color: hex }]);
+    },
+
+    removePaletteColor: async (id, index) => {
+      await getState().runEditorOps([{ op: "remove_palette_color", id, index }]);
+    },
+
+    setLayerPalette: async (layerId, paletteId) => {
+      if (!paletteId) return;
+      await getState().runEditorOps([{ op: "set_layer_palette", layer: layerId, palette_id: paletteId }]);
+    },
+
+    setLayerLocked: async (layerId, locked) => {
+      await getState().runEditorOps([{ op: "set_layer_locked", layer: layerId, locked }]);
+    },
+
     deleteFrame: async () => {
       const document = getState().document;
       const current = document?.frames[getState().frameIndex];
@@ -1500,8 +1682,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     refreshSessions: async () => {
       try {
         const sessions = await bridge.listSessions();
-        sessions.sort((a, b) => a.id.localeCompare(b.id));
-        setState({ sessions });
+        setState({ sessions: sortSessions(sessions) });
       } catch {
         // 会话列表刷新失败不影响主流程
       }
@@ -1653,9 +1834,13 @@ export function blankDocument(width: number, height: number): PixelDocument {
     width,
     height,
     palette: [],
-    layers: [{ id: "L0", name: "Layer 1", visible: true, opacity: 255 }],
+    layers: [
+      // 新图层默认落在 Sweetie 16 上、而且是开着的：用户第一笔就能画出想要的颜色。
+      { id: "L0", name: "Layer 1", visible: true, opacity: 255, palette_id: "sweetie16", locked: false },
+    ],
     frames: [{ id: "F0", duration_ms: 100 }],
     cels: { L0: { F0: { indices: new Array(width * height).fill(0) } } },
+    palettes: BUILTIN_PALETTES,
     revision: 0,
   };
 }

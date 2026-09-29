@@ -333,7 +333,9 @@ pub struct AgentSession {
     /// 当前挂起的审批发送端；None 表示没有调用在等用户。
     approval: Mutex<Option<ApprovalSlot>>,
     /// 用户自配的 MCP 工具服务器注册表；None 表示这个会话不接外部工具。
-    mcp: Option<Arc<McpRegistry>>,
+    /// 放锁里是因为「全局 MCP 开关」要在会话活着的时候摘掉它：
+    /// 用户在设置里关掉 MCP，下一轮就不该再把外部工具暴露给模型。
+    mcp: Mutex<Option<Arc<McpRegistry>>>,
     /// 侧边栏显示名。None = 用默认编号，用户改过就是改过的名字。
     title: Mutex<Option<String>>,
     /// 排序位。新建时拿自增序号，前端拖动排序后整批改写。
@@ -357,7 +359,7 @@ impl AgentSession {
             active: Mutex::new(active),
             cancelled: AtomicBool::new(false),
             approval: Mutex::new(None),
-            mcp: None,
+            mcp: Mutex::new(None),
             title: Mutex::new(None),
             order: AtomicU64::new(0),
             pending_edits: Mutex::new(Vec::new()),
@@ -372,8 +374,20 @@ impl AgentSession {
     /// 挂上 MCP 注册表：会话每轮把它 expose 的工具并进工具清单，
     /// `mcp__*` 调用分流过去。注册表是共享的，会话换模型不影响连接。
     pub fn with_mcp_registry(mut self, registry: Arc<McpRegistry>) -> Self {
-        self.mcp = Some(registry);
+        *self.mcp.get_mut().unwrap() = Some(registry);
         self
+    }
+
+    /// 换掉（或摘掉）MCP 注册表。None = 这个会话从此不接外部工具，
+    /// 已经暴露过的工具清单下一轮重建时自然消失。
+    pub fn set_mcp_registry(&self, registry: Option<Arc<McpRegistry>>) {
+        *self.mcp.lock().unwrap() = registry;
+    }
+
+    /// 这个会话现在接不接外部工具。给总开关和诊断用：不把注册表本身交出去，
+    /// 想摘它的人只能走 set_mcp_registry。
+    pub fn mcp_attached(&self) -> bool {
+        self.mcp.lock().unwrap().is_some()
     }
 
     /// 给会话一个排序位。侧边栏拖动排序后按新的位次整批改写。
@@ -491,7 +505,12 @@ impl AgentSession {
 
     /// 本会话可见的 MCP 工具规格（没挂注册表就空）。
     fn mcp_specs(&self) -> Vec<ToolSpec> {
-        self.mcp.as_ref().map(|r| r.specs()).unwrap_or_default()
+        self.mcp
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|r| r.specs())
+            .unwrap_or_default()
     }
 
     pub fn id(&self) -> &str {
@@ -1151,7 +1170,7 @@ impl AgentSession {
                         is_error: true,
                     },
                     None => {
-                        let registry = self.mcp.clone();
+                        let registry = self.mcp.lock().unwrap().clone();
                         if call.name.starts_with(mcp::MCP_TOOL_PREFIX) {
                             // 外部工具：分流到用户自配的 MCP 服务器，不进文档锁。
                             match registry {

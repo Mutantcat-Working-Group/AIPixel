@@ -1,9 +1,10 @@
-import { useState } from "react";
-import { Button, InputNumber, Modal, Tooltip } from "antd";
-import { Github, Plus, Trash2 } from "lucide-react";
+import { useRef, useState } from "react";
+import { Button, Input, InputNumber, Modal, Tooltip } from "antd";
+import { Github, Pencil, Plus, Trash2 } from "lucide-react";
 
 import { useStore } from "../lib/store";
 import { useT } from "../lib/t";
+import { openContextMenu } from "./ContextMenu";
 
 const REPO_URL = "https://github.com/Mutantcat-Working-Group/AIPixel";
 
@@ -27,13 +28,53 @@ export default function SessionSidebar() {
   const activeId = useStore((s) => s.activeId);
   const createSession = useStore((s) => s.createSession);
   const removeSession = useStore((s) => s.removeSession);
+  const renameSession = useStore((s) => s.renameSession);
+  const reorderSessions = useStore((s) => s.reorderSessions);
 
   const [sizedOpen, setSizedOpen] = useState(false);
   const [width, setWidth] = useState(64);
   const [height, setHeight] = useState(64);
+  // 正在改名的会话与草稿。ref 是权威值：失焦提交时 Input 已卸载，
+  // 闭包里读 state 会拿到已经清空的旧值，所以以 ref 为准（图层改名同款打法）。
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  const renamingRef = useRef<string | null>(null);
+  // 拖动排序：只管「谁被拖、现在悬在谁头上」，松手按新次序整批上报。
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [overId, setOverId] = useState<string | null>(null);
 
   async function createDefault() {
     await createSession();
+  }
+
+  const beginRename = (id: string, current: string) => {
+    renamingRef.current = id;
+    setRenamingId(id);
+    setRenameDraft(current);
+  };
+  const commitRename = () => {
+    const id = renamingRef.current;
+    renamingRef.current = null;
+    setRenamingId(null);
+    if (id) void renameSession(id, renameDraft);
+  };
+  const cancelRename = () => {
+    renamingRef.current = null;
+    setRenamingId(null);
+    setRenameDraft("");
+  };
+
+  /** 松手落位：把拖着的会话搬到目标槽位， ids 整批交给 Rust 重排序位。 */
+  function dropOn(targetId: string) {
+    if (!dragId || dragId === targetId) return;
+    const ids = sessions.map((session) => session.id);
+    const from = ids.indexOf(dragId);
+    const to = ids.indexOf(targetId);
+    if (from < 0 || to < 0) return;
+    ids.splice(to, 0, ...ids.splice(from, 1));
+    setDragId(null);
+    setOverId(null);
+    void reorderSessions(ids);
   }
 
   return (
@@ -56,11 +97,97 @@ export default function SessionSidebar() {
           {sessions.map((session) => (
             <div
               key={session.id}
-              className={`session-item ${session.id === activeId ? "active" : ""}`}
+              className={[
+                "session-item",
+                session.id === activeId ? "active" : "",
+                dragId === session.id ? "dragging" : "",
+                overId === session.id && dragId !== session.id ? "drop-target" : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
+              draggable={renamingId !== session.id}
               onClick={() => void useStore.getState().selectSession(session.id)}
+              onDragStart={(event) => {
+                setDragId(session.id);
+                // 给拖影一点内容：不然 Firefox 下是个空块，看不出拖的是什么。
+                event.dataTransfer.setData("text/plain", session.title ?? session.id);
+                event.dataTransfer.effectAllowed = "move";
+              }}
+              onDragOver={(event) => {
+                // 不 preventDefault 就没有 drop 事件，排序整个失效。
+                event.preventDefault();
+                event.dataTransfer.dropEffect = "move";
+                setOverId(session.id);
+              }}
+              onDragLeave={() => setOverId((id) => (id === session.id ? null : id))}
+              onDrop={(event) => {
+                event.preventDefault();
+                dropOn(session.id);
+              }}
+              onDragEnd={() => {
+                setDragId(null);
+                setOverId(null);
+              }}
+              onContextMenu={(event) =>
+                openContextMenu(event, [
+                  {
+                    key: "rename",
+                    label: t("sidebar.rename"),
+                    icon: <Pencil size={13} />,
+                    onSelect: () => beginRename(session.id, session.title ?? session.id),
+                  },
+                  {
+                    key: "delete",
+                    label: t("sidebar.delete"),
+                    icon: <Trash2 size={13} />,
+                    danger: true,
+                    onSelect: () => void removeSession(session.id),
+                  },
+                ])
+              }
             >
-              <span className="session-id">{session.id}</span>
+              {renamingId === session.id ? (
+                <Input
+                  autoFocus
+                  size="small"
+                  className="session-rename"
+                  value={renameDraft}
+                  maxLength={60}
+                  placeholder={t("sidebar.rename_placeholder")}
+                  // 行本身 draggable：不拦住拖拽的话，输入框里连光标都选不动。
+                  onDragStart={(event) => event.preventDefault()}
+                  onClick={(event) => event.stopPropagation()}
+                  onChange={(event) => setRenameDraft(event.target.value)}
+                  onPressEnter={commitRename}
+                  onBlur={commitRename}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      cancelRename();
+                    }
+                  }}
+                />
+              ) : (
+                <span
+                  className="session-id"
+                  onDoubleClick={() => beginRename(session.id, session.title ?? session.id)}
+                >
+                  {session.title ?? session.id}
+                </span>
+              )}
               <span className="session-actions">
+                <Tooltip title={t("sidebar.rename")}>
+                  <Button
+                    size="small"
+                    type="text"
+                    icon={<Pencil size={13} />}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      beginRename(session.id, session.title ?? session.id);
+                    }}
+                  />
+                </Tooltip>
                 <Tooltip title={t("sidebar.delete")}>
                   <Button
                     size="small"

@@ -10,6 +10,7 @@ import ModelSettingsModal from "./ui/ModelSettingsModal";
 import McpPanel from "./ui/McpPanel";
 import SessionSidebar from "./ui/SessionSidebar";
 import WorkflowDock from "./ui/WorkflowDock";
+import ContextMenuHost from "./ui/ContextMenu";
 import { useStore } from "./lib/store";
 import { useT } from "./lib/t";
 import type { PermissionMode } from "./lib/types";
@@ -292,6 +293,7 @@ export default function App() {
 
       <ModelSettingsModal />
       <McpPanel />
+      <ContextMenuHost />
     </div>
   );
 }

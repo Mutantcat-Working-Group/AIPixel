@@ -1,4 +1,10 @@
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import {
   Button,
   ColorPicker,
@@ -7,6 +13,7 @@ import {
   Segmented,
   Select,
   Slider,
+  Switch,
   Tooltip,
 } from "antd";
 import {
@@ -23,23 +30,28 @@ import {
   Ghost,
   Layers,
   PaintBucket,
+  Palette,
   Pause,
   Play,
   Plus,
   Pencil,
   Trash2,
   Undo2,
+  X,
 } from "lucide-react";
 
 import { useStore } from "../lib/store";
 import { useT } from "../lib/t";
 import { appendStroke, lineCells } from "../lib/stroke";
 import { compositeFrame } from "../lib/render";
-import { PALETTE_PRESETS, hexesOf, paletteWithCustom } from "../lib/palette";
+import { rgbaToHex } from "../lib/palette";
+import { NAMED_COLORS, colorName } from "../lib/colornames";
 import FrameThumb from "./FrameThumb";
+import { openContextMenu, type ContextMenuItem } from "./ContextMenu";
 import type {
   EditorTool,
   InkColor,
+  Layer,
   PixelDocument,
   StrokeCell,
 } from "../lib/types";
@@ -60,7 +72,7 @@ function integerScale(
 
 /** 指针位置 -> 格子坐标。用实测矩形换算，CSS 缩放图片后格子也不会对不齐。 */
 function cellFromEvent(
-  event: ReactPointerEvent<HTMLDivElement>,
+  event: ReactMouseEvent<HTMLDivElement>,
   document: PixelDocument,
 ): StrokeCell | null {
   const rect = event.currentTarget.getBoundingClientRect();
@@ -78,6 +90,7 @@ export default function DocumentPanel() {
   const active = useStore((s) => s.active);
   const frameIndex = useStore((s) => s.frameIndex);
   const revision = useStore((s) => s.revision);
+  const lang = useStore((s) => s.lang);
   const undoDepth = useStore((s) => s.undoStack.length);
   const [tool, setTool] = useState<EditorTool>("brush");
   const [aipText, setAipText] = useState<string | null>(null);
@@ -86,14 +99,18 @@ export default function DocumentPanel() {
   const [playing, setPlaying] = useState(false);
   const [playFrame, setPlayFrame] = useState(0);
   const [onion, setOnion] = useState(false);
-  // 配色范围：null = 还没挑预设，沿用文档当前的调色板。
-  const [presetId, setPresetId] = useState<string | null>(null);
-  // 「任意颜色」：一个预设最多一个槽位，改它只动这一格。
-  const [customColor, setCustomColor] = useState<string | null>(null);
-  // 取色器拖动的中间值：即时预览，松手才落文档；不然一次拖动就是一串撤销步。
-  const [draftColor, setDraftColor] = useState<string | null>(null);
-  // 瓦片底图：1 = 单幅，2 / 3 = 把画面平铺开，看瓦片接缝。
+ // 瓦片底图：1 = 单幅，2 / 3 = 把画面平铺开，看瓦片接缝。
   const [tileMode, setTileMode] = useState<1 | 2 | 3>(1);
+  // 配色区正在伺候哪一层。null = 跟着激活层走；用户在色板区分区里另挑过
+  // 一层时钉住，方便不切激活层也能给底层换范围。
+  const [scopeLayerId, setScopeLayerId] = useState<string | null>(null);
+ // 取色盘正在挑的草稿值：拖动过程中只预览，落文档等松手（onChangeComplete）。
+ const [swatchDraft, setSwatchDraft] = useState<string | null>(null);
+  // 配色区的行内输入：null = 收起，"new" = 新建一套，"rename" = 给当前套改名。
+  // 和图层/会话改名同一套：ref 是权威，失焦提交时 state 已经清了。
+  const [scopeEditing, setScopeEditing] = useState<"new" | "rename" | null>(null);
+  const [scopeDraftName, setScopeDraftName] = useState("");
+  const scopeEditingRef = useRef<"new" | "rename" | null>(null);
   const checkerRef = useRef<HTMLDivElement>(null);
   // 一笔笔画的临时状态全在 ref 里：pointermove 不该触发 React 渲染。
   const strokeRef = useRef<StrokeCell[]>([]);
@@ -264,7 +281,7 @@ export default function DocumentPanel() {
     drawStroke([cell], ink);
   }
 
-  function onPointerMove(event: ReactPointerEvent<HTMLDivElement>) {
+  function onPointerMove(event: ReactMouseEvent<HTMLDivElement>) {
     if (!paintingRef.current || !document) return;
     const cell = cellFromEvent(event, document);
     const last = lastCellRef.current;
@@ -352,35 +369,271 @@ export default function DocumentPanel() {
   // 播放时高亮跟着本地帧号走，store 的 frameIndex 还停在开播那一帧。
   const shownFrame = playing ? playFrame : frameIndex;
   const currentFrame = frames[frameIndex];
-  // 调色板即配色范围：挑过预设就用预设，没挑就沿用文档当前的调色板。
-  const paletteHexes = document ? hexesOf(document) : [];
-  const preset = PALETTE_PRESETS.find((item) => item.id === presetId) ?? null;
-  const paletteBase = preset ? preset.colors : paletteHexes;
-
-  /**
-   * 换配色范围：预设 + 最多一个任意颜色整幅下发，Rust 按就近色重映射已有像素。
-   * 挑预设时保留任意颜色槽——它跟着人在走，不属于哪一套预设。
-   */
-  async function applyPalette(nextPresetId: string | null, nextCustom: string | null) {
-    const base = nextPresetId
-      ? (PALETTE_PRESETS.find((item) => item.id === nextPresetId)?.colors ?? paletteBase)
-      : paletteBase;
-    const colors = paletteWithCustom(base, nextCustom);
-    // 范围和文档现成的一致就别发车：空跑一趟 set_palette 只会白赚一步撤销。
-    const unchanged =
-      colors.length === paletteHexes.length &&
-      colors.every((hex, index) => hex.toLowerCase() === paletteHexes[index]?.toLowerCase());
-    if (!unchanged && !(await useStore.getState().setPaletteColors(colors))) return;
-    // 没落成就别把选择记下来：界面说是新范围、文档还是旧范围，两下会打架。
-    setPresetId(nextPresetId);
-    setCustomColor(nextCustom);
-    setDraftColor(null);
-  }
-
   /** 选色即回画笔：刚挑的颜色总得有个工具把它落下去。 */
   function pickColor(color: InkColor) {
     if (tool === "eraser") setTool("brush");
     useStore.getState().setActiveColor(color);
+  }
+
+  // ---------- 配色范围 ----------
+  // 每层各认领一套范围，改的是「这一层允许用哪些颜色」。scopeLayerId 只是
+  // 「用户正在伺候哪一层」的便签，空 = 跟着激活层走；点图层行尾的色片就钉过去。
+  const scopeLayer = scopeLayerId
+    ? document?.layers.find((layer) => layer.id === scopeLayerId) ?? activeLayer
+    : activeLayer;
+  const scope =
+    document?.palettes.find((item) => item.id === scopeLayer?.palette_id) ?? null;
+  const scopeHexes = scope ? scope.colors.map(rgbaToHex) : [];
+  // 复制内置预设时的名字后缀：用户得看得出手上这「一套」是抄来的。
+  const copySuffix = t("palette.copy_suffix");
+  const scopeInUse = scope
+    ? (document?.layers ?? []).some((layer) => layer.palette_id === scope.id)
+    : false;
+  // 取色建议：当前范围全量排在前面，再从色名表补一批常见色，补到二十来个收手，
+  // 不然预设条会长到看不见框。
+  const suggestHexes = [...scopeHexes];
+  for (const item of NAMED_COLORS) {
+    if (suggestHexes.length >= 24) break;
+    if (!suggestHexes.includes(item.hex)) suggestHexes.push(item.hex);
+  }
+  /** swatch 提示：色名 + 与当前墨色的关系。 */
+  function swatchTip(hex: string, index: number): string {
+    if (active.color === hex) return t("palette.swatch_current", { hex: colorName(hex, lang) });
+    return t("palette.swatch", { hex: colorName(hex, lang), index: index + 1 });
+  }
+
+  /** 换范围：换的是这一层的边界，已有像素由 Rust 按就近色归队。 */
+  function pickScope(paletteId: string) {
+    if (!scopeLayer || paletteId === "" || paletteId === scopeLayer.palette_id) return;
+    void useStore.getState().setLayerPalette(scopeLayer.id, paletteId);
+  }
+
+  /**
+   * 往范围里加色。内置预设改不得，所以两步走：先复制一份（副本顺带接到这一层上），
+   * 再从副本里加。加完之后必须回炉再读一次文档，才知道新 id 是谁。
+   */
+  async function addScopeColor(hex: string) {
+    const layer = scopeLayer;
+    if (!layer || hex === "") return;
+    if (scopeHexes.some((item) => item.toLowerCase() === hex.toLowerCase())) return;
+    let paletteId = layer.palette_id;
+    if (scope?.builtin) {
+      await useStore.getState().forkPalette(layer.palette_id, `${scope.name}${copySuffix}`, layer.id);
+      paletteId =
+        useStore.getState().document?.layers.find((item) => item.id === layer.id)?.palette_id ?? "";
+      if (paletteId === "") return;
+    }
+    await useStore.getState().addPaletteColor(paletteId, hex);
+    // 挑完即用：新颜色不当当前墨，这一下就白挑了。
+    pickColor(hex);
+  }
+
+  /** 从范围里去掉一个颜色，画面上的像素由 Rust 就近归队。 */
+  function removeScopeColor(index: number) {
+    if (!scope || scope.builtin || scope.colors.length <= 1) return;
+    void useStore.getState().removePaletteColor(scope.id, index);
+  }
+
+  function openScopeEdit(mode: "new" | "rename") {
+    if (mode === "rename" && (!scope || scope.builtin)) return;
+    scopeEditingRef.current = mode;
+    setScopeEditing(mode);
+    // 新建默认以当前套为底子：十有八九只是想改改手上这套，不是从零搭。
+    setScopeDraftName(mode === "new" ? `${scope?.name ?? ""}${copySuffix}`.trim() : scope?.name ?? "");
+  }
+
+  function cancelScopeEdit() {
+    scopeEditingRef.current = null;
+    setScopeEditing(null);
+    setScopeDraftName("");
+  }
+
+  async function commitScopeEdit() {
+    const mode = scopeEditingRef.current;
+    scopeEditingRef.current = null;
+    setScopeEditing(null);
+    const name = scopeDraftName.trim();
+    setScopeDraftName("");
+    if (!scopeLayer || name === "") return;
+    if (mode === "new") await useStore.getState().createPalette(name, scopeHexes, scopeLayer.id);
+    else if (mode === "rename" && scope && !scope.builtin) void useStore.getState().renamePalette(scope.id, name);
+  }
+
+  function deleteScope() {
+    if (!scope || scope.builtin || scopeInUse) return;
+    void useStore.getState().deletePalette(scope.id);
+  }
+
+  /** 图层行尾的配色小片：一眼看出这一层认领哪套范围，点一下就把配色区切过去。 */
+  function layerScopeChip(layer: Layer) {
+    const item = document?.palettes.find((entry) => entry.id === layer.palette_id) ?? null;
+    const dots = item ? item.colors.slice(0, 4).map(rgbaToHex) : [];
+    return (
+      <Tooltip
+        title={
+          <>
+            <div>{item?.name ?? layer.palette_id}</div>
+            <div>{layer.locked ? t("palette.lock_on") : t("palette.lock_off")}</div>
+          </>
+        }
+      >
+        <span
+          className="layer-scope-chip"
+          onClick={(event) => {
+            // 点色片就是「我要改这一层」：既当选中，也把配色区的伺候对象钉过去。
+            event.stopPropagation();
+            setScopeLayerId(layer.id);
+            void useStore.getState().setActiveLayer(layer.id);
+          }}
+        >
+          {dots.map((hex, index) => (
+            <i key={`${hex}-${index}`} style={{ background: hex }} />
+          ))}
+        </span>
+      </Tooltip>
+    );
+  }
+
+  // ---------- 右键菜单 ----------
+  // 菜单跟着鼠标所在的位置出现：画布问「现在在干什么」，图层行问「这一层怎么了」，
+  // 帧格问「这一帧怎么排」。三处各报各的事，菜单本体不认识任何业务。
+
+  /** 画布：工具、撤销、播放、洋葱皮、瓦片份数，都是档位，勾在哪就是现在哪一档。 */
+  function openCanvasMenu(event: ReactMouseEvent<HTMLDivElement>) {
+    const tile = (mode: 1 | 2 | 3): ContextMenuItem => ({
+      key: `tile-${mode}`,
+      label: `${t("menu.tile")} ${mode}x${mode}`,
+      checked: tileMode === mode,
+      onSelect: () => setTileMode(mode),
+    });
+    openContextMenu(event, [
+      {
+        key: "brush",
+        label: t("doc.brush"),
+        icon: <Brush size={13} />,
+        checked: tool === "brush",
+        onSelect: () => setTool("brush"),
+      },
+      {
+        key: "fill",
+        label: t("doc.fill"),
+        icon: <PaintBucket size={13} />,
+        checked: tool === "fill",
+        onSelect: () => setTool("fill"),
+      },
+      {
+        key: "eraser",
+        label: t("doc.eraser"),
+        icon: <Eraser size={13} />,
+        checked: tool === "eraser",
+        onSelect: () => setTool("eraser"),
+      },
+      {
+        key: "undo",
+        label: t("menu.undo"),
+        icon: <Undo2 size={13} />,
+        disabled: undoDepth === 0,
+        onSelect: () => void useStore.getState().undoEdit(),
+      },
+      {
+        key: "onion",
+        label: t("menu.onion"),
+        icon: <Ghost size={13} />,
+        checked: onion,
+        disabled: !canPlay,
+        onSelect: () => setOnion((value) => !value),
+      },
+      {
+        key: "play",
+        label: playing ? t("menu.pause") : t("doc.play"),
+        icon: playing ? <Pause size={13} /> : <Play size={13} />,
+        disabled: !canPlay,
+        onSelect: () => togglePlay(),
+      },
+      tile(1),
+      tile(2),
+      tile(3),
+    ]);
+  }
+
+  /** 图层行：单层的事全在这一间，带着是哪一层。 */
+  function openLayerMenu(event: ReactMouseEvent<HTMLDivElement>, layerId: string) {
+    const layers = document?.layers ?? [];
+    const index = layers.findIndex((layer) => layer.id === layerId);
+    const layer = index >= 0 ? layers[index] : null;
+    if (!layer) return;
+    const move = (delta: number) => {
+      const target = index + delta;
+      // 到头了不硬挪：to_index 越界的话 Rust 会夹到末尾，看起来就像点坏了。
+      if (target < 0 || target >= layers.length) return;
+      void useStore.getState().runEditorOps([{ op: "move_layer", id: layerId, to_index: target }]);
+    };
+    openContextMenu(event, [
+      {
+        key: "rename",
+        label: t("doc.layer_rename"),
+        icon: <Pencil size={13} />,
+        onSelect: () => beginRename(layerId, layer.name),
+      },
+      {
+        key: "scope",
+        label: t("layer.scope"),
+        icon: <Palette size={13} />,
+        onSelect: () => {
+          setScopeLayerId(layerId);
+          void useStore.getState().setActiveLayer(layerId);
+        },
+      },
+      {
+        key: "visible",
+        label: layer.visible ? t("layer.hide") : t("layer.show"),
+        icon: layer.visible ? <EyeOff size={13} /> : <Eye size={13} />,
+        onSelect: () => void useStore.getState().setLayerVisible(layerId, !layer.visible),
+      },
+      {
+        key: "up",
+        label: t("layer.up"),
+        icon: <ArrowUp size={13} />,
+        disabled: index >= layers.length - 1,
+        onSelect: () => move(1),
+      },
+      {
+        key: "down",
+        label: t("layer.down"),
+        icon: <ArrowDown size={13} />,
+        disabled: index <= 0,
+        onSelect: () => move(-1),
+      },
+      {
+        key: "delete",
+        label: t("layer.delete"),
+        icon: <Trash2 size={13} />,
+        danger: true,
+        disabled: layers.length <= 1,
+        onSelect: () => void useStore.getState().runEditorOps([{ op: "delete_layer", id: layerId }]),
+      },
+    ]);
+  }
+
+  /** 帧格：从这儿播、复制、删掉、前后挪。帧的顺序就是播放的顺序，值得单独一间菜单。 */
+  function openFrameMenu(event: ReactMouseEvent<HTMLButtonElement>, index: number) {
+    const items: ContextMenuItem[] = [
+      {
+        key: "play",
+        label: t("menu.play_from"),
+        icon: <Play size={13} />,
+        disabled: !canPlay,
+        onSelect: () => {
+          setPlayFrame(index);
+          setPlaying(true);
+        },
+      },
+      { key: "dup", label: t("doc.duplicate_frame"), icon: <Copy size={13} />, onSelect: () => void useStore.getState().duplicateFrame() },
+      { key: "del", label: t("doc.delete_frame"), icon: <Trash2 size={13} />, danger: true, disabled: frames.length <= 1, onSelect: () => void useStore.getState().deleteFrame() },
+      { key: "earlier", label: t("doc.move_earlier"), icon: <ArrowLeft size={13} />, disabled: index <= 0, onSelect: () => void useStore.getState().moveFrame(-1) },
+      { key: "later", label: t("doc.move_later"), icon: <ArrowRight size={13} />, disabled: index >= frames.length - 1, onSelect: () => void useStore.getState().moveFrame(1) },
+    ];
+    openContextMenu(event, items);
   }
 
   return (
@@ -515,6 +768,7 @@ export default function DocumentPanel() {
                         onPointerMove={onPointerMove}
                         onPointerUp={flushStroke}
                         onPointerCancel={flushStroke}
+                        onContextMenu={openCanvasMenu}
                       />
                     ) : null}
                   </div>
@@ -563,6 +817,7 @@ export default function DocumentPanel() {
             <div
               key={layer.id}
               className={`layer-row ${active.layer === layer.id ? "active" : ""}`}
+              onContextMenu={(event) => openLayerMenu(event, layer.id)}
             >
               <Tooltip title={t("doc.layer_visible")}>
                 <button
@@ -624,6 +879,8 @@ export default function DocumentPanel() {
                         <Pencil size={11} />
                       </button>
                     </Tooltip>
+                    {/* 行尾一小片配色：这一层认领的是哪套范围，锁没锁，hover 才细说。 */}
+                    {layerScopeChip(layer)}
                   </>
                 )}
               </div>
@@ -702,6 +959,7 @@ export default function DocumentPanel() {
                 key={frame.id}
                 className={`frame-chip ${index === shownFrame ? "active" : ""}`}
                 onClick={() => jumpToFrame(index)}
+                onContextMenu={(event) => openFrameMenu(event, index)}
               >
                 {document ? <FrameThumb document={document} index={index} /> : null}
                 <span className="frame-chip-id">{frame.id}</span>
@@ -725,20 +983,121 @@ export default function DocumentPanel() {
         </div>
 
         <div className="doc-section">
-          <div className="doc-section-title">{t("doc.palette")}</div>
-          {/* 配色范围：换预设就是换「允许用哪些颜色」，已有像素按就近色搬过去。 */}
-          <Select
-            size="small"
-            className="palette-preset"
-            value={presetId ?? undefined}
-            allowClear
-            placeholder={t("doc.palette_current")}
-            options={PALETTE_PRESETS.map((item) => ({
-              value: item.id,
-              label: `${item.name} · ${item.colors.length}`,
-            }))}
-            onChange={(value) => void applyPalette(value ?? null, customColor)}
-          />
+          <div className="doc-section-title">
+            {t("palette.title")}
+            <span className="grow" />
+            <Tooltip title={t("palette.new_hint")}>
+              <Button
+                size="small"
+                type="text"
+                icon={<Plus size={13} />}
+                disabled={!scopeLayer}
+                onClick={() => openScopeEdit("new")}
+              />
+            </Tooltip>
+          </div>
+
+          {/* 改的是谁：配色范围每层独立，动表之前先说清楚伺候的是哪一层。 */}
+          <div className="scope-row">
+            <span className="scope-label">{t("palette.layer")}</span>
+            <Select
+              size="small"
+              className="scope-layer-select"
+              value={scopeLayer?.id ?? undefined}
+              disabled={!document || document.layers.length < 2}
+              onChange={(value) => setScopeLayerId(value === activeLayer?.id ? null : value)}
+              options={(document?.layers ?? []).map((layer) => ({
+                value: layer.id,
+                label: layer.name,
+              }))}
+            />
+          </div>
+
+          {/* 配色锁：锁上就只许用范围里的颜色，越界的 Rust 就近归队；AI 也改不了这张表。 */}
+          <div className="scope-row">
+            <span className="scope-label">{t("palette.lock")}</span>
+            <Switch
+              size="small"
+              className="scope-lock-switch"
+              checked={scopeLayer?.locked ?? false}
+              disabled={!scopeLayer}
+              onChange={(value) => {
+                if (scopeLayer) void useStore.getState().setLayerLocked(scopeLayer.id, value);
+              }}
+            />
+            <Tooltip title={scopeLayer?.locked ? t("palette.lock_on") : t("palette.lock_off")}>
+              <span className="scope-state">
+                {scopeLayer?.locked ? t("palette.state_locked") : t("palette.state_open")}
+              </span>
+            </Tooltip>
+          </div>
+
+          {/* 哪一套：内置的是只读的，想改就复制一份，改名和删除只对自建的开。 */}
+          <div className="scope-row">
+            <Select
+              size="small"
+              className="scope-select"
+              value={scope?.id ?? undefined}
+              onChange={pickScope}
+              options={(document?.palettes ?? []).map((item) => ({
+                value: item.id,
+                label: (
+                  <span className="scope-option">
+                    <span className="scope-option-name">{item.name}</span>
+                    <span className={`scope-tag ${item.builtin ? "builtin" : "custom"}`}>
+                      {item.builtin ? t("palette.builtin_tag") : t("palette.custom_tag")}
+                    </span>
+                  </span>
+                ),
+              }))}
+            />
+            {scope && !scope.builtin ? (
+              <>
+                <Tooltip title={t("palette.rename")}>
+                  <Button
+                    size="small"
+                    type="text"
+                    icon={<Pencil size={13} />}
+                    onClick={() => openScopeEdit("rename")}
+                  />
+                </Tooltip>
+                <Tooltip title={scopeInUse ? t("palette.delete_used") : t("palette.delete")}>
+                  <Button
+                    size="small"
+                    type="text"
+                    danger
+                    icon={<Trash2 size={13} />}
+                    disabled={scopeInUse}
+                    onClick={deleteScope}
+                  />
+                </Tooltip>
+              </>
+            ) : (
+              <Tooltip title={t("palette.scope_hint")}>
+                <span className="scope-state">{t("palette.builtin_tag")}</span>
+              </Tooltip>
+            )}
+          </div>
+          {scopeEditing !== null ? (
+            <Input
+              autoFocus
+              size="small"
+              className="scope-rename"
+              value={scopeDraftName}
+              placeholder={t("palette.new_placeholder")}
+              onChange={(event) => setScopeDraftName(event.target.value)}
+              onPressEnter={() => void commitScopeEdit()}
+              onBlur={() => void commitScopeEdit()}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  cancelScopeEdit();
+                }
+              }}
+            />
+          ) : null}
+
           <div className="palette-grid">
             <Tooltip title={t("doc.transparent")}>
               <button
@@ -747,12 +1106,9 @@ export default function DocumentPanel() {
                 onClick={() => pickColor(null)}
               />
             </Tooltip>
-            {paletteBase.map((hex, index) => {
-              return (
-                <Tooltip
-                  key={`${hex}-${index}`}
-                  title={t("doc.swatch", { hex, index: index + 1 })}
-                >
+            {scopeHexes.map((hex, index) => (
+              <span className="swatch-cell" key={`${hex}-${index}`}>
+                <Tooltip title={swatchTip(hex, index)}>
                   <button
                     type="button"
                     className={`swatch ${active.color === hex ? "active" : ""}`}
@@ -760,35 +1116,52 @@ export default function DocumentPanel() {
                     onClick={() => pickColor(hex)}
                   />
                 </Tooltip>
-              );
-            })}
-            {/* 「任意颜色」：一个预设只带得动一个，拖完松手才落文档，拖动中途不记撤销。 */}
+                {/* 自建的范围才让拆色：内置的是一个色都不动，删了别人还怎么用。 */}
+                {scope && !scope.builtin ? (
+                  <Tooltip title={t("palette.remove_color")}>
+                    <button
+                      type="button"
+                      className="swatch-remove"
+                      aria-label={t("palette.remove_color")}
+                      onClick={() => removeScopeColor(index)}
+                    >
+                      <X size={10} />
+                    </button>
+                  </Tooltip>
+                ) : null}
+              </span>
+            ))}
+            {/* 「任意颜色」：一套里只摆得下这一个入口，但从这儿进去的颜色
+                一颗一颗落在表里，等于无限加色。 */}
             <Tooltip
               title={
                 <>
-                  <div>{t("doc.palette_custom")}</div>
-                  <div>{t("doc.palette_custom_tip")}</div>
+                  <div>{t("palette.add_color")}</div>
+                  <div>{t("palette.add_color_tip")}</div>
                 </>
               }
             >
-              <div
-                className={`swatch-slot ${
-                  customColor !== null && active.color === customColor ? "active" : ""
-                }`}
-              >
+              <div className={`swatch-slot ${swatchDraft !== null ? "active" : ""}`}>
                 <ColorPicker
                   format="hex"
                   allowClear
                   showText={false}
-                  value={draftColor ?? customColor ?? undefined}
-                  onChange={(value) => setDraftColor(value.toHexString())}
+                  value={swatchDraft ?? undefined}
+                  presets={[
+                    { label: t("palette.scope"), colors: scopeHexes },
+                    {
+                      label: t("palette.suggest"),
+                      colors: NAMED_COLORS.slice(0, 18).map((item) => item.hex),
+                    },
+                  ]}
+                  onChange={(value) => setSwatchDraft(value.toHexString())}
                   onChangeComplete={(value) => {
                     const hex = value.toHexString();
-                    // 挑完即用：新颜色不当当前墨，这一下就白挑了。
-                    pickColor(hex);
-                    void applyPalette(presetId, hex);
+                    // 拖完松手才落文档：拖动中途一路加色，撤销栈会糊成一锅粥。
+                    setSwatchDraft(null);
+                    void addScopeColor(hex);
                   }}
-                  onClear={() => void applyPalette(presetId, null)}
+                  onClear={() => setSwatchDraft(null)}
                 />
               </div>
             </Tooltip>

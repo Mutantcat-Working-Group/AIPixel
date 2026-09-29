@@ -17,8 +17,9 @@ import type {
   BatchRecipeEntry,
   BatchScan,
   EditorOperation,
-  InkColor,
-  LoopLimits,
+ InkColor,
+  ImageSupport,
+ LoopLimits,
   Message,
   McpServerConfig,
   McpServersView,
@@ -75,6 +76,16 @@ export function setLoopLimits(limits: LoopLimits): Promise<LoopLimits> {
   return invoke<LoopLimits>("agent_set_loop_limits", { limits });
 }
 
+/** MCP 总开关。false 时所有会话都看不见用户自配的外部工具。 */
+export function mcpEnabled(): Promise<boolean> {
+  return invoke<boolean>("agent_mcp_enabled");
+}
+
+/** 开/关 MCP。Rust 当场作用到活着的会话并落盘，回值是真正生效的状态。 */
+export function setMcpEnabled(enabled: boolean): Promise<boolean> {
+  return invoke<boolean>("agent_set_mcp_enabled", { enabled });
+}
+
 /** 拉 provider 的模型清单。id 只为「沿用本机已存密钥」而传，不参与请求本身。 */
 export function fetchModelList(params: {
   id?: string | null;
@@ -92,6 +103,26 @@ export function fetchModelList(params: {
 
 export function listMcpServers(): Promise<McpServersView> {
   return invoke<McpServersView>("mcp_list");
+}
+
+/**
+ * 探测这个模型能不能出图。key 留空时后端沿用已存密钥，和「获取」一个口径。
+ * 只回结论，不改任何设置：能力由用户声明，探测只是份建议。
+ */
+export function probeImageCapability(params: {
+  id?: string | null;
+  baseUrl: string;
+  apiKey: string;
+  protocol: Protocol;
+  model: string;
+}): Promise<ImageSupport> {
+  return invoke<ImageSupport>("model_probe_image", {
+    id: params.id ?? undefined,
+    baseUrl: params.baseUrl,
+    apiKey: params.apiKey,
+    protocol: params.protocol,
+    model: params.model,
+  });
 }
 
 export function upsertMcpServer(config: McpServerConfig): Promise<McpServersView> {
@@ -120,6 +151,16 @@ export function listSessions(): Promise<SessionInfo[]> {
 
 export function dropSession(id: string): Promise<void> {
   return invoke("session_drop", { id });
+}
+
+/** 改侧边栏显示名。空白名 Rust 当取消。 */
+export function renameSession(id: string, title: string): Promise<SessionInfo> {
+  return invoke<SessionInfo>("session_rename", { id, title });
+}
+
+/** 拖动排序：ids 是排好后的完整次序，Rust 按新次序整批改写排序位。 */
+export function reorderSessions(ids: string[]): Promise<void> {
+  return invoke("session_reorder", { ids });
 }
 
 export function bindModel(id: string, modelId: string): Promise<SessionInfo> {

@@ -48,7 +48,14 @@ describe("compositeFrame", () => {
 
   it("composites upper layers over lower ones with source-over", () => {
     const base = blankDocument(1, 1);
-    base.layers.push({ id: "L1", name: "top", visible: true, opacity: 255 });
+    base.layers.push({
+      id: "L1",
+      name: "top",
+      visible: true,
+      opacity: 255,
+      palette_id: "sweetie16",
+      locked: false,
+    });
     const doc: PixelDocument = {
       ...base,
       palette: [HALF_BLUE, RED],

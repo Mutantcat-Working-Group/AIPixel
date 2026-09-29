@@ -3,7 +3,8 @@
 
 use agent_core::{
     ActiveContext, AgentEvent, AgentSession, ApprovalDecision, Attachment, AttachmentRole,
-    Capabilities, LoopLimits, Message, ModelConfig, ModelRole, PermissionMode, Protocol,
+    Capabilities, ImageSupport, LoopLimits, Message, ModelConfig, ModelRole, PermissionMode,
+    Protocol,
 };
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, State};
@@ -30,6 +31,19 @@ pub fn agent_set_loop_limits(state: State<'_, AppState>, limits: LoopLimits) -> 
     state.limits()
 }
 
+/// MCP 总开关当前值。true = 模型看得见用户自配的外部工具。
+#[tauri::command]
+pub fn agent_mcp_enabled(state: State<'_, AppState>) -> bool {
+    state.mcp_enabled()
+}
+
+/// 开/关 MCP。当场摘掉或挂回所有活会话的注册表，并落盘。
+#[tauri::command]
+pub fn agent_set_mcp_enabled(state: State<'_, AppState>, enabled: bool) -> bool {
+    state.set_mcp_enabled(enabled);
+    state.mcp_enabled()
+}
+
 /// 拉 provider 的模型清单，供设置里「获取」后挑一个填入。
 /// api_key 留空表示沿用本机已存密钥：改已有定义时用户不用把密钥再贴一遍。
 #[tauri::command]
@@ -40,19 +54,12 @@ pub async fn model_fetch_models(
     api_key: String,
     protocol: Protocol,
 ) -> Result<Vec<String>, String> {
-    let api_key = if api_key.trim().is_empty() {
-        id.as_deref()
-            .and_then(|id| state.stored_api_key(id))
-            .unwrap_or_default()
-    } else {
-        api_key
-    };
     let config = ModelConfig {
-        id: id.unwrap_or_else(|| "fetch".into()),
+        id: id.as_deref().unwrap_or("fetch").to_string(),
         label: String::new(),
         protocol,
         base_url,
-        api_key,
+        api_key: probe_api_key(&state, id.as_deref(), &api_key),
         model: String::new(),
         max_tokens: None,
         temperature: None,
@@ -62,6 +69,44 @@ pub async fn model_fetch_models(
     agent_core::providers::list_models(&config)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// 探测这个模型能不能出图，供设置里「探测」按钮用。
+///
+/// 只回结论，不改设置：能力是用户声明的，探测只是份建议，勾不勾由人决定。
+/// api_key 留空时和「获取」一样，沿用这个模型定义已存的密钥。
+#[tauri::command]
+pub async fn model_probe_image(
+    state: State<'_, AppState>,
+    id: Option<String>,
+    base_url: String,
+    api_key: String,
+    protocol: Protocol,
+    model: String,
+) -> Result<ImageSupport, String> {
+    let config = ModelConfig {
+        id: id.as_deref().unwrap_or("probe").to_string(),
+        label: String::new(),
+        protocol,
+        base_url,
+        api_key: probe_api_key(&state, id.as_deref(), &api_key),
+        model,
+        max_tokens: None,
+        temperature: None,
+        disable_thinking: None,
+        capabilities: Capabilities::default(),
+    };
+    Ok(agent_core::probe_image_support(&config).await)
+}
+
+/// 表单里密钥留空时，退回这个模型定义已存的那把。
+fn probe_api_key(state: &AppState, id: Option<&str>, api_key: &str) -> String {
+    if api_key.trim().is_empty() {
+        id.and_then(|id| state.stored_api_key(id))
+            .unwrap_or_default()
+    } else {
+        api_key.to_string()
+    }
 }
 
 /// 新增/更新一个模型。api_key 留空表示沿用本机已存密钥。

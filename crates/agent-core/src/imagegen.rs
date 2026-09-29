@@ -347,6 +347,134 @@ pub fn build_image_generator(config: &ModelConfig) -> Arc<dyn ImageGenerator> {
     }
 }
 
+/// 探测结论。三态而不是布尔：说「能」要有凭据，说「不能」要看到端点真的不回图，
+/// 剩下的一律交给用户自己判断——自动开关能力这件事，猜错比不猜更糟。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageSupport {
+    /// 端点能出图；transport 是实际走通的那条通路（images / images_edits / chat_modalities）。
+    Yes { transport: &'static str },
+    /// 端点或模型不出图；reason 是给人看的短码（no_endpoint / text_only / protocol）。
+    No { reason: &'static str },
+    /// 探测本身没跑通（鉴权、网络、参数）。不是「不能」，只是「不知道」。
+    Unknown { reason: String },
+}
+
+/// 这个端点/模型能不能出图。
+///
+/// 探测是用户主动点的，所以允许花一次请求；但绝不为了让端点回图而真发一张生图任务——
+/// 空 prompt 就够：真的端点会因为缺 prompt 回 400，不存在的端点回 404/405/501。
+/// images 端不在时再退一步问 chat/completions（Gemini 图像模型、OpenRouter 走这条），
+/// 那一步会真发一句 ping，但只换 16 个 token，换来的是「模型只回文字」这种确定答案。
+pub async fn probe_image_support(config: &ModelConfig) -> ImageSupport {
+    if config.model.trim().is_empty() {
+        return ImageSupport::Unknown {
+            reason: "no_model".into(),
+        };
+    }
+    if config.api_key.trim().is_empty() {
+        return ImageSupport::Unknown {
+            reason: "missing_key".into(),
+        };
+    }
+    match config.protocol {
+        Protocol::Anthropic => ImageSupport::No { reason: "protocol" },
+        Protocol::OpenAiCompat => {
+            OpenAiCompatGenerator {
+                client: reqwest::Client::new(),
+                base_url: config.base_url.trim_end_matches('/').to_string(),
+                api_key: config.api_key.clone(),
+                model: config.model.clone(),
+            }
+            .probe()
+            .await
+        }
+    }
+}
+
+impl OpenAiCompatGenerator {
+    /// 揽活：空 prompt 打一次 images/generations。
+    /// 端点存在却抱怨缺 prompt，就说明它认这个端点，能出图。
+    async fn probe(&self) -> ImageSupport {
+        match self
+            .post("images/generations", &json!({"model": self.model, "n": 1}))
+            .await
+        {
+            Ok(_) => ImageSupport::Yes {
+                transport: "images",
+            },
+            Err(ProviderError::Http { status, body }) => match status {
+                // 端点不在。有些兼容层把「没有这个端点」也报成 400，所以 400 要核一遍文案。
+                404 | 405 | 501 => self.probe_chat().await,
+                400 if complains_about_prompt(&body) => ImageSupport::Yes {
+                    transport: "images",
+                },
+                401 | 403 => ImageSupport::Unknown {
+                    reason: "auth".into(),
+                },
+                _ => ImageSupport::Unknown {
+                    reason: short_text(&body),
+                },
+            },
+            Err(e) => ImageSupport::Unknown {
+                reason: short_text(&e.to_string()),
+            },
+        }
+    }
+
+    /// 退一步问 chat/completions：带上 modalities 让它出图。
+    /// 回文字说明这个模型只会聊天；连端点都不在，就是这个 Base URL 没有生图这回事。
+    async fn probe_chat(&self) -> ImageSupport {
+        let body = json!({
+            "model": self.model,
+            "stream": false,
+            "max_tokens": 16,
+            "modalities": ["text", "image"],
+            "messages": [{"role": "user", "content": "ping"}],
+        });
+        match self.post("chat/completions", &body).await {
+            Ok(value) => {
+                let has_image = value
+                    .get("choices")
+                    .and_then(|c| c.as_array())
+                    .and_then(|c| c.first())
+                    .and_then(|c| c.get("message"))
+                    .and_then(|m| m.get("images"))
+                    .is_some();
+                if has_image {
+                    ImageSupport::Yes {
+                        transport: "chat_modalities",
+                    }
+                } else {
+                    ImageSupport::No {
+                        reason: "text_only",
+                    }
+                }
+            }
+            Err(ProviderError::Http { status, body }) => match status {
+                404 | 405 | 501 => ImageSupport::No {
+                    reason: "no_endpoint",
+                },
+                401 | 403 => ImageSupport::Unknown {
+                    reason: "auth".into(),
+                },
+                _ => ImageSupport::Unknown {
+                    reason: short_text(&body),
+                },
+            },
+            Err(e) => ImageSupport::Unknown {
+                reason: short_text(&e.to_string()),
+            },
+        }
+    }
+}
+
+/// 端点抱怨「缺 prompt」才算作认了这个端点。带上 model 相关文案的 400
+/// 多半是模型名不对，那种情况只能算不知道，别顺手把能力勾上。
+fn complains_about_prompt(body: &str) -> bool {
+    body.to_lowercase().contains("prompt")
+}
+
 /// 把文档里某一帧合成成一张 PNG，当作垫图真值交给生图模型。
 ///
 /// 这是「改这一帧」和「照这一帧再长一帧」的共同底座：用户要改的是画布上活着的东西，
@@ -396,6 +524,15 @@ fn short(value: &Value) -> String {
         format!("{}...", &text[..400])
     } else {
         text
+    }
+}
+
+/// 探测理由的截断。给用户看的原始报文，截到一眼能读完的长度就够。
+fn short_text(text: &str) -> String {
+    if text.len() > 160 {
+        format!("{}...", &text[..160])
+    } else {
+        text.to_string()
     }
 }
 
@@ -766,6 +903,120 @@ mod tests {
             "images": [{"image_url": {"url": "data:image/png;base64,AAAA"}}],
         }}]})
         .to_string()
+    }
+
+    #[tokio::test]
+    async fn a_prompt_complaint_proves_the_image_endpoint_exists() {
+        // 空 prompt 打过去，端点因为缺参数回 400：这就是「能出图」的凭据。
+        let server = Recorder::serve(|path| match path {
+            "/v1/images/generations" => (
+                400,
+                r#"{"error":{"message":"Missing required parameter: 'prompt'."}}"#.into(),
+            ),
+            _ => (404, "\"nope\"".into()),
+        });
+        let support = super::probe_image_support(&mock_config(&server.base_url())).await;
+        assert_eq!(
+            support,
+            ImageSupport::Yes {
+                transport: "images"
+            },
+            "端点抱怨缺 prompt 就是认了这个端点"
+        );
+        // 只发一次：探测不该继续往 chat 兜底，那段会真的发一次对话。
+        assert_eq!(server.count(), 1);
+        assert!(
+            !server.text_of(0).to_lowercase().contains("\"prompt\""),
+            "探测不能带真 prompt，否则会真的画一张图"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_image_endpoint_falls_back_to_chat_modalities() {
+        // images 端点不在，chat 带 modalities 回了 images[]：Gemini 图像模型正是这个形状。
+        let server = Recorder::serve(|path| match path {
+            "/v1/chat/completions" => (200, chat_image_response()),
+            _ => (404, "\"nope\"".into()),
+        });
+        let support = super::probe_image_support(&mock_config(&server.base_url())).await;
+        assert_eq!(
+            support,
+            ImageSupport::Yes {
+                transport: "chat_modalities"
+            }
+        );
+        assert_eq!(server.path_of(0), "/v1/images/generations");
+        assert_eq!(server.path_of(1), "/v1/chat/completions");
+    }
+
+    #[tokio::test]
+    async fn a_text_only_model_is_reported_as_unsupported_not_unknown() {
+        // chat 回了纯文字：确定这个模型不出图，不是探测失败。
+        let server = Recorder::serve(|path| match path {
+            "/v1/chat/completions" => (
+                200,
+                json!({"choices": [{"message": {"content": "pong"}}]}).to_string(),
+            ),
+            _ => (404, "\"nope\"".into()),
+        });
+        let support = super::probe_image_support(&mock_config(&server.base_url())).await;
+        assert_eq!(
+            support,
+            ImageSupport::No {
+                reason: "text_only"
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn neither_endpoint_means_no_image_support() {
+        // 两个端点都不在：这个 Base URL 没有生图这回事，结论是「不能」而不是「不知道」。
+        let server = Recorder::serve(|_| (404, "\"nope\"".into()));
+        let support = super::probe_image_support(&mock_config(&server.base_url())).await;
+        assert_eq!(
+            support,
+            ImageSupport::No {
+                reason: "no_endpoint"
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rejected_key_is_unknown_not_unsupported() {
+        // 403 是鉴权问题，端点本身可能好得很：这种只能算不知道。
+        let server = Recorder::serve(|_| {
+            (
+                403,
+                r#"{"error":{"message":"model is not available in the current token plan"}}"#
+                    .into(),
+            )
+        });
+        let support = super::probe_image_support(&mock_config(&server.base_url())).await;
+        assert!(
+            matches!(support, ImageSupport::Unknown { .. }),
+            "403 不能反推出端点不出图: {support:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_anthropic_protocol_is_reported_as_unsupported() {
+        let mut config = mock_config("https://example.invalid/v1");
+        config.protocol = Protocol::Anthropic;
+        let support = super::probe_image_support(&config).await;
+        assert_eq!(support, ImageSupport::No { reason: "protocol" });
+    }
+
+    #[tokio::test]
+    async fn a_probe_without_a_model_cannot_decide() {
+        let mut config = mock_config("https://example.invalid/v1");
+        config.model = String::new();
+        let support = super::probe_image_support(&config).await;
+        assert_eq!(
+            support,
+            ImageSupport::Unknown {
+                reason: "no_model".into()
+            }
+        );
     }
 
     #[tokio::test]

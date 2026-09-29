@@ -262,6 +262,23 @@ body {
   opacity: 1;
 }
 
+/* 正在改名的会话：输入框顶掉标题，回车落库、Esc 收手。 */
+.session-rename.ant-input {
+  height: 22px;
+  padding: 0 4px;
+  font-size: 12px;
+}
+
+/* 拖动排序：抓住的那一条淡下去，将要落点的那一条描个边。 */
+.session-item.dragging {
+  opacity: 0.45;
+}
+
+.session-item.drop-target {
+  border-color: rgba(62, 155, 255, 0.55);
+  background: var(--accent-soft);
+}
+
 .sidebar-foot {
   border-top: 1px solid var(--border);
   padding: 8px 10px;
@@ -920,6 +937,30 @@ body {
   white-space: nowrap;
 }
 
+/* 行尾一小片配色：四个小点说清这一层认领哪套范围，点一下就把配色区切过去。 */
+.layer-scope-chip {
+  flex: none;
+  display: grid;
+  grid-template-columns: repeat(2, 5px);
+  grid-auto-rows: 5px;
+  gap: 1px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.layer-scope-chip:hover {
+  border-color: var(--border-strong);
+}
+
+.layer-scope-chip i {
+  display: block;
+  width: 5px;
+  height: 5px;
+  border-radius: 1px;
+}
+
 /* 侧栏只有约 210px 可用：label 与读数固定宽，滑块吃掉剩余空间。 */
 .layer-opacity {
   display: flex;
@@ -1077,10 +1118,74 @@ body {
   gap: 4px;
 }
 
-/* 配色范围：先定范围再挑颜色，所以预设下拉排在色块区上面。 */
-.palette-preset {
+/* 配色范围：先说清改的是哪一层、锁没锁、用哪一套，最后才是色块。
+   三行小控件各占一行、贴着排，侧栏 210px 也放得下。 */
+.scope-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.scope-label {
+  flex: none;
+  width: 48px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.scope-layer-select,
+.scope-select {
+  flex: 1;
+  min-width: 0;
+}
+
+.scope-lock-switch {
+  flex: none;
+}
+
+/* 「已锁 / 开放」：一句话交给 tooltip，行里只留一个词。 */
+.scope-state {
+  flex: none;
+  color: var(--text-dim);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* 范围下拉里两栏：名字加一枚小标签，内置与自建一眼分得开。 */
+.scope-option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.scope-option-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scope-tag {
+  flex: none;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-faint);
+  font-size: 10px;
+  line-height: 15px;
+}
+
+.scope-tag.custom {
+  border-color: rgba(62, 155, 255, 0.45);
+  color: var(--accent);
+}
+
+.scope-rename {
   width: 100%;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
 
 /* 「任意颜色」槽：虚线框说它「等一个颜色」，里面塞的取色盘缩到色块大小。 */
@@ -1132,6 +1237,37 @@ body {
   position: absolute;
   inset: 0;
   background: linear-gradient(45deg, transparent 45%, var(--danger) 45%, var(--danger) 55%, transparent 55%);
+}
+
+/* 色块格：色块占满，删除扣整格浮在它上面——不探出格外，才不会压到隔壁那颗。 */
+.swatch-cell {
+  position: relative;
+  width: 18px;
+  height: 18px;
+}
+
+.swatch-cell .swatch {
+  display: block;
+}
+
+.swatch-remove {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: rgba(13, 17, 23, 0.78);
+  color: var(--danger);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.swatch-cell:hover .swatch-remove,
+.swatch-remove:focus-visible {
+  opacity: 1;
 }
 
 .aip-text {
@@ -1281,31 +1417,74 @@ body {
   color: var(--text-dim);
 }
 
-.model-modal .ant-modal-body {
-  display: grid;
-  grid-template-columns: 190px minmax(0, 1fr);
-  gap: 16px;
-  padding-top: 16px;
-}
-
-.model-list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  border-right: 1px solid var(--border);
-  padding-right: 12px;
-}
-
-/* 设置页的高度天花板：两列各自滚动，谁都不许把弹窗顶出屏幕。
+/* 设置页的高度天花板：页签一行，下面两列各自滚动，谁都不许把弹窗顶出屏幕。
    min() 保证小窗口下也留出标题栏与页脚；桌面端封在 612px 一屏内。 */
 .model-modal .ant-modal-body {
   display: grid;
   grid-template-columns: 200px minmax(0, 1fr);
-  grid-template-rows: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 16px;
   padding-top: 16px;
   max-height: min(612px, calc(100vh - 172px));
   align-items: stretch;
+}
+
+/* 页签横跨两列；护栏和关于没有左栏，内容整块占满。 */
+.settings-tabbar {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding-bottom: 2px;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-tab-hint {
+  font-size: 11.5px;
+  color: var(--text-faint);
+  line-height: 1.4;
+  min-width: 0;
+}
+
+.settings-wide {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  min-width: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+}
+
+/* 一行只放一个控件时用：左边留白，控件靠右贴着，读起来不散。 */
+.settings-inline-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding-bottom: 4px;
+}
+
+/* 探测回执：行话说清楚，颜色只做「行/不行」的伴生提示，不当正文。 */
+.probe-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+  font-size: 11.5px;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+
+.probe-note.ok {
+  color: var(--ok);
+  background: var(--bg-panel-2);
 }
 
 .model-list {
@@ -1897,6 +2076,24 @@ a.about-val {
   color: var(--text-faint);
 }
 
+/* 自定义尺寸：宽高两个输入框中间夹一个乘号，窄栏里也占不满一行。 */
+.dock-size-pair {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dock-size-x {
+  flex: none;
+  color: var(--text-faint);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.dock-size-note {
+  margin-top: 6px;
+}
+
 /* 「由 X 跑」：和 summary 同一层意思，但说的是模型，所以换成强调色。 */
 .dock-served {
   margin: 0;
@@ -2315,4 +2512,72 @@ a.about-val {
 .approval-actions {
   display: flex;
   gap: 6px;
+}
+
+/* 右键菜单：出现在鼠标位置上，跟着所在位置报不同的事。
+   左边这一栏是给图标或勾留着的位置：没有图标的项也占住，标签才对得齐。 */
+.ctx-menu {
+  position: fixed;
+  z-index: 1200;
+  min-width: 150px;
+  max-width: 260px;
+  padding: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--bg-panel);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+}
+
+.ctx-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ctx-menu-item:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.ctx-menu-item:disabled {
+  color: var(--text-faint);
+  cursor: default;
+}
+
+.ctx-menu-item.danger {
+  color: var(--danger);
+}
+
+.ctx-menu-item.danger:hover:not(:disabled) {
+  background: rgba(239, 95, 107, 0.12);
+}
+
+.ctx-menu-icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  color: var(--text-dim);
+}
+
+.ctx-menu-item.danger .ctx-menu-icon {
+  color: var(--danger);
+}
+
+.ctx-menu-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

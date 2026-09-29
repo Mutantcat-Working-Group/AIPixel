@@ -49,7 +49,14 @@ function lastOps(): Array<Record<string, unknown>> {
 /** 两图层两帧的文档：帧时长与图层排序的边界都要有两个元素才测得出来。 */
 function seedDocument(): PixelDocument {
   const base = blankDocument(8, 8);
-  const second: Layer = { id: "L1", name: "Layer 2", visible: true, opacity: 255 };
+  const second: Layer = {
+    id: "L1",
+    name: "Layer 2",
+    visible: true,
+    opacity: 255,
+    palette_id: "sweetie16",
+    locked: false,
+  };
   return {
     ...base,
     layers: [...base.layers, second],
@@ -556,11 +563,13 @@ describe("会话模型分工（按角色另绑模型）", () => {
       model_id: "m-chat",
       model_label: "chat-model",
       roles,
-      width: 64,
-      height: 64,
-      revision: 3,
-    };
-  }
+    width: 64,
+    height: 64,
+    revision: 3,
+    title: null,
+    order: 1,
+  };
+}
 
   it("把角色和模型 id 一起交给 Rust，回执整条换掉旧会话", async () => {
     const rebound = session(rolesOf("image_gen"));

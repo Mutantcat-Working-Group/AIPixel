@@ -29,7 +29,7 @@ pub mod vision;
 pub mod workflows;
 
 pub use colornames::{describe as describe_color, nearest_named, NAMED_COLORS};
-pub use imagegen::LandSpot;
+pub use imagegen::{probe_image_support, ImageSupport, LandSpot};
 pub use mcp::{
     namespaced_tool, McpClient, McpRegistry, McpServerConfig, McpTool, McpTransportConfig,
     MCP_TOOL_PREFIX,

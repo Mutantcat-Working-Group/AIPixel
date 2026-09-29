@@ -1,0 +1,8 @@
+{
+  "limits": {
+    "max_continuations": 20,
+    "max_retries": 5,
+    "max_reasoning_continuations": 2
+  },
+  "mcp_enabled": true
+}
