@@ -85,14 +85,14 @@ agent-core 不依赖 Tauri，是纯 Rust。它通过一个 `tokio::sync::mpsc` �
 ### 四、Agent 怎么工作
 
 一次发送的流程：`prompt admission -> provider 流式输出 -> tool_use -> 工具执行 -> 结果回填 -> 续轮`。
-每轮都重新组装系统提示词，因为上一轮的工具可能已经改过 canvas。模型能用的工具有六个：
-
+每轮都重新组装系统提示词，因为上一轮的工具可能已经改过 canvas。模型能用的工具有七个：
 - `pixel_apply_operations`：一次事务里做一坨类型化操作。图层 / 帧 / 调色板的结构改动走这里（建、复制、挪、删、改名、设时长），也可以用 `set_pixels`、`stamp_grid`、`draw_shape`、`bucket_fill`、`clear_region` 打小补丁。任一操作非法则整事务回滚，错误信息会指出失败的操作下标
 - `pixel_run_shader`：一段 Lua 脚本，配一次事务的绘制与动画。带 Loops 与 palette helpers，`animate=true` 时按 `phase`（0..1）驱动每一帧
 - `pixel_read_canvas`：读回当前网格，`overview=true` 时给降采样地图，最多读 128x128 的精确窗口
 - `pixel_tween_frames`：在两个已存在的帧之间插中间帧。要补间、过渡、或者「从 A 姿态长到 B 姿态」时用。`migrate` 按序翻差异像素（像素画该有的变形）、`blend` 插值颜色、`copy` 是占位，`ease` 会给迁移进度上 smoothstep
 - `pixel_pixelize_image`：把一张位图（通常是生图模型的产出，base64 PNG/JPEG）量化成索引像素落到目标 cel，往画布调色板上吸附、尽量复用接近色而不撑爆调色板。用来把生成结果落到网格，而不是一个像素一个像素地描述
 - `pixel_generate_image`：让生图模型直接画一张位图、再量化上画布。画刷、细密过渡、偏写实这类 Lua 脚本和类型化 ops 表达不来的走这条。默认覆盖激活 cel；要「改这一帧」就把当前帧 id 透传进 `reference_frame` 当垫图，`spot="new_frame"` 则落到新建帧而不是覆盖
+- `pixel_plan`：纠正「这一轮被理解成了什么」。一个 turn 只允许调一次，且必须赶在任何绘制工具之前，其余时候调它只会得到报错
 
 直连生图的传输链见 `crates/agent-core/src/imagegen.rs`：有垫图时优先走 `images/edits` 多段上传，没有垫图时走 `images/generations`，
 两者都被端点拒绝（404/405/501）才退回 chat 的 `modalities=["image"]`。这里有一条硬规则——垫图绝不静默丢失：只要调用带了 reference，
@@ -100,6 +100,14 @@ agent-core 不依赖 Tauri，是纯 Rust。它通过一个 `tokio::sync::mpsc` �
 所以「改这一帧」「照这一帧再长一帧」「照示例图画」在任何 OpenAI 风格端点上行为一致。
 
 「模型不许手写矩阵」的契约在 `crates/agent-core/src/tools.rs` 收口：绘制和动画统一走 Lua 沙箱，结构改动统一走 ops，读回统一走 RLE。
+
+#### 本轮分流与知识库
+
+开一个 turn 之前，Rust 先按用户原话把这一轮的方向定一次，再交给模型——这件事在 `crates/agent-core/src/plan.rs`。四件事：参照图是「只借画风」还是「照着实临摹」、成品是瓦片 / 角色 / 场景 / 图标 / 图案 / 道具、风格预设锁不锁（1-bit、Game Boy、NES、PICO-8、CGA、抖动递色、粉彩、高比特）、这一轮该带哪几条像素画工艺知识。定性的位置放在 Rust 而不放在模型：把预算全花在思考、一个工具都不调的情况真实存在，那时候约束必须已经在路上。
+
+聊天里每轮最多出现一张「理解这一轮」卡片，四件事摆成四行，行尾带上判据——用户原话里定下这件事的那个说法。模型读了觉得不对，可以调一次 `pixel_plan` 纠正；`none` 是显式摘掉上一轮的预设，「不限」也是一条要说出来的结论。
+
+知识库是 31 条像素画工艺条目（`crates/agent-core/src/knowledge.rs`），按用户原话做关键词加权明文检索，命中前几条随系统提示词进本轮。没有向量库、没有嵌入模型，也多不出一个要用户自己去配的服务：搜「瓦片」就该命中瓦片，明文命中就够。美术名词的中英别称表与常用色名表同理（`glossary.rs` / `colornames.rs`），按需检索，不整本塞进提示词。
 
 预算与退避保护同样在主循环里：`max_tool_steps`（单 turn 工具步数，默认 24）、`max_turns`（续轮次数，默认 12）、
 `max_tool_result_bytes`（回灌截断，默认 6000 字符），外加同一个失败调用连续 3 次的退避。流式期间按 120ms 轮询取消标志，`interrupt()` 立刻收尾。
@@ -115,7 +123,7 @@ RLE 编码约定；动态部分由 `pixel_core::context` 按当前激活图层 /
 
 #### MCP 工具服务器
 
-主循环的能力不止六个内置工具。顶栏的插头图标打开「MCP tool servers」面板，可以挂用户自己的 MCP 服务器：stdio（拉起子进程、
+主循环的能力不止七个内置工具。顶栏的插头图标打开「MCP tool servers」面板，可以挂用户自己的 MCP 服务器：stdio（拉起子进程、
 换行分隔 JSON-RPC）和 HTTP（JSON-RPC POST，兼容 SSE 响应）两种传输都支持，协议版本按 2025-06-18 / 2025-03-26 / 2024-11-05
 依次协商。配置落盘在 app config 目录的 `mcp.json`；勾了 Auto 的服务器在启动时自动连接，失败的只记错误、不阻塞启动。
 
@@ -195,7 +203,7 @@ python3 example/img2aip_converter.py             # refer_img/ -> refer_aip/
 
 ### 八、路线图
 
-- Agent 会话（已落地）：会话、对话流、六个工具、`.aip` 读写、BYOM 配置
+- Agent 会话（已落地）：会话、对话流、七个工具、`.aip` 读写、BYOM 配置
 - 工作台（已落地）：Auto / Chat / Ask 三档审批、画笔与橡皮、瓦片底图、帧条缩略图与播放预览、洋葱皮、帧的新建 / 复制 / 删除 / 挪位 / 停留时长、图层倒序列表与显隐 / 不透明度 / 排序、仅限直接编辑的撤销栈、配色范围（六种预设 + 一个任意颜色槽，透明格即擦）、GIF / 整条帧带 / 精灵表 / 当前帧 / Aseprite 导出
 - 批量工作台（已落地）：一个文件夹进、一个文件夹出的纯本机批处理，量化（位图到 `.aip`）与导出（`.aip` 到 PNG / GIF）两个方向，扫描先行、单文件失败不中断、回执带成败计数，独立 `batch-event` 通道
 - 批量配方簿（已落地）：参数组命名落盘 `recipes.json`，本机存取、覆盖、删除，批量面板开跑前一键回填
@@ -207,6 +215,6 @@ python3 example/img2aip_converter.py             # refer_img/ -> refer_aip/
 - `424431185/pixel-asset-master-skills`：像素资产生成的工作流切分与提示词工程思路
 - `Fantety/PixTXT`：`.aip` 相邻文本像素格式的图层 / 帧文档模型设计
 
-两份都是参照而非照抄：格式、主循环与工具名都按我们自己的约束重做，`.aip` 与六个内置工具的边界来自这份仓库自己的取舍。
+两份都是参照而非照抄：格式、主循环与工具名都按我们自己的约束重做，`.aip` 与七个内置工具的边界来自这份仓库自己的取舍。
 
 License: MIT

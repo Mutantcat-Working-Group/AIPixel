@@ -559,6 +559,41 @@ body {
   color: var(--text-dim);
 }
 
+/* 分流节点的四行字：标签一列、值一列，判据另起一行缩进去做注脚。
+ * 判据是用户原话，长，所以不跟值抢同一行——抢了就得在窄面板里折成三行。 */
+.plan-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.plan-row {
+  display: grid;
+  grid-template-columns: minmax(56px, max-content) 1fr;
+  gap: 1px 10px;
+  align-items: baseline;
+}
+
+.plan-label {
+  color: var(--text-faint);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.plan-value {
+  font-size: 12px;
+  color: var(--text);
+  word-break: break-word;
+}
+
+.plan-because {
+  grid-column: 2;
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
 .entry-reasoning {
   align-self: flex-start;
   max-width: min(88%, 780px);

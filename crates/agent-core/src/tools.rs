@@ -3,6 +3,7 @@
 
 use super::imagegen::LandSpot;
 use super::models::{ActiveContext, ToolSpec};
+use super::plan::{self, PLAN_TOOL};
 use pixel_core::context;
 use pixel_core::document::Document;
 use pixel_core::ops::{self, PixelOperation};
@@ -261,6 +262,7 @@ pub fn specs() -> Vec<ToolSpec> {
                 "required": ["prompt"]
             }),
         },
+        plan::spec(),
     ]
 }
 
@@ -281,6 +283,11 @@ pub fn execute(
         // execute，也回一句能听懂的话，而不是「unknown tool」。
         IMAGE_GEN_TOOL => err(format!(
             "{IMAGE_GEN_TOOL} runs asynchronously in the agent loop and cannot run inside tools::execute"
+        )),
+        // 同理：本轮分流归 runner，它手里握着这一轮的附件清单和分流表，
+        // 工具层看不见。落到这里只说明有人绕过了 runner 直接调 execute。
+        PLAN_TOOL => err(format!(
+            "{PLAN_TOOL} only runs in the agent loop, where the turn's attachments and routing live"
         )),
         other => err(format!("unknown tool: {other}")),
     }
@@ -966,10 +973,12 @@ mod tests {
                     | "pixel_pixelize_image"
                     // 生图由 runner 异步分流，execute 里只有兜底分支，规格仍归这里发。
                     | IMAGE_GEN_TOOL
+                    // 本轮分流归 runner：它手里有这一轮的附件清单和分流表。
+                    | PLAN_TOOL
             );
             assert!(handled, "{} is described but not dispatched", spec.name);
         }
-        assert_eq!(specs().len(), 6);
+        assert_eq!(specs().len(), 7);
     }
 
     #[test]

@@ -304,6 +304,40 @@ pub enum AttachmentRole {
     Reference,
 }
 
+/// 参考图的参照方式。用户贴一张图进来，可能是「只借画风」，也可能是「照着实临摹」；
+/// 两种说法在提示词里的约束完全相反，所以必须显式区分，不能凭模型猜。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReferenceMode {
+    Style,
+    Full,
+}
+
+impl ReferenceMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReferenceMode::Style => "style",
+            ReferenceMode::Full => "full",
+        }
+    }
+
+    /// 从模型入参里认模式。别名是防手滑的：同一个意思模型能写出四五种拼法，
+    /// 认不出的调用方报错，绝不静默按完全参照处理——那会画出一个复刻。
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "style" | "style_reference" | "style only" | "art_style" => Some(ReferenceMode::Style),
+            "full" | "full_reference" | "complete" | "exact" | "copy" => Some(ReferenceMode::Full),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ReferenceMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// 一条待发送的图片附件：角色 + media type + 不带 data: 前缀的 base64。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Attachment {
@@ -314,18 +348,30 @@ pub struct Attachment {
 
 impl Attachment {
     /// 生成提示词里的图片清单说明：模型必须知道每张图的身份与顺序。
-    pub fn caption(items: &[Attachment]) -> String {
+    ///
+    /// `modes` 与 `items` 等长，参考图那位给出参照方式（`TurnPlan` 定的）。
+    /// 约束原文跟着每张图写清楚：定性当场生效，模型不必再猜「这算哪种参照」。
+    pub fn caption(items: &[Attachment], modes: &[Option<ReferenceMode>]) -> String {
         let mut out = String::from("Images attached to this message, in order:\n");
         for (i, item) in items.iter().enumerate() {
+            let number = i + 1;
             match item.role {
-                AttachmentRole::Reference => out.push_str(&format!(
-                    "{}. reference image ({}) - the user's visual ground truth: match its subject, proportions and palette, simplified into clean pixel art at the canvas resolution.\n",
-                    i + 1,
-                    item.media_type
-                )),
+                AttachmentRole::Reference => {
+                    // 缺模式号时按完全参照兜底：宁可照着实临摹，也不能让模型
+                    // 拿到一张没有约束的参考图自由发挥。
+                    let mode = modes
+                        .get(i)
+                        .copied()
+                        .flatten()
+                        .unwrap_or(ReferenceMode::Full);
+                    out.push_str(&format!(
+                        "{number}. reference image ({}) - reference mode: {mode}. {}\n",
+                        item.media_type,
+                        super::references::rules(mode)
+                    ));
+                }
                 AttachmentRole::Snapshot => out.push_str(&format!(
-                    "{}. canvas snapshot ({}) - the canvas as it was when you sent this message: context only, never a request to redraw it; the authoritative canvas is the text grid above plus tool results.\n",
-                    i + 1,
+                    "{number}. canvas snapshot ({}) - the canvas as it was when you sent this message: context only, never a request to redraw it; the authoritative canvas is the text grid above plus tool results.\n",
                     item.media_type
                 )),
             }
@@ -463,13 +509,38 @@ mod tests {
                 data_base64: "BBBB".into(),
             },
         ];
-        let caption = Attachment::caption(&items);
+        let caption = Attachment::caption(&items, &[Some(ReferenceMode::Full), None]);
         assert!(caption.starts_with("Images attached to this message, in order:\n"));
-        assert!(caption.contains("1. reference image (image/png)"));
+        assert!(caption.contains("1. reference image (image/png) - reference mode: full."));
         assert!(caption.contains("2. canvas snapshot (image/png)"));
         // 角色措辞必须可区分：快照不许被当成重绘请求，参考图是视觉真值。
         assert!(caption.contains("context only, never a request to redraw it"));
-        assert!(caption.contains("visual ground truth"));
+        assert!(caption.contains("reproduce its subject, composition, proportions and palette"));
+    }
+
+    #[test]
+    fn a_style_reference_hands_the_subject_back_to_the_user() {
+        let items = vec![Attachment {
+            role: AttachmentRole::Reference,
+            media_type: "image/png".into(),
+            data_base64: "AAAA".into(),
+        }];
+        let caption = Attachment::caption(&items, &[Some(ReferenceMode::Style)]);
+        assert!(caption.contains("reference mode: style."), "{caption}");
+        // 风格参照下主体必须听用户的：只借用色、光向、描边和抖动。
+        assert!(caption.contains("take ONLY its palette, ramps, light direction"));
+        assert!(caption.contains("must come from the user's words"));
+    }
+
+    #[test]
+    fn a_missing_mode_falls_back_to_full_rather_than_no_constraint() {
+        let items = vec![Attachment {
+            role: AttachmentRole::Reference,
+            media_type: "image/png".into(),
+            data_base64: "AAAA".into(),
+        }];
+        let caption = Attachment::caption(&items, &[]);
+        assert!(caption.contains("reference mode: full."), "{caption}");
     }
 
     #[test]

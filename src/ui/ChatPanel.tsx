@@ -20,10 +20,31 @@ import { open } from "@tauri-apps/plugin-dialog";
 
 import { STALL_SECONDS, useStore } from "../lib/store";
 import { useT } from "../lib/t";
+import { translateText } from "../lib/i18n";
+import { parsePlanRows } from "../lib/plan-node";
 import Markdown from "./Markdown";
 import type { ApprovalDecision, PendingAttachment, TranscriptEntry } from "../lib/types";
 
 const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "webp", "gif"];
+
+/** 工具名换一句人话。没收录的按原名显示——新工具先让人看见名字，而不是一个空标签。 */
+const TOOL_LABEL: Record<string, string> = {
+  pixel_apply_operations: "tool.pixel_apply_operations",
+  pixel_read_canvas: "tool.pixel_read_canvas",
+  pixel_run_shader: "tool.pixel_run_shader",
+  pixel_tween_frames: "tool.pixel_tween_frames",
+  pixel_pixelize_image: "tool.pixel_pixelize_image",
+  pixel_generate_image: "tool.pixel_generate_image",
+  pixel_plan: "tool.pixel_plan",
+};
+
+/** 分流节点的四类标签，缺键时的英文后备。 */
+const PLAN_LABEL_FALLBACK: Record<string, string> = {
+  "plan.reference_one": "Reference {n}",
+  "plan.intent": "Deliverable",
+  "plan.style": "Art style",
+  "plan.knowledge": "Craft notes",
+};
 
 /** 本轮对话的计时器：跑起来之后每秒走一格，停下来归零。 */
 function TurnTimer() {
@@ -59,6 +80,38 @@ function AttachChip({ item }: { item: PendingAttachment }) {
   );
 }
 
+/** 分流节点的入参：四件事摆成四行，读不出形状才退回裸 JSON。 */
+function PlanBody({ input }: { input: unknown }) {
+  const t = useT();
+  const lang = useStore((s) => s.lang);
+  const rows = parsePlanRows(input);
+  if (rows.length === 0) return <pre>{JSON.stringify(input, null, 2)}</pre>;
+  return (
+    <div className="plan-rows">
+      {rows.map((row, i) => (
+        <div className="plan-row" key={`${row.labelKey}-${i}`}>
+          <span className="plan-label">
+            {translateText(
+              lang,
+              row.labelKey,
+              row.vars,
+              PLAN_LABEL_FALLBACK[row.labelKey] ?? row.labelKey,
+            )}
+          </span>
+          <span className="plan-value">
+            {row.keys
+              .map((key, j) => translateText(lang, key, undefined, row.raws[j]))
+              .join(t("plan.sep"))}
+          </span>
+          {row.because ? (
+            <span className="plan-because">{t("plan.because", { words: row.because })}</span>
+          ) : null}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function ToolEntry({
   entry,
   expanded,
@@ -73,16 +126,23 @@ function ToolEntry({
 }) {
   const t = useT();
   const pending = entry.summary === null;
+  const lang = useStore((s) => s.lang);
+  const labelKey = TOOL_LABEL[entry.name];
+  const name = labelKey ? translateText(lang, labelKey, undefined, entry.name) : entry.name;
   const body = expanded ? (
     <div className="tool-body">
-      <pre>{JSON.stringify(entry.input, null, 2)}</pre>
+      {entry.name === "pixel_plan" ? (
+        <PlanBody input={entry.input} />
+      ) : (
+        <pre>{JSON.stringify(entry.input, null, 2)}</pre>
+      )}
     </div>
   ) : null;
   return (
     <div className={`entry-tool ${entry.isError ? "error" : ""}`}>
       <button type="button" className="tool-head" onClick={onToggle}>
         {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-        <span className="tool-name">{entry.name}</span>
+        <span className="tool-name">{name}</span>
         <span className="tool-summary">
           {awaiting ? t("chat.awaiting") : pending ? t("chat.tool_running") : entry.summary}
         </span>
@@ -127,11 +187,16 @@ function ApprovalCard() {
 }
 
 function EntryRow({ entry }: { entry: TranscriptEntry }) {
-  const [expanded, setExpanded] = useState(false);
+  // null 表示用户还没手动碰过，此时按默认来；点过一次就以用户的最后一次为准。
+  const [expanded, setExpanded] = useState<boolean | null>(null);
   const t = useT();
   // 等待审批的调用要在对话流里标出来，否则用户不知道停在哪一条。
   const awaitingId = useStore((s) => s.pendingApproval?.callId ?? null);
-  const toggle = () => setExpanded((v) => !v);
+  // 分流节点是「这一轮被理解成了什么」，整批评判词就摆在眼前才有意义；
+  // 折起来等于把这批功能的成果藏进一次点击，所以它默认摊开。
+  const defaultOpen = entry.kind === "tool" && entry.name === "pixel_plan";
+  const open = expanded ?? defaultOpen;
+  const toggle = () => setExpanded((v) => !(v ?? defaultOpen));
 
   if (entry.kind === "user") {
     return (
@@ -192,7 +257,7 @@ function EntryRow({ entry }: { entry: TranscriptEntry }) {
     return (
       <ToolEntry
         entry={entry}
-        expanded={expanded}
+        expanded={open}
         onToggle={toggle}
         awaiting={awaitingId === entry.id}
       />

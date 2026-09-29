@@ -176,14 +176,6 @@ export default function DocumentPanel() {
     }
   }
 
-  function clearFrameLayer() {
-    for (const canvas of tileCanvases("canvas.frame-layer")) {
-      const ctx = canvas.getContext("2d");
-      if (!ctx) continue;
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-    }
-  }
-
   // 播放：帧号在前端自己走，不每帧都去 Rust 取一次图。停下来才把帧号同步回
   // store，让帧条、高亮和 png 对齐。时长极端短的帧也兜个底，不然 setTimeout
   // 会被压成一锅粥。
@@ -210,12 +202,20 @@ export default function DocumentPanel() {
     return () => window.clearTimeout(timer);
   }, [playing, document, onion]);
 
-  // 不播放时洋葱皮自己补上；关掉就把幽灵擦干净，别留一层残影。
+  // 不播放时，切帧、洋葱皮开关、文档改动（document_updated / 落笔 / 撤销）
+  // 都要把当前帧重新画回来。
+  //
+  // 这里以前是「只清不画」：洋葱皮开着才 paintFrame，关着就只调
+  // clearFrameLayer()。于是点帧条、AI 改完画面之后，帧层被擦成一块透明，
+  // 剩下的只有底层那张 <img>——而 img 的 src 要等 refreshPng 那趟往返，
+  // 期间画布看着就是空的；img 又只在 revision 不变时才被采信，切帧后
+  // 高亮、缩略图和主画布三者对不上，用户看到的就是「选帧之后画布空了」。
+  // 帧层本就是覆盖层，唯一正确的动作是按当前帧号重绘：洋葱皮要就带上
+  // 一帧，不要就自己画自己，永远别留一块没人写的画布。
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (playing || !document) return;
-    if (onion && frameIndex > 0) paintFrame(frameIndex, frameIndex - 1);
-    else clearFrameLayer();
+    paintFrame(frameIndex, onion && frameIndex > 0 ? frameIndex - 1 : null);
   }, [playing, onion, frameIndex, document]);
 
   // 预览区可用宽度决定放大倍率，侧栏变窄（<1180px）时倍率要跟着缩。

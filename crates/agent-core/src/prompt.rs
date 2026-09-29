@@ -17,7 +17,7 @@ LUA CANVAS API (for pixel_run_shader): pset(x,y,color), pget(x,y), line(x0,y0,x1
 WORKFLOW - compose once, verify once:
 1. DRAW with pixel_run_shader whenever the request is about artwork: shapes, characters, scenes, patterns, textures, symmetry, gradients. Write ONE Lua script per transaction - its size does not grow with the canvas and the runtime places every pixel exactly. Use loops for symmetry and repetition, pal(i) for palette colors, mix()/hsv()/alpha() for gradients and glows, noise()/rand() for organic texture. Never enumerate long pixel arrays by hand.
    ANIMATION: for animated artwork pass animate=true and drive motion with phase (0..1) or time (seconds); the runtime renders every frame. Frame count is document structure: create/retime frames first with pixel_apply_operations (create_frame, set_frame_duration), then run the shader.
-   IMAGE ATTACHMENTS: a user message may carry images, listed by an "Images attached to this message" caption. The entry captioned "canvas snapshot" is context only - never a request to redraw it, and the authoritative current canvas is always the text grid plus tool results. Entries captioned "reference image" are the user's visual ground truth: match their subject, proportions, and palette, simplifying them into clean pixel art at the canvas resolution instead of copying compression noise.
+   IMAGE ATTACHMENTS: a user message may carry images, listed by an "Images attached to this message" caption. The entry captioned "canvas snapshot" is context only - never a request to redraw it, and the authoritative current canvas is always the text grid plus tool results. Every entry captioned "reference image" carries a "reference mode" and that mode is binding: mode "full" means the image IS the subject, so reproduce its subject, composition, proportions and palette on the canvas; mode "style" means the image is only a sample of palette, ramps, light direction, outline and dithering, and the subject, composition, pose and proportions MUST come from the user's words, never from the image. The full rules are restated next to each reference in the caption. If the user's own words clearly contradict the mode written for a reference, or the deliverable type / locked art style written in the TURN ROUTING section above is clearly wrong for what the user asked, call pixel_plan ONCE to correct it before any drawing tool; in every other case never call it.
 2. Use pixel_apply_operations only for document structure (create/rename/move/delete layers, frames, palette colors) and tiny precise patches (a few pixels via set_pixels, stamp_grid, draw_shape, bucket_fill, clear_region). Batch structural changes into ONE call. You may combine it with pixel_run_shader in the same turn.
 3. After edits, the tool result contains the updated active-layer grid. Check it once. Call pixel_read_canvas only when you need the canvas again later.
 
@@ -56,22 +56,40 @@ ENCODING RULES: colors are #RRGGBB or #RRGGBBAA (or a palette index). Transparen
 
 Preserve existing pixels unless the user asks to replace them. Reply in the user's language and keep the final summary short; never echo the canvas grid back to the user."##;
 
-/// 组装完整系统提示词：静态规则 + 实时 canvas 上下文（RLE + 图例 + 目录 + 激活项）。
+/// 组装完整系统提示词：静态规则 + 本轮分流 + 两张对照表 + 命中的知识 + 实时
+/// canvas 上下文（RLE + 图例 + 目录 + 激活项）。
+///
+/// 顺序是排过的：静态规则讲「像素画怎么画」，本轮分流紧跟其后讲「这一轮要什么」，
+/// 对照表和知识条目回答「用户说的那个词是什么意思、该怎么落地」，
+/// 最后才是当前画布。把 canvas 上下文挪到最前面是常见写法，但那会让模型先入为主
+/// 地照着现有像素续写，而不是接着用户这句话往下想。
 pub fn build_system_prompt(
     doc: &pixel_core::Document,
     active_layer: &str,
     active_frame: &str,
     current_color: Option<&str>,
     max_chars: usize,
+    routing: &str,
+    craft_notes: &str,
 ) -> String {
     let mut out = String::new();
     out.push_str(SYSTEM_CRAFT);
+    // 本轮分流紧跟规则：它优先级高于通用规则，所以不能埋到上下文末尾。
+    if !routing.is_empty() {
+        out.push('\n');
+        out.push_str(routing);
+    }
     // 两张对照表跟在规则后面：模型先学怎么画，再学「用户嘴里说的那个东西叫什么」。
     // 颜色名表决定用户说「蓝」时落到哪个 hex，术语表决定用户说「勾线」时去搜什么。
     out.push('\n');
     out.push_str(&colornames::prompt_table());
     out.push('\n');
     out.push_str(&glossary::prompt_table());
+    // 知识条目是这一轮才命中的那几条，空串表示这句用不上，不要留空标题。
+    if !craft_notes.is_empty() {
+        out.push('\n');
+        out.push_str(craft_notes);
+    }
     out.push_str("\n\nCurrent canvas context:\n");
     out.push_str(&context::system_context(
         doc,

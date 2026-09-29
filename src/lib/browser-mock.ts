@@ -417,7 +417,10 @@ function handler(cmd: string, raw?: unknown): unknown {
       return { revision };
     case "editor_paint_stroke": {
       // 落笔：把这一笔的格子写进当前 cel；橡皮的颜色是 null，也就是回到透明格。
-      const stroke = payload as unknown as { layer: string; frame: string; cells: { x: number; y: number }[]; color: string | null };
+      // 形状必须和真机一致：bridge 发的是 { id, stroke: { layer, frame, cells, color } }，
+      // Rust 那边也是 stroke: StrokeRequest。mock 读平铺字段的话 strokes 会全落在
+      // undefined 上——预览里画一笔看着有反馈，实际一格都没改。
+      const stroke = payload.stroke as unknown as { layer: string; frame: string; cells: { x: number; y: number }[]; color: string | null };
       const cel = doc.cels[stroke.layer]?.[stroke.frame];
       if (cel) {
         const slot = stroke.color ? doc.palette.findIndex((c) => rgbaToHex(c) === stroke.color) : 0;

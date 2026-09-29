@@ -23,6 +23,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
 use super::imagegen::{self, ImageGenParams, LandSpot};
+use super::knowledge;
 use super::limits;
 use super::mcp::{self, McpRegistry};
 use super::models::{
@@ -30,6 +31,7 @@ use super::models::{
     ContentBlock, LlmEvent, Message, ModelConfig, PermissionMode, Role, RunnerConfig, ToolSpec,
     UiText,
 };
+use super::plan::{self, TurnPlan, PLAN_TOOL};
 use super::prompt;
 use super::providers::{self, LlmProvider, ProviderError};
 use super::roles::{ModelRole, RoleBinding};
@@ -111,7 +113,7 @@ impl IdleWatch {
 const MAX_CONTINUATIONS: usize = crate::models::LoopLimits::DEFAULT.max_continuations;
 
 /// 续写一次至少要吐出这么多个字符，否则算没推进。
-const MIN_CONTINUATION_GAIN: usize = 24;
+const MIN_CONTINUATION_GAIN: usize = 8;
 
 /// 回灌「你写到哪里了」时，尾巴截多长。
 const RESUME_TAIL_CHARS: usize = 400;
@@ -185,12 +187,200 @@ fn retryable(err: &ProviderError) -> bool {
     }
 }
 
+/// 续写时对照的「已经写到哪里」：正文和推理各留一段尾巴。
+///
+/// 模型续写时最爱犯的毛病，是把刚写完的最后几句原样再念一遍。念出来的字会顺着
+/// `LlmEvent::Token` 直达界面——等整轮收场才发现重复，用户已经看到同一段话写了
+/// 两遍。所以在流式入口就按住比对，复读的那截在推给前端之前就吃掉。
+///
+/// 判据只有一条：复读的那截必然是「已写内容里某一段的开头，一直连到刚写完的
+/// 地方」。模型被掐断后收到的回灌里就带着最后几百个字，它下一句照着念的
+/// 就是那一段。所以匹配得在整个窗口里找起点，不能只盯最后一个字——复读
+/// 常常是从好几句之前那个字开始的，只对尾巴的话一句都拦不住。
+struct EchoTrim {
+    /// 正文这一路。
+    text: EchoStream,
+    /// 同 `text`，只是这一路是推理。推理一样会复读，而且复读起来更啰嗦。
+    reasoning: EchoStream,
+    /// 已经吃掉的复读字符数。只为了把续写指令说得更重。
+    eaten: usize,
+}
+
+/// 对照窗口取多长。模型复读的通常就是最后一段话，再往上就是另一段了；
+/// 窗口越长比对越贵，而多出来的部分基本对不上。
+const ECHO_WINDOW: usize = 400;
+
+/// 短于这个长度的「像已写内容」不算复读：换行、半个括号、一个句号常常是正经内容。
+const ECHO_MIN: usize = 16;
+
+/// 匹配的段落不在已写内容的末尾收头、却又这么长，认它是跳回前面重念。
+/// 对代码来说十几行的重复少见，对「从头再写一遍」来说正好。
+const ECHO_DEEP: usize = 48;
+
+/// 正文或推理其中一路的复读筛：一个对照窗口，加手里还没下定论的一截。
+///
+/// 窗口记的是「已经写到哪儿了」，`held` 是新流进来正在比对的那截。正文和推理
+/// 各有一份：模型可能复读推理却接着正文往下写，也可能反过来。
+struct EchoStream {
+    /// 已写的最后 `ECHO_WINDOW` 个字符。
+    window: Vec<char>,
+    /// 正在比对、还没下定论的分片。整段都像尾巴时先按住，看下一个字符。
+    held: String,
+    /// 窗口里哪些下标开头还接着对得上。空表示没在比对。
+    cands: Vec<usize>,
+}
+
+impl EchoStream {
+    fn new() -> Self {
+        Self {
+            window: Vec::new(),
+            held: String::new(),
+            cands: Vec::new(),
+        }
+    }
+
+    /// 把这一段新写的并进窗口。续写判定必须跨轮活着：模型复读的常常不是最后
+    /// 一句，而是上一轮整段。
+    fn absorb(&mut self, written: &str) {
+        self.window.extend(written.chars());
+        keep_tail(&mut self.window, ECHO_WINDOW);
+    }
+
+    /// 收下一段新流进来的内容，返回真正该放行的那部分。整段都在复读就返回空。
+    ///
+    /// 逐字走：每来一个字，先看手里这些候选起点还能不能往前接，接不上的当场
+    /// 淘汰。一个候选都不剩了，说明手里按住的这截到此为止——前面那段是照搬，
+    /// 最后这个字才是新内容。候选还有气就继续按住：现在放行，放出去的可能
+    /// 正是复读的头几个字。
+    fn feed(&mut self, chunk: &str, eaten: &mut usize) -> String {
+        let mut fresh = String::new();
+        for ch in chunk.chars() {
+            let k = self.held.chars().count();
+            // 手里这段要是正好顶到已写内容的末尾，这一字就会把那个候选断掉。
+            // 对上的那段一路连到已写内容的末尾，是复读最地道的形状：模型接着
+            // 自己刚写完的地方往下念。
+            let anchored = k > 0 && self.cands.iter().any(|&i| i + k == self.window.len());
+            if k == 0 {
+                // 新开一段：窗口里每个同字的位置都可能是复读的起点。
+                self.cands.clear();
+                self.cands.extend(
+                    self.window
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, &c)| c == ch)
+                        .map(|(i, _)| i),
+                );
+            } else {
+                // 已在比对：每个候选都往前赶一个字，对不上的淘汰。
+                self.cands.retain(|&i| self.window.get(i + k) == Some(&ch));
+            }
+            self.held.push(ch);
+            if !self.cands.is_empty() {
+                continue;
+            }
+            // 都对不上了：手里前 k 个字是照搬。太短的当正经内容放行，别误删；
+            // 对在中间就断的，得长到 ECHO_DEEP 才认——十几二十个字的重合在
+            // 代码和套话里太常见了，删了就是删真东西。
+            if k >= ECHO_MIN && (anchored || k >= ECHO_DEEP) {
+                *eaten += k;
+                fresh.push(ch);
+            } else {
+                fresh.push_str(&self.held);
+            }
+            self.held.clear();
+        }
+        if !fresh.is_empty() {
+            // 放行出去的字要并回窗口：下一段的复读判定得照最新的写。
+            self.window.extend(fresh.chars());
+            keep_tail(&mut self.window, ECHO_WINDOW);
+        }
+        fresh
+    }
+
+    /// 一段流收尾时手上还按着的那截怎么算。够长又顶在末尾的，是模型念到刚写完
+    /// 的地方就没词了；剩下的当正经内容还回去。
+    fn seal(&mut self, eaten: &mut usize) -> String {
+        let len = self.held.chars().count();
+        let anchored = self.cands.iter().any(|&i| i + len == self.window.len());
+        let fresh = if len >= ECHO_MIN && (anchored || len >= ECHO_DEEP) {
+            *eaten += len;
+            String::new()
+        } else {
+            std::mem::take(&mut self.held)
+        };
+        self.held.clear();
+        self.cands.clear();
+        fresh
+    }
+}
+
+impl EchoTrim {
+    fn new(reasoning: &str, text: &str) -> Self {
+        let mut trim = Self {
+            text: EchoStream::new(),
+            reasoning: EchoStream::new(),
+            eaten: 0,
+        };
+        trim.absorb(reasoning, text);
+        trim
+    }
+
+    /// 把这一轮新写下的内容并进对照窗口。续写判定必须跨轮活着：模型复读的
+    /// 常常不是最后一句，而是上一轮整段。
+    fn absorb(&mut self, reasoning: &str, text: &str) {
+        self.reasoning.absorb(reasoning);
+        self.text.absorb(text);
+    }
+
+    /// 收下一段新正文，返回真正该放行的那部分。整段都在复读就返回空。
+    fn feed_text(&mut self, chunk: &str) -> String {
+        self.text.feed(chunk, &mut self.eaten)
+    }
+
+    /// 收下一段新推理。推理一样会复读，而且复读起来更啰嗦。
+    fn feed_reasoning(&mut self, chunk: &str) -> String {
+        self.reasoning.feed(chunk, &mut self.eaten)
+    }
+
+    /// 这一轮收尾。还按住的那截整段都在照搬，而那些字前面已经写过了，
+    /// 吃掉不会少任何内容——但得把状态清干净，不然下一轮对着残渣比对。
+    /// 对不齐、又不够长的，宁可放行：删错一个字的代价比多显示一遍高。
+    fn seal(&mut self) -> (String, String) {
+        let fresh_text = self.text.seal(&mut self.eaten);
+        let fresh_reasoning = self.reasoning.seal(&mut self.eaten);
+        (fresh_text, fresh_reasoning)
+    }
+
+    /// 之前有没有吃过复读。为了让续写指令把话说重。
+    fn ate_something(&self) -> bool {
+        self.eaten > 0
+    }
+}
+
+/// 只留最后 `keep` 个字符。中文一个字也是一个字符，这里一律按字符算。
+fn keep_tail(text: &mut Vec<char>, keep: usize) {
+    let total = text.len();
+    if total <= keep {
+        return;
+    }
+    text.drain(..total - keep);
+}
+
 /// 续写时回灌给模型的指令。界面文案走字典，这句是喂模型的，必须英文。
 ///
 /// 关键是把「你写到哪里了」的原文尾巴一起给它。只说一句泛泛的「继续」，
 /// 模型很可能重起一趟：先复述前面写过的，再往下接——用户看到的就是同一段话
 /// 被写了两遍。把断点原文按在眼前，它只能接着那几个字往下走。
-fn continue_nudge(carried: &str) -> String {
+fn continue_nudge(carried: &str, repeated: bool) -> String {
+    // 上一发续写已经复读过了：光说「别重复」不够，得把话说重。
+    // 模型的通病是看见「继续」就从头念，念过一次尤其容易再念。
+    let scold = if repeated {
+        "\n\nYour previous continuation opened by repeating text that was already written \
+above. That repetition was discarded. Do not do it again: start with the first \
+character that is actually missing."
+    } else {
+        ""
+    };
     let tail: String = carried
         .chars()
         .rev()
@@ -206,7 +396,7 @@ You had already written {} characters, and it stopped mid-stream at exactly this
 Continue from that exact point. Output only the text that is still missing: \
 do not repeat any of it, do not restate or summarise what you already wrote, \
 do not re-announce a plan, and do not start over. \
-Finish the line, statement, or tool call that was in progress.",
+Finish the line, statement, or tool call that was in progress.{scold}",
         carried.chars().count(),
     )
 }
@@ -221,8 +411,14 @@ fn continuation_progressed(carried: &str, fresh: &str) -> bool {
     if carried.is_empty() {
         return !fresh.is_empty();
     }
-    let gained = fresh.chars().count();
-    if gained < MIN_CONTINUATION_GAIN {
+    // 原样复读：模型把已经写过的又念了一遍。这条比长度更准，所以排在前头。
+    if carried.contains(fresh) {
+        return false;
+    }
+    // 真的写了新东西，但只有一两个字（一个句号、半个括号）。这种续写再要二十次
+    // 也拼不出结尾，是原地打转，不是写完前的最后一口气。门槛压到 8：收尾常常
+    // 就剩一个 ``` 加一个 end，卡太紧会把好好一条回复判成卡死。
+    if fresh.chars().count() < MIN_CONTINUATION_GAIN {
         return false;
     }
     !carried.contains(fresh)
@@ -340,6 +536,17 @@ pub struct AgentSession {
     title: Mutex<Option<String>>,
     /// 排序位。新建时拿自增序号，前端拖动排序后整批改写。
     order: AtomicU64,
+    /// 合成 function_call 节点的自增号。用自增而不是随机串：
+    /// 前端拿它当列表 key、配对 ToolCall/ToolResult，重号会让节点自己合并掉。
+    ref_nodes: AtomicU64,
+    /// 这一轮的分流表：参照定性、成品意图、风格预设、知识条目。
+    /// 开 turn 时按用户原话定一次，模型中途调 pixel_plan 纠正时就地改写——
+    /// 出图清单和提示词的 TURN ROUTING 段必须跟着改，不然模型嘴上要的是
+    /// 「只借画风」，清单里还写着「视觉真值」，两处各说各话。
+    plan: Mutex<TurnPlan>,
+    /// 这一轮的用户原话。知识库每发一次请求都要重新检索一遍，
+    /// 因为纠正可能把意图和风格换掉，命中的知识条目也该跟着换。
+    turn_text: Mutex<String>,
     /// 用户在编辑器里动手的痕迹（一句话一条）。下一轮请求前冲刷成一条 user 消息，
     /// 让模型知道「画面已经被人改过了」，别照着自己上一轮的想象继续画。
     pending_edits: Mutex<Vec<String>>,
@@ -362,6 +569,9 @@ impl AgentSession {
             mcp: Mutex::new(None),
             title: Mutex::new(None),
             order: AtomicU64::new(0),
+            ref_nodes: AtomicU64::new(0),
+            plan: Mutex::new(TurnPlan::default()),
+            turn_text: Mutex::new(String::new()),
             pending_edits: Mutex::new(Vec::new()),
         }
     }
@@ -699,11 +909,22 @@ impl AgentSession {
         if !text.trim().is_empty() {
             content.push(ContentBlock::Text { text: text.clone() });
         }
+        // 分流先走：Rust 按用户原话把参照定性、成品意图、风格预设、知识条目一次定完，
+        // 存进会话状态。模型读原话觉得判错了再调 pixel_plan 纠正，两段接力。少了前一段，
+        // 「光思考不干活」的模型就根本不会把约束带上路——而那几条一漏，「照这个画风」
+        // 就变成了复刻，「瓦片」就变成了一张大地图。
+        let plan = TurnPlan::from_text(&text, &attachments);
+        *self.plan.lock().unwrap() = plan.clone();
+        *self.turn_text.lock().unwrap() = text.clone();
+        self.emit_plan_node(&tx, &attachments, &plan);
+
         // 图片清单走在图片前面：模型必须知道每张图的身份与顺序，
         // 否则「快照只是上下文、参考图才是真值」这条约束无从执行。
         if !attachments.is_empty() {
             content.push(ContentBlock::Text {
-                text: Attachment::caption(&attachments),
+                // 每张参考图都带上它的参照方式和约束原文。定性当场生效，模型不必
+                // 再猜「这算哪种参照」——猜错的方向是彻底相反的两种画法。
+                text: Attachment::caption(&attachments, &plan.reference_modes),
             });
         }
         for attachment in attachments {
@@ -786,6 +1007,9 @@ impl AgentSession {
             let mut stalled = false;
             // provider 直说过「最多给这么多」时记住它，本逻辑轮内都照这个来。
             let mut token_ceiling: Option<u32> = None;
+            // 续写时对照的「已经写到哪里」。第一发没有旧内容可对照，掐断之后才建起来，
+            // 之后每一发都带着它走，跨轮活着。
+            let mut echo: Option<EchoTrim> = None;
             // provider 报的 stop reason 明明是「说完了」，结尾却断在半截。
             let mut inferred_cut = false;
             // 连续几轮只吐推理、没动笔。护栏里的硬闸，理由见 MAX_REASONING_CONTINUATIONS。
@@ -845,9 +1069,13 @@ impl AgentSession {
                     }
                 };
 
+                // 这一发之前已经吃掉过多少复读。整段都在照搬的话，收下来一个字
+                // 不剩，跟「模型什么都没吐」长得一模一样——比一下才知道是谁。
+                let eaten_before = echo.as_ref().map_or(0, |t| t.eaten);
                 let mut raw = self
-                    .consume_stream(stream, &tx, &mut usage_in, &mut usage_out)
+                    .consume_stream(stream, &tx, &mut usage_in, &mut usage_out, echo.as_mut())
                     .await;
+                let ate_now = echo.as_ref().is_some_and(|t| t.eaten > eaten_before);
 
                 if raw.cancelled {
                     emit(&tx, AgentEvent::Interrupted);
@@ -922,6 +1150,12 @@ impl AgentSession {
                     raw.stop = StopKind::Truncated;
                     inferred_cut = true;
                 }
+                // 续写那一发整段都在照搬：复读筛咽干净之后 `resumable()` 直接是假，
+                // 看着像「模型什么都没产出」。不是那么回事——它把写过的又念了
+                // 一遍。按卡死收场，报错才说得清到底断在哪。
+                if raw.stop == StopKind::Truncated && !raw.resumable() && ate_now {
+                    stalled = true;
+                }
                 // 话没说完就接着问。前半截已经逐字推给前端了，续写只是继续追加，
                 // 用户看到的是一段完整输出，而不是半句摆在屏幕上。
                 if raw.stop == StopKind::Truncated && raw.resumable() {
@@ -950,7 +1184,17 @@ impl AgentSession {
                     }
                     carried.push_str(&fresh);
                     continuations += 1;
-                    self.push_resume(&raw, &continue_nudge(&carried));
+                    // 把这一轮写下的内容并进对照窗口，下一发续写就照着最新的比。
+                    // 第一次掐断时窗口就是这半截回复本身。
+                    echo = Some(match echo {
+                        Some(mut trim) => {
+                            trim.absorb(&raw.reasoning, &raw.text);
+                            trim
+                        }
+                        None => EchoTrim::new(&raw.reasoning, &raw.text),
+                    });
+                    let repeated = echo.as_ref().is_some_and(EchoTrim::ate_something);
+                    self.push_resume(&raw, &continue_nudge(&carried, repeated));
                     emit(
                         &tx,
                         AgentEvent::Status {
@@ -1191,6 +1435,10 @@ impl AgentSession {
                                     is_error: true,
                                 },
                             }
+                        } else if call.name == PLAN_TOOL {
+                            // 只改会话里的分流表，不碰文档、不等模型。按 sync 写
+                            // 就够，签名跟着其余分支保持 async 是为了分流链一致。
+                            self.run_plan(&call.input).await
                         } else if call.name == tools::IMAGE_GEN_TOOL {
                             // 生图要等模型回图，异步跑；await 期间绝不持有文档锁。
                             self.run_image_gen(&call.input).await
@@ -1278,6 +1526,21 @@ impl AgentSession {
         let doc = self.document.lock().unwrap();
         let active = self.active.lock().unwrap();
         let engine = self.engine.lock().unwrap();
+        // 本轮分流和知识条目按当前 plan 和原话现算：模型中途纠正过，
+        // 下一发请求就该带着新结论上路，缓存会把纠正吃掉。
+        // 锁顺序固定 document -> active -> engine -> plan -> turn_text。
+        let (routing, craft_notes) = {
+            let plan = self.plan.lock().unwrap();
+            let text = self.turn_text.lock().unwrap();
+            (
+                plan.prompt_sections(),
+                knowledge::prompt_section(
+                    &text,
+                    knowledge::DEFAULT_LIMIT,
+                    knowledge::DEFAULT_BUDGET,
+                ),
+            )
+        };
         ChatRequest {
             system: prompt::build_system_prompt(
                 &doc,
@@ -1285,6 +1548,8 @@ impl AgentSession {
                 &active.frame,
                 active.color.as_deref(),
                 cfg.canvas_context_chars,
+                &routing,
+                &craft_notes,
             ),
             messages: self.messages.lock().unwrap().clone(),
             // MCP 工具追加在内建 pixel_* 之后：模型每轮看到的都是当前真实能力。
@@ -1305,12 +1570,16 @@ impl AgentSession {
 
     /// 把流喝干。失败/取消/掐断都不在这里收尾，只写进 `RoundRaw`，
     /// 交给调用方决定是重发还是续写——这样这个函数里没有任何 `return` 分支逃逸。
+    ///
+    /// `echo` 只在续写那几发里带着：模型把刚写完的原样再念一遍时，念出来的字
+    /// 在这里就被吃掉，不会流到界面上让用户看两遍。第一发没有可对照的旧内容。
     async fn consume_stream(
         &self,
         mut stream: providers::EventStream,
         tx: &UnboundedSender<AgentEvent>,
         usage_in: &mut Option<u32>,
         usage_out: &mut Option<u32>,
+        mut echo: Option<&mut EchoTrim>,
     ) -> RoundRaw {
         let mut raw = RoundRaw::empty();
         let mut tick = tokio::time::interval(Duration::from_millis(120));
@@ -1324,12 +1593,24 @@ impl AgentSession {
                     match item {
                         Some(Ok(event)) => match event {
                             LlmEvent::Token(t) => {
-                                raw.text.push_str(&t);
-                                emit(tx, AgentEvent::Token { text: t });
+                                let fresh = match echo.as_mut() {
+                                    Some(trim) => trim.feed_text(&t),
+                                    None => t,
+                                };
+                                if !fresh.is_empty() {
+                                    raw.text.push_str(&fresh);
+                                    emit(tx, AgentEvent::Token { text: fresh });
+                                }
                             }
                             LlmEvent::Reasoning(t) => {
-                                raw.reasoning.push_str(&t);
-                                emit(tx, AgentEvent::Reasoning { text: t });
+                                let fresh = match echo.as_mut() {
+                                    Some(trim) => trim.feed_reasoning(&t),
+                                    None => t,
+                                };
+                                if !fresh.is_empty() {
+                                    raw.reasoning.push_str(&fresh);
+                                    emit(tx, AgentEvent::Reasoning { text: fresh });
+                                }
                             }
                             LlmEvent::ToolUseStart { index, id, name } => {
                                 raw.accumulator.insert(index, (id, name, String::new()));
@@ -1380,6 +1661,25 @@ impl AgentSession {
                 }
             }
         }
+        // 还按住的那截到此收尾。够长的照搬：模型念到刚写完的地方就没词了，
+        // 那些字前面已经写过了，咽下去不显。不够长的还回去——流到这儿
+        // 新内容还没来齐，咽了就是真删了用户要看的东西。
+        if let Some(trim) = echo.as_mut() {
+            let (fresh_text, fresh_reasoning) = trim.seal();
+            if !fresh_text.is_empty() {
+                raw.text.push_str(&fresh_text);
+                emit(tx, AgentEvent::Token { text: fresh_text });
+            }
+            if !fresh_reasoning.is_empty() {
+                raw.reasoning.push_str(&fresh_reasoning);
+                emit(
+                    tx,
+                    AgentEvent::Reasoning {
+                        text: fresh_reasoning,
+                    },
+                );
+            }
+        }
         raw
     }
 
@@ -1411,6 +1711,134 @@ impl AgentSession {
 
     /// agent 生图工具：让模型直接产出位图，再量化落到画布。与同步工具分开跑，
     /// 因为它要等模型回图，期间绝不能占着文档锁。锁顺序仍是 document -> active。
+    /// 本轮分流节点：一进 turn 就摆出去，让用户当场看见「这句话被理解成了什么」，
+    /// 而不是等模型画完才发现一整张图被复刻、或瓦片被画成了一张地图。
+    /// ToolCall / ToolResult 成对发，和模型自己调工具在对话里长得一模一样；
+    /// 但它不进 messages——它只是把已经写进提示词的那几条约束显式地说一遍。
+    fn emit_plan_node(
+        &self,
+        tx: &UnboundedSender<AgentEvent>,
+        _attachments: &[Attachment],
+        plan: &TurnPlan,
+    ) {
+        // 一件都没定出来就不发：聊天气泡里凭空多一张跟画面无关的卡片，只是噪声。
+        if !plan.has_references()
+            && plan.intent.is_none()
+            && plan.style.is_none()
+            && plan.knowledge_ids.is_empty()
+        {
+            return;
+        }
+        let id = format!(
+            "turn-plan-{}",
+            self.ref_nodes.fetch_add(1, Ordering::SeqCst) + 1
+        );
+        let input = plan.node_input();
+        let summary = summarize(&plan.outcome_text());
+        emit(
+            tx,
+            AgentEvent::ToolCall {
+                id: id.clone(),
+                name: PLAN_TOOL.into(),
+                input,
+            },
+        );
+        emit(
+            tx,
+            AgentEvent::ToolResult {
+                id,
+                name: PLAN_TOOL.into(),
+                summary,
+                is_error: false,
+            },
+        );
+    }
+
+    /// 模型纠正本轮分流。只改会话里的 plan：出图清单和提示词的 TURN ROUTING 段
+    /// 都由它推导，所以纠正对下一发请求立刻生效，不必等用户再发一句话。
+    async fn run_plan(&self, input: &Value) -> ToolOutcome {
+        let updates = match plan::parse_updates(input) {
+            Ok(updates) => updates,
+            Err(e) => {
+                return ToolOutcome {
+                    content: e,
+                    is_error: true,
+                }
+            }
+        };
+        let mut plan = self.plan.lock().unwrap();
+        // 只认这一轮清单里真有的参考图。清单之外的下标说明模型在自说自话：照改
+        // 会让定性表和清单错开位，之后每张图的约束全串到另一张上去。
+        // 先全验、再全改。半途报错会把前面几步的改动留在表里，模型收到错误却
+        // 不知道分流已经动过，下一轮的清单会带着它没同意的约束走。
+        for update in &updates.references {
+            let known = update.index >= 1
+                && matches!(
+                    plan.reference_modes.get(update.index - 1),
+                    Some(slot) if slot.is_some()
+                );
+            if !known {
+                return ToolOutcome {
+                    content: format!(
+                        "{}: image {} is not an attached reference image; correct only the \
+                         1-based numbers in the attachment list",
+                        PLAN_TOOL, update.index
+                    ),
+                    is_error: true,
+                };
+            }
+        }
+        let mut changed = Vec::new();
+        for update in updates.references {
+            *plan.reference_modes.get_mut(update.index - 1).unwrap() = Some(update.mode);
+            changed.push(format!(
+                "image {} is now {}",
+                update.index,
+                update.mode.as_str()
+            ));
+        }
+        if let Some(intent) = updates.intent {
+            match intent {
+                Some(intent) => {
+                    changed.push(format!("the deliverable is now {}", intent.id()));
+                    plan.intent = Some(intent);
+                }
+                None => {
+                    changed.push("the deliverable is no longer pinned".to_string());
+                    plan.intent = None;
+                }
+            }
+        }
+        if let Some(style) = updates.style {
+            match style {
+                Some(style) => {
+                    changed.push(format!("the art style is now {}", style.id()));
+                    plan.style = Some(style);
+                }
+                None => {
+                    changed.push("the art style is no longer pinned".to_string());
+                    plan.style = None;
+                }
+            }
+        }
+        if changed.is_empty() {
+            return ToolOutcome {
+                content: format!(
+                    "{PLAN_TOOL}: nothing to correct; leave a reference mode, an intent or a \
+                      style, or release one with \"none\""
+                ),
+                is_error: true,
+            };
+        }
+        ToolOutcome {
+            content: format!(
+                "{}; the next prompt restates the routing for this turn.",
+                changed.join("; ")
+            ),
+            is_error: false,
+        }
+    }
+
     async fn run_image_gen(&self, input: &Value) -> ToolOutcome {
         let params = match tools::ImageGenToolParams::parse(input) {
             Ok(p) => p,
@@ -1520,7 +1948,10 @@ fn needs_approval(mode: PermissionMode, name: &str) -> bool {
     match mode {
         PermissionMode::Auto => false,
         PermissionMode::Ask => true,
-        PermissionMode::Chat => name != "pixel_read_canvas",
+        // Chat 模式只放行「只读」和「改定性」两种：前者只是看画布，后者只是把
+        // 上一行清单里的结论换个说法，都碰不到画面。弹审批卡反而逼着用户为一个
+        // 文本决定反复点同意。
+        PermissionMode::Chat => name != "pixel_read_canvas" && name != PLAN_TOOL,
     }
 }
 
@@ -1860,7 +2291,7 @@ mod tests {
     #[test]
     fn the_continue_nudge_pins_the_resume_point() {
         let carried = "上面已经写好的正文".repeat(40);
-        let nudge = continue_nudge(&carried).to_lowercase();
+        let nudge = continue_nudge(&carried, false).to_lowercase();
         // 断点原文必须原样出现在指令里：模型只能接着那几个字往下走，
         // 没给它锚点的话它会当新问题重想一遍。
         let tail: String = carried
@@ -1879,6 +2310,105 @@ mod tests {
             "少了「别复述计划」"
         );
         assert!(!nudge.contains('续'), "喂模型的话不能夹中文");
+    }
+
+    #[test]
+    fn the_continue_nudge_gets_harsher_once_the_model_repeats_itself() {
+        let carried = "上面已经写好的正文".repeat(40);
+        let plain = continue_nudge(&carried, false).to_lowercase();
+        let scolded = continue_nudge(&carried, true).to_lowercase();
+        // 复读过的模型光说一句「别重复」是按不住的，得点明上一发那句照搬
+        // 已经被丢掉。语气加重了，锚点还在：不然模型连断点在哪都不知道。
+        assert!(!plain.contains("repeating text"), "没复读不该挨骂");
+        assert!(scolded.contains("repeating text"), "复读过要把话说重");
+        assert!(
+            scolded.contains("that repetition was discarded"),
+            "得告诉它那段照搬没算数"
+        );
+        assert!(
+            scolded.contains("do not start over"),
+            "加码不能把原来的要求挤掉"
+        );
+        assert!(!scolded.contains('重'), "喂模型的话不能夹中文");
+    }
+
+    #[test]
+    fn a_retyped_tail_is_eaten_before_the_user_can_see_it() {
+        // 续写时最爱犯的毛病：把刚写完的最后几句原样再念一遍，再接真内容。
+        let written = "先把这五帧行走图的姿态从头规划一遍，然后按相位写进 Lua 脚本里面去。";
+        let echo = "然后按相位写进 Lua 脚本里面去。";
+        let rest = "接下来按相位把每一帧的腿在什么地方写清楚。";
+        let mut trim = EchoTrim::new("", written);
+        // 分几段喂，跟流式到达的样子差不多。
+        let mut fresh = String::new();
+        for piece in echo.chars().collect::<Vec<_>>().chunks(3) {
+            let chunk: String = piece.iter().collect();
+            fresh.push_str(&trim.feed_text(&chunk));
+        }
+        fresh.push_str(&trim.feed_text(rest));
+        // 最后一个字还按在手里等下一个字符表态，收尾时它会还回来。
+        let (tail, _) = trim.seal();
+        fresh.push_str(&tail);
+        assert_eq!(fresh, rest, "复读的那截不能在界面上出现第二遍");
+        assert!(trim.ate_something(), "得记下吃过复读");
+    }
+
+    #[test]
+    fn a_repeat_too_short_to_be_sure_is_left_alone() {
+        let written = "这段话的结尾只有短短几个字。";
+        let mut trim = EchoTrim::new("", written);
+        // 十几个字以内的重合，在代码和套话里太常见。删错了就是删真东西，
+        // 宁可让用户多看一遍。
+        let fresh = trim.feed_text("几个字。接下来是真正新写的内容");
+        assert_eq!(fresh, "几个字。接下来是真正新写的内容");
+        assert!(!trim.ate_something(), "这么短不该动手");
+    }
+
+    #[test]
+    fn a_tail_still_held_when_the_stream_ends_is_dropped() {
+        let written = "模型念到刚写完的地方就没词了，整段照搬到这里戛然而止。";
+        let echo = "就没词了，整段照搬到这里戛然而止。";
+        let mut trim = EchoTrim::new("", written);
+        // 一个字都没多吐：手里按着的那截全是复读，收尾时咽掉。
+        assert_eq!(trim.feed_text(echo), "");
+        let (fresh_text, fresh_reasoning) = trim.seal();
+        assert_eq!(fresh_text, "");
+        assert_eq!(fresh_reasoning, "");
+        assert!(trim.ate_something());
+    }
+
+    #[test]
+    fn a_short_tail_still_held_comes_back_as_text() {
+        // 对不齐又不够长的那截不能咽：流到这儿新内容还没来齐，
+        // 咽了就是真删了用户要看的东西。
+        let mut trim = EchoTrim::new("", "前半段正文已经写好了。");
+        assert_eq!(trim.feed_text("前半段正文"), "");
+        assert_eq!(trim.seal().0, "前半段正文");
+    }
+
+    #[tokio::test]
+    async fn a_retyped_tail_never_shows_up_twice_in_a_live_run() {
+        let s = session();
+        let written = "先把这五帧行走图的姿态从头规划一遍，然后按相位写进 Lua 脚本里面去。";
+        let echo = "然后按相位写进 Lua 脚本里面去。";
+        let rest = "接下来按相位把每一帧的腿落在什么地方写清楚。";
+        rewire(
+            &s,
+            vec![
+                cut(written),
+                // 续写一发：先把刚写的尾巴原样念一遍，再往下接。
+                done(&format!("{echo}{rest}")),
+            ],
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        // 纯接话不算在要图：这句话只是为了让 turn 里没有工具调用，
+        // 免得 runner 抬手就催它去画画，测试就跑到第三条脚本上去了。
+        s.run_turn("接着刚才的继续写".into(), Vec::new(), tx).await;
+        let flow = drain(rx);
+
+        assert!(flow.completed, "续写接上了就该好好收尾");
+        assert_eq!(flow.text, format!("{written}{rest}"));
     }
 
     #[test]
@@ -1942,6 +2472,9 @@ mod tests {
         /// 每一发请求带过来的关思考开关，按发车顺序记。要断言「光思考不干活
         /// 时自动翻盘」就得看这个。
         seen: Mutex<Vec<bool>>,
+        /// 每一发请求的系统提示词，按发车顺序记。要断言「模型纠正分流之后，
+        /// 下一发真的带着新约束上路」就得看这个。
+        systems: Mutex<Vec<String>>,
     }
 
     #[async_trait::async_trait]
@@ -1952,6 +2485,7 @@ mod tests {
         ) -> Result<providers::EventStream, ProviderError> {
             let script = self.scripts.lock().unwrap().remove(0);
             self.seen.lock().unwrap().push(req.disable_thinking);
+            self.systems.lock().unwrap().push(req.system.clone());
             Ok(Box::pin(futures_util::stream::iter(script)))
         }
     }
@@ -1970,6 +2504,7 @@ mod tests {
         let provider = Arc::new(ScriptedProvider {
             scripts: Mutex::new(scripts),
             seen: Mutex::new(Vec::new()),
+            systems: Mutex::new(Vec::new()),
         });
         let watched = Arc::clone(&provider);
         let config = s.engine.lock().unwrap().config.clone();
@@ -2396,8 +2931,9 @@ mod tests {
         let flow = drain(rx);
 
         assert!(!flow.completed, "卡死了不许悄悄收尾");
-        // 只续了第一次就不再要了：后面那两发复读连同「说完了」都没发生。
-        assert_eq!(flow.text, repeated.repeat(2));
+        // 复读在流式入口就被咽了，用户只看得到第一发那一遍。
+        assert_eq!(flow.text, repeated);
+        // 只续了第一次就不再要了：后面那两发连同「说完了」都没发生。
         assert_eq!(flow.statuses, vec!["agent.continuing".to_string()]);
         assert_eq!(
             flow.error.as_deref(),
@@ -2542,6 +3078,7 @@ mod tests {
             "用户该知道我们关了思考：{:?}",
             flow.statuses,
         );
+        // 「画一只猫」什么都没定出来，就不该摆分流节点：空节点只是噪声。
         assert_eq!(flow.tools, vec!["pixel_run_shader".to_string()]);
         assert!(flow.completed, "{:?}", flow.error);
     }
@@ -2582,7 +3119,12 @@ mod tests {
             "催过就得让用户看见：{:?}",
             flow.statuses,
         );
-        assert_eq!(flow.tools, vec!["pixel_run_shader".to_string()]);
+        // 「5帧」先被定成 sprite 意图，分流节点跟着这一轮一起摆出去，
+        // 然后才是模型自己调的绘图工具。
+        assert_eq!(
+            flow.tools,
+            vec!["pixel_plan".to_string(), "pixel_run_shader".to_string()]
+        );
         assert!(flow.completed, "{:?}", flow.error);
         // 催问自己也进历史，不然模型看不到「你刚才什么都没做」。
         let pushed = s
@@ -2593,6 +3135,150 @@ mod tests {
             .filter(|m| matches!(m.role, super::super::models::Role::User))
             .count();
         assert!(pushed >= 2, "除了用户原话，还得有一条催问：{pushed}");
+    }
+
+    /// 一张贴进来的参考图。
+    fn reference_image() -> Attachment {
+        Attachment {
+            role: crate::models::AttachmentRole::Reference,
+            media_type: "image/png".into(),
+            data_base64: "AAAA".into(),
+        }
+    }
+
+    /// 一张只是上下文的快照：不参与参照定性。
+    fn snapshot_image() -> Attachment {
+        Attachment {
+            role: crate::models::AttachmentRole::Snapshot,
+            media_type: "image/png".into(),
+            data_base64: "AAAA".into(),
+        }
+    }
+
+    /// 参照图在场的一轮：分流节点必须抢在绘图工具前面摆出去。
+    /// 反过来的话，用户只能盯着模型画完一整张复刻图，才知道自己只要了个配色。
+    #[tokio::test]
+    async fn a_reference_turn_routes_before_the_model_draws() {
+        let s = session();
+        rewire(
+            &s,
+            vec![
+                vec![
+                    Ok(LlmEvent::ToolUseStart {
+                        index: 0,
+                        id: "c1".into(),
+                        name: "pixel_run_shader".into(),
+                    }),
+                    Ok(LlmEvent::ToolInputDelta {
+                        index: 0,
+                        json_partial: "{}".into(),
+                    }),
+                    Ok(LlmEvent::Done {
+                        stop_reason: "tool_use".into(),
+                    }),
+                ],
+                done("按这个配色换好了"),
+            ],
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("照这个画风换色".into(), vec![reference_image()], tx)
+            .await;
+        let flow = drain(rx);
+
+        assert_eq!(
+            flow.tools.first().map(String::as_str),
+            Some("pixel_plan"),
+            "分流节点排在绘图工具前面：{:?}",
+            flow.tools,
+        );
+        assert!(
+            flow.tools.contains(&"pixel_run_shader".to_string()),
+            "{:?}",
+            flow.tools
+        );
+        assert!(flow.completed, "{:?}", flow.error);
+    }
+
+    /// 模型纠正分流：原话读出来是图标，它说其实是场景。纠正对下一发请求
+    /// 立刻生效——不生效的话，模型还得等用户再补一句话才按新约束画。
+    #[tokio::test]
+    async fn a_plan_correction_rides_the_next_request() {
+        let s = session();
+        let watched = rewire_watch(
+            &s,
+            vec![
+                vec![
+                    Ok(LlmEvent::ToolUseStart {
+                        index: 0,
+                        id: "c1".into(),
+                        name: PLAN_TOOL.into(),
+                    }),
+                    Ok(LlmEvent::ToolInputDelta {
+                        index: 0,
+                        json_partial: r#"{"intent":"scene"}"#.into(),
+                    }),
+                    Ok(LlmEvent::Done {
+                        stop_reason: "tool_use".into(),
+                    }),
+                ],
+                done("按场景画好了"),
+            ],
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("画个图标".into(), Vec::new(), tx).await;
+        let flow = drain(rx);
+
+        assert!(flow.completed, "{:?}", flow.error);
+        let systems = watched.systems.lock().unwrap();
+        assert!(
+            systems.len() >= 2,
+            "纠正之后还得再发一发才好接着画：{:?}",
+            systems.len()
+        );
+        assert!(
+            systems[0].contains("deliverable: icon"),
+            "第一发照用户原话来：{}",
+            systems[0]
+        );
+        assert!(
+            systems[1].contains("deliverable: scene"),
+            "纠正之后的一发带着新约束：{}",
+            systems[1]
+        );
+        assert!(
+            systems[1].contains("far, mid and near planes"),
+            "场景的规则得跟着走，不然等于没纠正：{}",
+            systems[1]
+        );
+    }
+
+    /// 纯快照的一轮不发分流节点：没有参照图可定性，摆一张空卡片只是噪声。
+    #[tokio::test]
+    async fn a_snapshot_only_turn_stays_quiet() {
+        let s = session();
+        // 这一轮是在要图，光说话会被催满两次才收摊，脚本得多备几条。
+        rewire(
+            &s,
+            vec![
+                done("看完了"),
+                done("还在看"),
+                done("真的看完了"),
+                done("收尾"),
+            ],
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("画一只猫".into(), vec![snapshot_image()], tx)
+            .await;
+        let flow = drain(rx);
+
+        assert!(
+            !flow.tools.contains(&"pixel_plan".to_string()),
+            "快照不定性，别摆节点：{:?}",
+            flow.tools
+        );
     }
 
     /// 澄清提问是合法收尾：问完就该停下等用户回话，不能催。

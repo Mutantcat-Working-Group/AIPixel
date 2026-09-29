@@ -1102,7 +1102,9 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       const id = getState().activeId;
       if (!id) return;
       try {
-        const url = await bridge.pngUrl(id);
+        // 带上当前帧号：缺省那一趟会把所有帧横向铺成一条 PNG，
+        // 模型拿到的就是一幅被拉长的帧序列，看不出用户在改哪一帧。
+        const url = await bridge.pngUrl(id, getState().frameIndex);
         const { mediaType, data } = stripDataUrl(url);
         if (!data) {
           failKey("store.empty_snapshot");
