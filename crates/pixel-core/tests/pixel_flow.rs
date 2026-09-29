@@ -967,3 +967,72 @@ fn old_aip_without_palettes_still_gets_builtin_defaults() {
         );
     }
 }
+
+#[test]
+fn shader_circle_near_edge_clamps_instead_of_freezing() {
+    // 圆心贴着上边界、半径比画布还大：旧写法把 (2-10) 强转 u32 翻成 40 亿，
+    // 双层循环直接卡死，整个会话卡在那里不动。
+    let mut doc = blank();
+    let layer = doc.layers[0].id.clone();
+    let outcome = shader::run_shader(
+        &mut doc,
+        &layer,
+        r##"
+        circfill(2, 2, 40, "#FF004D")
+        circle(1, 1, 30, "#FFFFFF")
+        rectfill(0, 12, 3, 15, "#00E436")
+        "##,
+        false,
+        &ShaderBudget::default(),
+    )
+    .expect("越界圆不该把沙箱拖死");
+    assert_eq!(outcome.frames_rendered, 1);
+    let cel = doc.cel(&layer, &doc.frames[0].id.clone()).unwrap();
+    assert!(cel.indices.iter().any(|i| *i != 0), "角上要留下颜色");
+}
+
+#[test]
+fn shader_oversized_shape_stays_it_inside_canvas() {
+    let mut doc = blank();
+    let layer = doc.layers[0].id.clone();
+    shader::run_shader(
+        &mut doc,
+        &layer,
+        r##"rectfill(4, 4, 11, 11, "#FF004D")"##,
+        false,
+        &ShaderBudget::default(),
+    )
+    .unwrap();
+    let cel = doc.cel(&layer, &doc.frames[0].id.clone()).unwrap();
+    assert_eq!(cel.indices.len(), 256, "16x16 一块都不能多画");
+    assert!(
+        cel.indices.iter().take(4).all(|i| *i == 0),
+        "矩形外的像素保持透明"
+    );
+}
+
+#[test]
+fn shader_canvas_table_form_draws_too() {
+    // 模型很爱写 canvas.pset / canvas.circfill：两种写法都要落地，
+    // 不能让一次命名习惯的出入吃掉整个输出预算。
+    let mut doc = blank();
+    let layer = doc.layers[0].id.clone();
+    shader::run_shader(
+        &mut doc,
+        &layer,
+        r##"
+        local ink = '#FF004D'
+        canvas.pset(2, 3, ink)
+        canvas.circfill(8, 8, 3, ink)
+        canvas.rect(0, 13, 5, 15, ink)
+        pset(12, 12, ink)
+        "##,
+        false,
+        &ShaderBudget::default(),
+    )
+    .expect("canvas.* 形式要能画");
+    let frame = doc.frames[0].id.clone();
+    let cel = doc.cel(&layer, &frame).unwrap();
+    assert!(cel.indices.iter().any(|i| *i != 0));
+    assert!(cel.get(doc.width, 12, 12).is_some() && cel.get(doc.width, 12, 12).unwrap() != 0);
+}

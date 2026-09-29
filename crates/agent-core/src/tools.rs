@@ -14,6 +14,83 @@ use pixel_core::decode;
 use pixel_core::pixelize::{self, FitMode, PixelizeOptions};
 use pixel_core::tween::{self, MigrateOrder, TweenMode, TweenOptions};
 
+/// `pixel_run_shader` 的工具描述。
+/// 之所以写这么长：模型拿到的就是这一段，写得太省，
+/// 它只能猜 `rect` 是角对角还是 x/y/宽/高、猜 `circle` 的参数顺序，
+/// 猜错一次就白烧一整个输出预算。下面每个签名都跟 runtime 对齐。
+const RUN_SHADER_DESCRIPTION: &str = r##"PREFER THIS TOOL for freeform artwork - shapes, characters, scenes, patterns, textures, symmetry, gradients. Draw by running ONE sandboxed Lua script: its size stays small no matter how big the canvas is, because loops, noise and interpolation run in the runtime instead of being spelled out as pixel arrays. Draws on the active cel by default; pass `layer` to target another layer.
+
+GLOBALS: width, height (canvas size), time (seconds at this frame's start), phase (0..1 across the timeline), frame_index, frame_count, layer. Animate by passing animate=true: the runtime runs the script once per timeline frame with time/phase set for that frame, exactly like a shader time uniform, and writes every frame for you.
+
+COLOR HELPERS: pal(i) -> palette color (1-based, 0 or nil = transparent), hex('#RRGGBB[AA]') -> validated color, mix(c1, c2, t) -> blend (t in 0..1, gradients and glows), hsv(h, s, v[, a]) -> color (h in degrees, s/v/a in 0..1), alpha(c, a) -> color with new alpha, rand() -> float 0..1, rand(a, b) -> integer in a..b inclusive, noise(x, y, scale?) -> float 0..1 (scale spreads the lattice out: 0.3 gives long soft streaks, 1 gives per-pixel grit). Colors are plain Lua values: keep them in locals, pass them around, format with string.format. Standard math.* and string.* are available; math.random is disabled, use rand(). rand and noise are deterministic per script and per frame.
+
+CANVAS API (each of these also works as canvas.pset, canvas.line, ... - both forms run):
+  pset(x, y, color)          single pixel; OUT OF BOUNDS IS AN ERROR, so clamp x to 0..width-1 and y to 0..height-1; nil erases
+  pget(x, y)                 -> "#RRGGBB" or "transparent"
+  line(x0, y0, x1, y1, color)
+  rect(x0, y0, x1, y1, color[, filled])        two CORNERS, inclusive
+  rectfill(x0, y0, x1, y1, color)
+  ellipse(x0, y0, x1, y1, color[, filled])     BOUNDING-BOX CORNERS, not center+radius
+  ellipfill(x0, y0, x1, y1, color)
+  circle(cx, cy, r, color[, filled])           CENTER + RADIUS
+  circfill(cx, cy, r, color)
+  flood(x, y, color)         fill the contiguous same-color area
+  replace(from, to)          swap one color for another across the whole cel
+  outline(color)             1px outline around every existing non-transparent pixel; call it LAST, after the shapes
+  clear(color)               erase the cel, or fill it with one color
+  stamp(rows, legend, x, y)  rows are strings of symbols, '.' keeps the pixel, legend maps symbol -> color
+Shapes clip to the canvas, so a circle larger than the canvas is safe. color is a palette index or "#RRGGBB"/"#RRGGBBAA"; alpha 00 or nil erases. pset does not clip, so pset outside the canvas is a hard error.
+
+BUDGETS: ~20M Lua instructions, 5 seconds, one changed-pixel cap. When the script has a mistake the error names the exact line - fix that line and resubmit; never resubmit the same script unchanged.
+
+EXAMPLE - static sprite with a ramp, a highlight and an outline: four lines that would otherwise be 400 hand-placed pixels.
+  local skin = pal(1)
+  local shadow = mix(skin, '#000000', 0.35)
+  local rim = mix(skin, '#FFFFFF', 0.25)
+  circfill(32, 30, 11, skin)
+  circfill(34, 32, 8, shadow)
+  circfill(26, 24, 3, rim)
+  outline(mix(shadow, '#000000', 0.6))
+
+EXAMPLE - animate=true bob (phase drives everything; create the frames with pixel_apply_operations first):
+  local ink = pal(1)
+  local bob = math.floor(1 + math.sin(phase * math.pi * 2))
+  canvas.clear(nil)
+  circfill(16, 30 + bob, 5, ink)
+  circle(16, 30 + bob, 8, pal(2))
+
+Write ONE script per transaction: draw, then let the tool result show you the updated grid."##;
+
+/// `pixel_apply_operations` 的工具描述：一条事务，加上每个 op 的字段说明。
+/// 名字列在 enum 里，字段却要猜，是这个工具最容易翻车的地方。
+const OPS_DESCRIPTION: &str = r##"Apply ONE transaction of typed pixel/layer/frame/palette operations. Use it for document STRUCTURE and for tiny precise patches; use pixel_run_shader for everything that is artwork. Batch every structural change of a turn into this ONE call. Fails atomically if any operation is invalid and the error names the failing operation index.
+
+STRUCTURE:
+  create_layer {name, after?, palette_id?, locked?}        append (or insert after `after`) a layer
+  delete_layer {layer}                                     move_layer {layer, to_index}
+  rename_layer {layer, name}                               set_layer_properties {layer, visible?, opacity?}
+  create_frame {name?, after?, duration_ms?}               duplicate_frame {frame, after?}
+  delete_frame {frame}                                     move_frame {frame, to_index}
+  set_frame_duration {frame, duration_ms}                  the default pace is ~83ms for a 12 FPS loop
+
+COLOR RANGES: every layer points at exactly one named palette.
+  create_palette {name, from?, colors[], layer?}           `from` copies an existing range as the starting point
+  rename_palette {id, name}    delete_palette {id}         delete is refused while a layer still points at it
+  add_palette_color {id, color}  remove_palette_color {id, index}
+  set_layer_palette {layer, palette_id}  set_layer_locked {layer, locked}
+  add_palette_colors {colors[]} extends the document palette itself; set_palette {colors[]} replaces it and remaps already-painted pixels to the nearest color.
+  Builtin ranges are read-only: to change one, create_palette with from=<builtin id> to fork it, then set_layer_palette.
+  locked = true restricts that layer to its range and snaps out-of-range colors to the nearest color inside it; locked = false lets the layer use any color.
+
+PIXEL PATCHES (only for a few pixels each - never for a drawing):
+  set_pixels {layer?, frame?, cells: [{x, y, color}], w?, h?}   sparse pixel list
+  stamp_grid {layer?, frame?, rows: [string], legend: {sym: color}, x, y}   every row must share one length, '.' is transparent
+  draw_shape {layer?, frame?, shape: line|rect|ellipse, x0, y0, x1, y1, w?, h?, color, filled?, layer?}
+  bucket_fill {layer?, frame?, x, y, color}           clear_region {layer?, frame?, x, y, w, h}
+Coordinates are 0-based from the top-left; colors are "#RRGGBB" or "#RRGGBBAA" (null clears).
+
+To create a NEW drawing or change a whole sprite, use pixel_run_shader instead. To animate, create the frames here first, then run the shader with animate=true."##;
+
 /// 工具回填给模型的 RLE 网格字符预算。
 const TOOL_GRID_CHARS: usize = 3000;
 
@@ -46,7 +123,7 @@ pub fn specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "pixel_apply_operations".into(),
-            description: "Apply ONE transaction of typed pixel/layer/frame/palette operations. Structure ops (create/move/delete/duplicate/rename layers and frames, set duration, add or replace the palette) and tiny precise pixel patches (set_pixels, stamp_grid, draw_shape, bucket_fill, clear_region). Color ranges: each layer points at one named palette; set_layer_locked(true) restricts that layer to its range (out-of-range colors snap to the nearest in range), set_layer_locked(false) lets it use any color. Builtin ranges are read-only: to change one, create_palette with from=<id> to fork it, then set_layer_palette. set_palette replaces the document palette and remaps painted pixels to the nearest color. Fails atomically if any operation is invalid; the error names the failing operation index.".into(),
+            description: OPS_DESCRIPTION.into(),
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -112,7 +189,7 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "pixel_run_shader".into(),
-            description: "Draw by running ONE sandboxed Lua script whose size is independent of the canvas. Supports pset/line/rect/ellipse/circle/flood/stamp/replace/outline/clear and pal/mix/hsv/alpha/hex/noise/rand. Pass animate=true to render every existing frame driven by phase/time. Use this for all artwork.".into(),
+            description: RUN_SHADER_DESCRIPTION.into(),
             schema: json!({
                 "type": "object",
                 "properties": {

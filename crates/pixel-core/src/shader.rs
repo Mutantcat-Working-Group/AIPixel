@@ -4,7 +4,7 @@
 //! 预算（经验值）：20M 指令 / 5 秒 / 64KB 脚本。
 
 use super::document::{Document, Rgba};
-use mlua::{Function, Lua, Value};
+use mlua::{Function, Lua, Table, Value};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -219,7 +219,38 @@ impl Sandbox {
         self.install_palette_functions()
             .map_err(ShaderError::from)?;
         self.install_canvas_functions().map_err(ShaderError::from)?;
+        self.mirror_canvas_functions().map_err(ShaderError::from)?;
         self.install_instruction_guard();
+        Ok(())
+    }
+
+    /// 把绘图函数再挂一份到 `canvas` 表上。
+    /// 模型很爱写 `canvas.pset(...)`，两种写法都得能跑：
+    /// 别让一次命名习惯上的出入，白白吃掉一整个输出预算。
+    fn mirror_canvas_functions(&self) -> mlua::Result<()> {
+        let globals = self.lua.globals();
+        let canvas: Table = globals.get("canvas")?;
+        for name in [
+            "pset",
+            "pget",
+            "line",
+            "rect",
+            "rectfill",
+            "ellipse",
+            "ellipsefill",
+            "circle",
+            "circfill",
+            "flood",
+            "replace",
+            "outline",
+            "clear",
+            "stamp",
+        ] {
+            let value: Value = globals.get(name)?;
+            if !value.is_nil() {
+                canvas.set(name, value)?;
+            }
+        }
         Ok(())
     }
 
@@ -299,22 +330,37 @@ impl Sandbox {
         })?;
         globals.set("alpha", alpha_fn)?;
 
-        // rand() -> 0..1 确定性
+        // rand() -> 0..1 确定性；rand(a, b) -> [a, b] 整数
         let rng = self.rng.clone();
-        let rand_fn = self.lua.create_function(move |_lua, ()| {
-            let mut x = rng.get();
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            rng.set(x);
-            Ok(((x >> 11) as f64) / ((1u64 << 53) as f64))
-        })?;
+        let rand_fn = self
+            .lua
+            .create_function(move |_lua, args: mlua::MultiValue| {
+                let mut it = args.into_iter();
+                let lo = it.next().and_then(|v| v.as_integer());
+                let hi = it.next().and_then(|v| v.as_integer());
+                let mut x = rng.get();
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                rng.set(x);
+                let u = ((x >> 11) as f64) / ((1u64 << 53) as f64);
+                Ok(match (lo, hi) {
+                    (Some(a), Some(b)) if b >= a => {
+                        Value::Integer(a + (u * (b - a + 1) as f64) as i64)
+                    }
+                    _ => Value::Number(u),
+                })
+            })?;
         globals.set("rand", rand_fn)?;
 
         // noise(x, y) -> 0..1 确定性
-        let noise_fn = self
-            .lua
-            .create_function(|_lua, (x, y): (f64, f64)| Ok(value_noise(x, y)))?;
+        let noise_fn =
+            self.lua
+                .create_function(|_lua, (x, y, scale): (f64, f64, Option<f64>)| {
+                    // scale 是密度：0.3 表示噪声格被拉开三倍，画竖条纹就靠它。
+                    let s = scale.unwrap_or(1.0).max(0.0001);
+                    Ok(value_noise(x * s, y * s))
+                })?;
         globals.set("noise", noise_fn)?;
 
         let canvas = self.lua.create_table()?;
@@ -486,17 +532,8 @@ impl Sandbox {
             let idx = resolve_color(doc, color)?;
             let (w, h) = (doc.width, doc.height);
             let cel = cel_mut(doc, layer, frame)?;
-            super::ops::draw_ellipse(
-                cel,
-                w,
-                h,
-                (cx - r) as u32,
-                (cy - r) as u32,
-                (cx + r) as u32,
-                (cy + r) as u32,
-                idx,
-                filled,
-            );
+            let box_ = circle_box(cx, cy, r, w, h);
+            super::ops::draw_ellipse(cel, w, h, box_.0, box_.1, box_.2, box_.3, idx, filled);
             Ok(())
         })?;
         globals.set("circle", circle.clone())?;
@@ -509,17 +546,8 @@ impl Sandbox {
             let idx = resolve_color(doc, color)?;
             let (w, h) = (doc.width, doc.height);
             let cel = cel_mut(doc, layer, frame)?;
-            super::ops::draw_ellipse(
-                cel,
-                w,
-                h,
-                (cx - r) as u32,
-                (cy - r) as u32,
-                (cx + r) as u32,
-                (cy + r) as u32,
-                idx,
-                true,
-            );
+            let box_ = circle_box(cx, cy, r, w, h);
+            super::ops::draw_ellipse(cel, w, h, box_.0, box_.1, box_.2, box_.3, idx, true);
             Ok(())
         })?;
         globals.set("circfill", circfill)?;
@@ -748,6 +776,13 @@ fn num_arg_opt(v: Value) -> Option<f64> {
         Value::Integer(i) => Some(i as f64),
         _ => None,
     }
+}
+
+/// 圆心 + 浮动半径换算成夹好界的盒子：`cx < r` 时下界为负，
+/// 直接 `as u32` 会翻成 40 亿，把绘制循环拖死。
+fn circle_box(cx: f64, cy: f64, r: f64, w: u32, h: u32) -> (u32, u32, u32, u32) {
+    let lo = |v: f64, extent: u32| (v.round() as i64).clamp(0, extent.max(1) as i64 - 1) as u32;
+    (lo(cx - r, w), lo(cy - r, h), lo(cx + r, w), lo(cy + r, h))
 }
 
 fn coord(v: f64, max: u32) -> mlua::Result<u32> {

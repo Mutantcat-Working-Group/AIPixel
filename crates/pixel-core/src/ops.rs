@@ -941,7 +941,7 @@ pub fn draw_line(cel: &mut Cel, w: u32, h: u32, x0: u32, y0: u32, x1: u32, y1: u
 pub fn draw_rect(
     cel: &mut Cel,
     w: u32,
-    _h: u32,
+    h: u32,
     x0: u32,
     y0: u32,
     x1: u32,
@@ -949,8 +949,9 @@ pub fn draw_rect(
     idx: u16,
     filled: bool,
 ) {
-    let (xa, xb) = (x0.min(x1), x0.max(x1));
-    let (ya, yb) = (y0.min(y1), y0.max(y1));
+    // 盒子先夹到画布内再进内层循环。
+    let (xa, xb) = clamp_span(x0, x1, w);
+    let (ya, yb) = clamp_span(y0, y1, h);
     for y in ya..=yb {
         for x in xa..=xb {
             let edge = x == xa || x == xb || y == ya || y == yb;
@@ -959,6 +960,15 @@ pub fn draw_rect(
             }
         }
     }
+}
+
+/// 把一维区间夹到 `0..=extent-1`，并保证 `lo <= hi`。
+/// Lua 侧 circle 的上下界是 `cx-r`/`cx+r`，cx<r 时负数强转 u32 会翻成
+/// 40 亿，不夹界的话下面那双层循环就没了尽头。
+fn clamp_span(a: u32, b: u32, extent: u32) -> (u32, u32) {
+    let (lo, hi) = (a.min(b), a.max(b));
+    let top = extent.max(1) - 1;
+    (lo.min(top), hi.min(top))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -975,6 +985,14 @@ pub fn draw_ellipse(
 ) {
     let (xa, xb) = (x0.min(x1) as f64, x0.max(x1) as f64);
     let (ya, yb) = (y0.min(y1) as f64, y0.max(y1) as f64);
+    let (xa, xb) = (
+        xa.min(w.saturating_sub(1) as f64),
+        xb.min(w.saturating_sub(1) as f64),
+    );
+    let (ya, yb) = (
+        ya.min(h.saturating_sub(1) as f64),
+        yb.min(h.saturating_sub(1) as f64),
+    );
     let cx = (xa + xb) / 2.0;
     let cy = (ya + yb) / 2.0;
     let rx = (xb - xa) / 2.0;
