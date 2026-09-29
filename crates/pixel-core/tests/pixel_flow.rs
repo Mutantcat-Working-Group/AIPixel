@@ -372,6 +372,48 @@ fn rle_window_encodes_runs_and_legend() {
     );
 }
 
+/// 区域读回的一行都不能少。agent 修局部（比如把一只猫的耳朵抬两个像素）
+/// 全指望这个视图：区域要几行就得给几行，少一行那段像素就成了未知。
+#[test]
+fn a_partial_region_view_returns_every_row_of_the_region() {
+    let mut doc = blank();
+    let layer = doc.layers[0].id.clone();
+    let frame = doc.frames[0].id.clone();
+    ops::apply_batch(
+        &mut doc,
+        &[
+            PixelOperation::AddPaletteColors {
+                colors: vec!["#FF004D".into()],
+            },
+            PixelOperation::SetPixels {
+                layer: layer.clone(),
+                frame: frame.clone(),
+                cells: (3..8)
+                    .map(|x| ops::PixelCell {
+                        x,
+                        y: 7,
+                        color: "#FF004D".into(),
+                    })
+                    .collect(),
+            },
+        ],
+    )
+    .unwrap();
+
+    // 16x16 的画布只读 (2,3) 起 5x7 一块。
+    let view =
+        rle::render_window(&doc, &layer, &frame, Some((2, 3, 5, 7)), 4096).expect("region view");
+    assert_eq!(view.rows.len(), 7, "区域多高就要几行");
+    assert_eq!(view.width, 5);
+    assert_eq!(view.height, 7);
+    assert_eq!(view.x, 2);
+    assert_eq!(view.y, 3);
+    // 画在 y=7（区域内第 4 行）：区域外的 x=7 被裁掉，剩四个同色
+    // 加左侧一个透明，两个 run 数清楚。
+    assert_eq!(view.rows[4], ".4a");
+    assert_eq!(view.rows[0], "5.", "没画过的行整行透明");
+}
+
 #[test]
 fn aip_round_trip_keeps_structure_and_pixels() {
     let mut doc = blank();

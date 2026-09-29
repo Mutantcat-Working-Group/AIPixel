@@ -111,6 +111,10 @@ const TOOL_GRID_CHARS: usize = 3000;
 /// 由 runner 分流到异步路径，所以名字单独抽出来给规格、execute 兜底、runner 共用。
 pub const IMAGE_GEN_TOOL: &str = "pixel_generate_image";
 
+/// 着色器工具名。抽出来是为了 runner 的重放护栏：同一份 script 原样重跑
+/// 要认得这个名字，字面量散在各处迟早对不上。
+pub const SHADER_TOOL: &str = "pixel_run_shader";
+
 #[derive(Debug, Clone)]
 pub struct ToolOutcome {
     pub content: String,

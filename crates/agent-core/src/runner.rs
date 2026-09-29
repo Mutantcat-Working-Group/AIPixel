@@ -53,6 +53,17 @@ struct ApprovalSlot {
     tx: oneshot::Sender<ApprovalDecision>,
 }
 
+/// 上一发跑成的 shader 的身份与当时的 revision。见 `AgentSession::last_shader`。
+struct LastShader {
+    /// 一次 shader 请求的身份：script 原文 + 目标 cel + 是否逐帧。
+    /// 带上这几项是因为同一份 script 画到另一帧、另一个图层上就是另外
+    /// 一堆像素，不能算重放；只留 script 会误伤。
+    key: String,
+    /// 这一发跑完之后 document 的 revision。任何别的改动都会挪它，
+    /// 挪开了这份记忆就自然失效——包括用户在编辑器里动过的手笔。
+    revision: u64,
+}
+
 /// 整个响应流允许静默多久。
 ///
 /// 想得久一点没关系——推理增量、心跳、工具入参分段都会带来字节；
@@ -73,6 +84,10 @@ const MAX_TOOL_NUDGES: usize = 2;
 /// 用户可能连着涂抹几十下才想起问模型一句。全塞进去既浪费 token 也让模型
 /// 找不到重点；挤掉最旧的，是因为越近的改动对「下一步该画什么」越有参考价值。
 const MAX_PENDING_EDITS: usize = 12;
+
+/// 同一份 shader 原样重跑时回给模型的话。要说清「跳过不等于失败」：
+/// 不然它会以为工具坏了，换个写法再发一遍同样的东西。
+const SHADER_REPLAY_REFUSAL: &str = "this exact shader script already ran and painted these pixels; the canvas has not changed since; the run was skipped. Verify with pixel_read_canvas if you need the current grid. Then either change the script (different geometry, color choices, or target cel) or finish your reply with a one-sentence summary - re-running an identical script cannot produce a different canvas";
 
 /// 流静默计时器：记下最后一次见到字节的时刻，答一句「是不是该判死刑了」。
 #[derive(Debug, Clone, Copy)]
@@ -522,6 +537,12 @@ struct Engine {
 
 pub struct AgentSession {
     pub id: String,
+    /// 上一发真的跑过的 shader：它的身份（script + 目标 cel + 是否逐帧）
+    /// 和跑完那一刻的 revision。画布再没有任何别的动静，同一份 shader
+    /// 原样重来只会画出同一堆像素——实测里模型会在「读画布→重跑→再读」
+    /// 的转圈里把整轮预算烧干净，用户什么都拿不到。开新 turn 就忘掉：
+    /// 用户开口要「再来一遍」时不许拿上一轮的 script 误伤。
+    last_shader: Mutex<Option<LastShader>>,
     /// 模型配置与 provider 放在同一把锁里，运行时切换模型不必重建会话、丢历史。
     engine: Mutex<Engine>,
     /// 生图 / 识图 / 读视频的另外三个模型。按角色各一个，没有就回落主模型。
@@ -580,6 +601,7 @@ impl AgentSession {
             plan: Mutex::new(TurnPlan::default()),
             turn_text: Mutex::new(String::new()),
             pending_edits: Mutex::new(Vec::new()),
+            last_shader: Mutex::new(None),
         }
     }
 
@@ -651,6 +673,21 @@ impl AgentSession {
     /// 取走所有待冲刷的改动记录。取走即清空，没人会读第二遍。
     pub fn take_edits(&self) -> Vec<String> {
         std::mem::take(&mut *self.pending_edits.lock().unwrap())
+    }
+
+    /// 这份 shader 身份是不是刚跑过、跑完到现在画布又没动过。
+    /// revision 对不上就是画布动过了（模型、用户、撤销都算），记忆自然失效。
+    fn last_shader_is(&self, key: &str, revision: u64) -> bool {
+        self.last_shader
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|last| last.key == key && last.revision == revision)
+    }
+
+    /// 跑成功的那份 shader 记下来。只有 `pixel_run_shader` 会走到这儿。
+    fn remember_shader(&self, key: String, revision: u64) {
+        *self.last_shader.lock().unwrap() = Some(LastShader { key, revision });
     }
 
     /// 把某个角色另绑到一个模型。配同一个角色就是换模型。
@@ -923,6 +960,10 @@ impl AgentSession {
         let plan = TurnPlan::from_text(&text, &attachments);
         *self.plan.lock().unwrap() = plan.clone();
         *self.turn_text.lock().unwrap() = text.clone();
+        // 上一轮那份 shader 记忆到此为止。用户开口要「照这样再来一遍」时，
+        // 上一轮的 script 配上没动过的画布会被误判成重放——新开一轮就是
+        // 一次重新来过的机会。turn 内的原样重跑才是真毛病，那边有护栏。
+        *self.last_shader.lock().unwrap() = None;
         self.emit_plan_node(&tx, &attachments, &plan);
 
         // 图片清单走在图片前面：模型必须知道每张图的身份与顺序，
@@ -1413,6 +1454,10 @@ impl AgentSession {
                     }
                 }
 
+                // 这一发 shader 是不是上一发原样重跑。跳过执行时别推
+                // DocumentUpdated：画布一个像素都没动，推上去只会让前端
+                // 白刷一次。
+                let mut shader_paused = false;
                 let outcome: ToolOutcome = match &call.parse_error {
                     Some(e) => ToolOutcome {
                         content: format!(
@@ -1452,7 +1497,31 @@ impl AgentSession {
                         } else {
                             let mut doc = self.document.lock().unwrap();
                             let active = self.active.lock().unwrap();
-                            tools::execute(&mut doc, &active, &call.name, &call.input)
+                            // 同一份 shader 原样重跑：跳过执行，画布不动，
+                            // 回一句能操作的话。模型照抄三遍也不收手，按
+                            // 「同一个调用连错三次」收摊，见下面的 streak。
+                            let replay = shader_key(&call.input).filter(|key| {
+                                call.name == tools::SHADER_TOOL
+                                    && self.last_shader_is(key, doc.revision)
+                            });
+                            if let Some(_key) = replay {
+                                shader_paused = true;
+                                ToolOutcome {
+                                    content: SHADER_REPLAY_REFUSAL.into(),
+                                    is_error: true,
+                                }
+                            } else {
+                                let outcome =
+                                    tools::execute(&mut doc, &active, &call.name, &call.input);
+                                // 只记跑成功的那一份：跑挂的 script 留在记忆里，
+                                // 模型改好再发会被误伤。
+                                if call.name == tools::SHADER_TOOL && !outcome.is_error {
+                                    if let Some(key) = shader_key(&call.input) {
+                                        self.remember_shader(key, doc.revision);
+                                    }
+                                }
+                                outcome
+                            }
                         }
                     }
                 };
@@ -1506,7 +1575,10 @@ impl AgentSession {
 
                 // 读操作不改文档，不推 DocumentUpdated。
                 // MCP 工具在文档之外跑（不回推文档事件）；读操作本来也不推。
-                if call.name != "pixel_read_canvas" && !call.name.starts_with(mcp::MCP_TOOL_PREFIX)
+                // 被跳过的 shader 同理：一个像素都没动。
+                if !shader_paused
+                    && call.name != "pixel_read_canvas"
+                    && !call.name.starts_with(mcp::MCP_TOOL_PREFIX)
                 {
                     let (revision, document) = {
                         let doc = self.document.lock().unwrap();
@@ -1957,6 +2029,21 @@ fn doc_has_layer(doc: &Document, id: &str) -> bool {
 
 fn doc_has_frame(doc: &Document, id: &str) -> bool {
     doc.frames.iter().any(|f| f.id == id)
+}
+
+/// 一次 `pixel_run_shader` 请求的身份。不是整套入参：script 才是作画的全部，
+/// 但目标 cel（frame / layer）和逐帧跑法（animate）换个对象就是另一堆像素，
+/// 只按 script 判重放会误伤「同一份 script 画到另一个图层」。工具本身没有
+/// frame 入参，落哪帧由激活帧说了算，而换激活帧必然惊动 revision。
+/// 别的工具没有身份，返回 None，重放护栏对它不生效。
+fn shader_key(input: &Value) -> Option<String> {
+    let script = input.get("script").and_then(|s| s.as_str())?;
+    let field = |key: &str| input.get(key).map(|v| v.to_string()).unwrap_or_default();
+    Some(format!(
+        "{script}|layer={}|animate={}",
+        field("layer"),
+        field("animate"),
+    ))
 }
 
 /// 这次调用要不要审批。Auto 全放行；Ask 每个调用都问；Chat 放行只读的读回
@@ -2541,6 +2628,7 @@ mod tests {
     }
 
     /// 收集一场 turn 的全部出口：正文、状态键、工具名、是否收尾、报错。
+    #[derive(Debug)]
     struct Flow {
         text: String,
         statuses: Vec<String>,
@@ -2611,6 +2699,24 @@ mod tests {
             Ok(LlmEvent::Reasoning(thought.into())),
             Ok(LlmEvent::Done {
                 stop_reason: "max_tokens".into(),
+            }),
+        ]
+    }
+
+    /// 一截只说了一个工具调用、正文一个字的回复。
+    fn tool_call(id: &str, name: &str, input: Value) -> Vec<Result<LlmEvent, ProviderError>> {
+        vec![
+            Ok(LlmEvent::ToolUseStart {
+                index: 0,
+                id: id.into(),
+                name: name.into(),
+            }),
+            Ok(LlmEvent::ToolInputDelta {
+                index: 0,
+                json_partial: input.to_string(),
+            }),
+            Ok(LlmEvent::Done {
+                stop_reason: "tool_use".into(),
             }),
         ]
     }
@@ -2891,6 +2997,152 @@ mod tests {
         assert_eq!(flow.text, "换了条路");
         assert!(flow.completed);
         assert_eq!(flow.statuses, vec!["agent.retrying".to_string()]);
+    }
+
+    /// 每跑一次就往右挪一格的 script：真的跑几遍， marker 就在第几格。
+    /// 用它当探针，一眼看得出哪些发是被跳过的。
+    fn marker_walker() -> &'static str {
+        "local m = hex('#ff004d') local pos = -1 \
+         for x = 0, width - 1 do if pget(x, 0) == m then pos = x end end \
+         if pos >= 0 then pset(pos, 0, nil) end pset(pos + 1, 0, m)"
+    }
+
+    /// 实测里最烧钱的一种转圈：模型跑完 shader 不满意，就读画布、拿同一份
+    /// script 原样重跑，再看、再跑。十几个回合烧在零收益的重复上，用户什么都
+    /// 拿不到。护栏：同一份 script、同一个 cel、画布没动过，第二次直接跳过。
+    #[tokio::test]
+    async fn the_same_shader_rerun_verbatim_is_skipped_and_the_turn_stops() {
+        let s = session();
+        let script = marker_walker();
+        rewire(
+            &s,
+            vec![
+                tool_call("c1", "pixel_run_shader", json!({"script": script})),
+                tool_call("c2", "pixel_run_shader", json!({"script": script})),
+                tool_call("c3", "pixel_run_shader", json!({"script": script})),
+                tool_call("c4", "pixel_run_shader", json!({"script": script})),
+            ],
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("画一个红色方块".into(), Vec::new(), tx).await;
+        let flow = drain(rx);
+
+        // 头一发真的跑了；后三发原样重发，发发跳过。照抄三遍还不收手，
+        // 按「同一个调用连错三次」收摊，别再往后烧。
+        assert_eq!(flow.tools, vec!["pixel_run_shader"; 4]);
+        assert_eq!(
+            flow.error.as_deref(),
+            Some("agent.same_call_failed"),
+            "转圈得有个头：{flow:?}"
+        );
+        let doc = s.document.lock().unwrap();
+        let layer = doc.layers[0].id.clone();
+        let frame = doc.frames[0].id.clone();
+        let row = &doc.cel(&layer, &frame).unwrap().indices[..8];
+        assert_ne!(row[0], 0, "第一发真的画上了");
+        assert!(
+            row[1..].iter().all(|&i| i == 0),
+            "跳过的三发不许在画布上留下脚步：{row:?}"
+        );
+    }
+
+    /// 画布动过了，同一份 script 就不再算重放：模型针对新画面修修补补时
+    /// 原样再来一次是正经操作，护栏不许误伤。
+    #[tokio::test]
+    async fn the_same_script_is_allowed_again_once_the_canvas_moved() {
+        let s = session();
+        let script = marker_walker();
+        rewire(
+            &s,
+            vec![
+                tool_call("c1", "pixel_run_shader", json!({"script": script})),
+                tool_call(
+                    "c2",
+                    "pixel_apply_operations",
+                    json!({"operations": [{"op": "add_palette_colors", "colors": ["#29ADFF"]}]}),
+                ),
+                tool_call("c3", "pixel_run_shader", json!({"script": script})),
+                done("方块挪好了"),
+            ],
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("画个方块再整理下调色板".into(), Vec::new(), tx)
+            .await;
+        let flow = drain(rx);
+
+        assert_eq!(
+            // pixel_plan 是分流给界面看的节点，不是调用，剔掉再比。
+            flow.tools
+                .iter()
+                .filter(|n| *n != "pixel_plan")
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![
+                "pixel_run_shader",
+                "pixel_apply_operations",
+                "pixel_run_shader"
+            ]
+        );
+        assert!(flow.completed, "{:?}", flow.error);
+        let doc = s.document.lock().unwrap();
+        let layer = doc.layers[0].id.clone();
+        let frame = doc.frames[0].id.clone();
+        let row = &doc.cel(&layer, &frame).unwrap().indices[..8];
+        // 第一发把 marker 放在 0 格；apply_operations 动过画布之后第二发
+        // 真的跑了，marker 走到 1 格——走下就说明没被当成重放。
+        assert_eq!(row[0], 0, "marker 被第二发挪走了");
+        assert_ne!(row[1], 0, "画布动过之后同一份 script 该跑就跑");
+        assert!(
+            row[2..].iter().all(|&i| i == 0),
+            "只跑了两发，不许再多走：{row:?}"
+        );
+    }
+
+    /// 同一份 script 瞄另一个 cel 就是另一堆像素，不能算重放。
+    #[tokio::test]
+    async fn the_same_script_aimed_at_another_layer_is_not_a_replay() {
+        let s = session();
+        let script = marker_walker();
+        rewire(
+            &s,
+            vec![
+                tool_call(
+                    "c1",
+                    "pixel_apply_operations",
+                    json!({"operations": [{"op": "create_layer", "id": "L9"}]}),
+                ),
+                tool_call("c2", "pixel_run_shader", json!({"script": script})),
+                tool_call(
+                    "c3",
+                    "pixel_run_shader",
+                    json!({"script": script, "layer": "L9"}),
+                ),
+                done("两层都画好了"),
+            ],
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("画两层".into(), Vec::new(), tx).await;
+        let flow = drain(rx);
+
+        assert_eq!(
+            flow.tools,
+            vec![
+                "pixel_apply_operations",
+                "pixel_run_shader",
+                "pixel_run_shader"
+            ]
+        );
+        assert!(flow.completed, "{:?}", flow.error);
+        let doc = s.document.lock().unwrap();
+        let frame = doc.frames[0].id.clone();
+        assert_ne!(
+            doc.cel("L9", &frame).unwrap().indices[0],
+            0,
+            "同一份 script 画到另一个图层得真跑"
+        );
     }
 
     #[tokio::test]
