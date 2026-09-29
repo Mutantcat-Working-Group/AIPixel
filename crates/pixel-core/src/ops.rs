@@ -1,7 +1,11 @@
 //! 类型化像素操作。LLM 与 UI 都通过这套操作改文档，
 //! 这是「不让模型手写矩阵」契约的核心。
 
-use super::document::{Cel, Document, DocumentError, Frame, Layer, Rgba, MAX_FRAME_DURATION_MS};
+use super::document::{
+    Cel, Document, DocumentError, Frame, Layer, NamedPalette, Rgba, MAX_FRAME_DURATION_MS,
+    MAX_PALETTE,
+};
+use super::palettes::MAX_PALETTES;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -68,6 +72,45 @@ pub enum PixelOperation {
     /// 「换配色范围」对用户就是把图画进另一套色板，语义上必须保留画面而不是留透明。
     SetPalette {
         colors: Vec<String>,
+    },
+    // ---- 命名配色范围 ----
+    /// 新建一套配色范围。`from` 是复制某套现成的当起点——改内置预设就走这条，
+    /// 落点永远是副本；`colors` 是直接从零列色。建完可以把某一层指过去。
+    CreatePalette {
+        name: String,
+        #[serde(default)]
+        from: Option<String>,
+        #[serde(default)]
+        colors: Vec<String>,
+        #[serde(default)]
+        layer: Option<String>,
+        #[serde(default)]
+        id: Option<String>,
+    },
+    /// 删掉一套。内置删不得，且正在被某层引用的删掉之前必须先让引用方改指别的。
+    DeletePalette {
+        id: String,
+    },
+    RenamePalette {
+        id: String,
+        name: String,
+    },
+    AddPaletteColor {
+        id: String,
+        color: String,
+    },
+    RemovePaletteColor {
+        id: String,
+        index: usize,
+    },
+    /// 把某一层指到另一套范围上。换层等于把这一层的像素就地收进新范围。
+    SetLayerPalette {
+        layer: String,
+        palette_id: String,
+    },
+    SetLayerLocked {
+        layer: String,
+        locked: bool,
     },
     // ---- 像素 ----
     SetPixels {
@@ -145,6 +188,18 @@ pub enum OperationError {
     LastOfKind,
     #[error("stamp area exceeds canvas at ({x},{y})")]
     StampOverflow { x: u32, y: u32 },
+    #[error("builtin palette {0} cannot be modified")]
+    BuiltinPalette(String),
+    #[error("unknown palette: {0}")]
+    UnknownPalette(String),
+    #[error("would exceed palette limits: {0} palettes in one document")]
+    TooManyPalettes(usize),
+    #[error("cannot remove the last color of palette {0}")]
+    LastPaletteColor(String),
+    #[error("palette {0} is still used by layer {1}")]
+    PaletteInUse(String, String),
+    #[error("palette color index out of range: {0}")]
+    PaletteColorIndex(usize),
 }
 
 /// 应用一组操作；任一失败则整批回滚（幂等失败，无半成品状态）。
@@ -273,6 +328,27 @@ pub fn apply_one(doc: &mut Document, op: &PixelOperation) -> Result<(), Operatio
             frame.duration_ms = *duration_ms;
         }
         PixelOperation::CreateLayer { after, name, id } => {
+            // 插入位置决定了新图层跟谁做邻居：配色范围和锁不锁都跟着邻居走。
+            // 往一叠「都锁在同一套色板」的图层中间插一层，不该突然冒出一个
+            // 自由散色班子；插在最顶上就继承栈顶那层。
+            let pos = match after {
+                Some(after_id) => {
+                    doc.layers
+                        .iter()
+                        .position(|l| &l.id == after_id)
+                        .ok_or_else(|| {
+                            OperationError::Document(DocumentError::UnknownLayer(after_id.clone()))
+                        })?
+                        + 1
+                }
+                None => doc.layers.len(),
+            };
+            let inherited = doc
+                .layers
+                .get(pos.saturating_sub(1))
+                .map(|l| (l.palette_id.clone(), l.locked))
+                .filter(|(id, _)| doc.palette_by_id(id).is_some())
+                .unwrap_or_else(|| (crate::document::DEFAULT_PALETTE_ID.to_string(), false));
             let new_id = id.clone().unwrap_or_else(|| {
                 next_id(
                     "L",
@@ -286,20 +362,8 @@ pub fn apply_one(doc: &mut Document, op: &PixelOperation) -> Result<(), Operatio
                     .unwrap_or_else(|| format!("Layer {}", doc.layers.len() + 1)),
                 visible: true,
                 opacity: 255,
-            };
-            let pos = match after {
-                Some(after_id) => {
-                    let p = doc
-                        .layers
-                        .iter()
-                        .position(|l| &l.id == after_id)
-                        .ok_or_else(|| {
-                            OperationError::Document(DocumentError::UnknownLayer(after_id.clone()))
-                        })?
-                        + 1;
-                    p
-                }
-                None => doc.layers.len(),
+                palette_id: inherited.0,
+                locked: inherited.1,
             };
             doc.layers.insert(pos.min(doc.layers.len()), layer);
             let mut frames = BTreeMap::new();
@@ -379,6 +443,182 @@ pub fn apply_one(doc: &mut Document, op: &PixelOperation) -> Result<(), Operatio
             }
             doc.palette = next;
         }
+        PixelOperation::CreatePalette {
+            name,
+            from,
+            colors,
+            layer,
+            id,
+        } => {
+            doc.ensure_palette_scope();
+            if doc.palettes.len() >= MAX_PALETTES {
+                return Err(OperationError::TooManyPalettes(doc.palettes.len()));
+            }
+            // 复制现成的那一套当起点：内置的走 fork_builtin（原套一个色都不动），
+            // 用户自己那套走 shallow 复制，改的是新的一份。
+            let mut palette = match from {
+                Some(src_id) => {
+                    let src = doc
+                        .palette_by_id(src_id)
+                        .cloned()
+                        .ok_or_else(|| OperationError::UnknownPalette(src_id.clone()))?;
+                    if src.builtin {
+                        crate::palettes::fork_builtin(&src, &doc.palettes)
+                    } else {
+                        NamedPalette {
+                            id: crate::palettes::unique_palette_id(
+                                &doc.palettes,
+                                &crate::palettes::slugify(name),
+                            ),
+                            name: name.clone(),
+                            colors: src.colors.clone(),
+                            builtin: false,
+                        }
+                    }
+                }
+                None => NamedPalette {
+                    id: id.clone().unwrap_or_else(|| {
+                        crate::palettes::unique_palette_id(
+                            &doc.palettes,
+                            &crate::palettes::slugify(name),
+                        )
+                    }),
+                    name: name.clone(),
+                    colors: Vec::new(),
+                    builtin: false,
+                },
+            };
+            if let Some(explicit) = id {
+                palette.id = explicit.clone();
+                if doc.palette_by_id(explicit).is_some() {
+                    return Err(OperationError::UnknownPalette(format!("{explicit} exists")));
+                }
+            }
+            for hex in colors {
+                let color =
+                    Rgba::parse_hex(hex).ok_or_else(|| OperationError::BadColor(hex.clone()))?;
+                if palette.colors.contains(&color) {
+                    continue;
+                }
+                if palette.colors.len() >= MAX_PALETTE {
+                    return Err(OperationError::Document(DocumentError::PaletteFull));
+                }
+                palette.colors.push(color);
+            }
+            let new_id = palette.id.clone();
+            if doc.palette_by_id(&new_id).is_some() {
+                return Err(OperationError::UnknownPalette(format!("{new_id} exists")));
+            }
+            doc.palettes.push(palette);
+            // 调用方指定的那一层跟着换过去；换范围要把这一层的像素就地收进新范围。
+            if let Some(layer_id) = layer {
+                apply_one(
+                    doc,
+                    &PixelOperation::SetLayerPalette {
+                        layer: layer_id.clone(),
+                        palette_id: new_id,
+                    },
+                )?;
+            }
+        }
+        PixelOperation::DeletePalette { id } => {
+            if crate::palettes::is_builtin_id(id) {
+                return Err(OperationError::BuiltinPalette(id.clone()));
+            }
+            let pos = doc
+                .palettes
+                .iter()
+                .position(|p| &p.id == id)
+                .ok_or_else(|| OperationError::UnknownPalette(id.clone()))?;
+            // 还被图层引用着就先别删：静默改指会让别的层莫名其妙换色板。
+            if let Some(layer) = doc.layers.iter().find(|l| &l.palette_id == id) {
+                return Err(OperationError::PaletteInUse(id.clone(), layer.id.clone()));
+            }
+            doc.palettes.remove(pos);
+        }
+        PixelOperation::RenamePalette { id, name } => {
+            if crate::palettes::is_builtin_id(id) {
+                return Err(OperationError::BuiltinPalette(id.clone()));
+            }
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                return Err(OperationError::UnknownPalette("empty name".into()));
+            }
+            let palette = doc
+                .palettes
+                .iter_mut()
+                .find(|p| &p.id == id)
+                .ok_or_else(|| OperationError::UnknownPalette(id.clone()))?;
+            palette.name = trimmed.to_string();
+        }
+        PixelOperation::AddPaletteColor { id, color } => {
+            if crate::palettes::is_builtin_id(id) {
+                return Err(OperationError::BuiltinPalette(id.clone()));
+            }
+            let color =
+                Rgba::parse_hex(color).ok_or_else(|| OperationError::BadColor(color.clone()))?;
+            let palette = doc
+                .palettes
+                .iter_mut()
+                .find(|p| &p.id == id)
+                .ok_or_else(|| OperationError::UnknownPalette(id.clone()))?;
+            if palette.colors.contains(&color) {
+                return Ok(());
+            }
+            if palette.colors.len() >= MAX_PALETTE {
+                return Err(OperationError::Document(DocumentError::PaletteFull));
+            }
+            palette.colors.push(color);
+        }
+        PixelOperation::RemovePaletteColor { id, index } => {
+            if crate::palettes::is_builtin_id(id) {
+                return Err(OperationError::BuiltinPalette(id.clone()));
+            }
+            let palette = doc
+                .palettes
+                .iter_mut()
+                .find(|p| &p.id == id)
+                .ok_or_else(|| OperationError::UnknownPalette(id.clone()))?;
+            if *index >= palette.colors.len() {
+                return Err(OperationError::PaletteColorIndex(*index));
+            }
+            if palette.colors.len() <= 1 {
+                return Err(OperationError::LastPaletteColor(id.clone()));
+            }
+            // 删的是范围不是存储：cel 里的索引照旧指向文档调色板，一个像素都不动。
+            // 真要在画面上消掉这个色，用户自己用橡皮擦，或者换一套范围触发重归队。
+            palette.colors.remove(*index);
+        }
+        PixelOperation::SetLayerPalette { layer, palette_id } => {
+            let layer_exists = doc.layers.iter().any(|l| &l.id == layer);
+            if !layer_exists {
+                return Err(OperationError::Document(DocumentError::UnknownLayer(
+                    layer.clone(),
+                )));
+            }
+            let target = doc
+                .palette_by_id(palette_id)
+                .ok_or_else(|| OperationError::UnknownPalette(palette_id.clone()))?
+                .colors
+                .clone();
+            let found = doc
+                .layers
+                .iter_mut()
+                .find(|l| &l.id == layer)
+                .expect("layer existence checked above");
+            found.palette_id = palette_id.clone();
+            requantize_layer(doc, layer, &target)?;
+        }
+        PixelOperation::SetLayerLocked { layer, locked } => {
+            let found = doc
+                .layers
+                .iter_mut()
+                .find(|l| &l.id == layer)
+                .ok_or_else(|| {
+                    OperationError::Document(DocumentError::UnknownLayer(layer.clone()))
+                })?;
+            found.locked = *locked;
+        }
         PixelOperation::SetPixels {
             layer,
             frame,
@@ -388,7 +628,7 @@ pub fn apply_one(doc: &mut Document, op: &PixelOperation) -> Result<(), Operatio
             // 避免 intern（&mut doc）与 cel（&mut doc）同时活着。
             let mut painted: Vec<(u32, u32, u16)> = Vec::with_capacity(cells.len());
             for cell in cells {
-                let idx = intern_color_str(doc, &cell.color)?;
+                let idx = intern_layer_color_str(doc, layer, &cell.color)?;
                 if cell.x >= doc.width || cell.y >= doc.height {
                     return Err(OperationError::OutOfCanvas);
                 }
@@ -417,7 +657,7 @@ pub fn apply_one(doc: &mut Document, op: &PixelOperation) -> Result<(), Operatio
                 })?
                 .get(doc.width, *x, *y)
                 .ok_or(OperationError::OutOfCanvas)?;
-            let fill = intern_color_str(doc, color)?;
+            let fill = intern_layer_color_str(doc, layer, color)?;
             let (w, h) = (doc.width, doc.height);
             let cel = cel_mut(doc, layer, frame)?;
             if target != fill {
@@ -435,7 +675,7 @@ pub fn apply_one(doc: &mut Document, op: &PixelOperation) -> Result<(), Operatio
             color,
             filled,
         } => {
-            let idx = intern_color_str(doc, color)?;
+            let idx = intern_layer_color_str(doc, layer, color)?;
             let (x0, y0, x1, y1) = (*x0, *y0, *x1, *y1);
             if x0.max(x1) >= doc.width || y0.max(y1) >= doc.height {
                 return Err(OperationError::OutOfCanvas);
@@ -476,7 +716,7 @@ pub fn apply_one(doc: &mut Document, op: &PixelOperation) -> Result<(), Operatio
         } => {
             let mut legend_idx = std::collections::HashMap::new();
             for (sym, hex) in legend {
-                let idx = intern_color_str(doc, hex)?;
+                let idx = intern_layer_color_str(doc, layer, hex)?;
                 legend_idx.insert(
                     sym.chars()
                         .next()
@@ -517,9 +757,53 @@ fn cel_mut<'a>(
     })
 }
 
-fn intern_color_str(doc: &mut Document, hex: &str) -> Result<u16, OperationError> {
+/// 写像素用的颜色落地：先按图层的配色范围仲裁，再 intern 进文档调色板。
+/// 锁着的层越界颜色就近归队，没锁的层原样放行——「锁」的力气全在这一步。
+fn intern_layer_color_str(
+    doc: &mut Document,
+    layer: &str,
+    hex: &str,
+) -> Result<u16, OperationError> {
     let color = Rgba::parse_hex(hex).ok_or_else(|| OperationError::BadColor(hex.to_string()))?;
+    let color = doc.color_for_layer(layer, color);
     doc.intern_color(color).map_err(OperationError::Document)
+}
+
+/// 把某一层的像素就地收进 `range` 这套新范围。
+///
+/// 文档调色板是存储、命名范围是约束，两件事分开：所以这里要先把
+/// `doc.palette` 里每个颜色折算成新范围里的那个颜色，再 intern 成
+/// 新下标重指 cel。透明永远留在 0，换范围绝不把像素擦掉。
+fn requantize_layer(doc: &mut Document, layer: &str, range: &[Rgba]) -> Result<(), OperationError> {
+    if range.is_empty() {
+        return Err(OperationError::UnknownPalette("empty range".into()));
+    }
+    // cel 下标比 palette 下标多 1（下标 0 是透明），所以 targets 前面补一个透明。
+    let mut targets: Vec<Rgba> = Vec::with_capacity(doc.palette.len() + 1);
+    targets.push(Rgba::TRANSPARENT);
+    for color in &doc.palette {
+        let nearest = super::document::nearest_color(range, *color).unwrap_or(*color);
+        targets.push(nearest);
+    }
+    // range 里的颜色要先进文档调色板才拿得到下标，这一步是纯写 palette。
+    let mut remap: Vec<u16> = Vec::with_capacity(targets.len());
+    for target in &targets {
+        remap.push(
+            doc.intern_color(*target)
+                .map_err(OperationError::Document)?,
+        );
+    }
+    let Some(frames) = doc.cels.get_mut(layer) else {
+        return Ok(());
+    };
+    for cel in frames.values_mut() {
+        for idx in cel.indices.iter_mut() {
+            if let Some(&next) = remap.get(*idx as usize) {
+                *idx = next;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// 新调色板里和 `color` 最接近的下标。RGB 欧氏距离，不比较 alpha：

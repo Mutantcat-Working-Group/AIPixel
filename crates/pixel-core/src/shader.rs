@@ -245,9 +245,13 @@ impl Sandbox {
         globals.set("pal", pal)?;
 
         // hex(value) -> index（#hex 先 intern；transparent -> 0）
+        // 层 id 一起带进去：锁着的层在 hex() 里就要归队，
+        // 不然模型以为写进去的颜色生效了，实际落在另一个色上。
+        let layer_cell = self.layer.clone();
         let hex_fn = self.lua.create_function(move |_lua, v: Value| {
             let doc = unsafe { &mut *(doc_ptr as *mut Document) };
-            resolve_color(doc, v)
+            let layer = layer_cell.borrow().clone();
+            resolve_color_for_layer(doc, &layer, v)
         })?;
         globals.set("hex", hex_fn)?;
 
@@ -777,6 +781,12 @@ fn cel_mut<'a>(
 
 /// 解析颜色值：接受 `#hex` / `transparent` / 数字索引。
 pub fn resolve_color(doc: &mut Document, value: Value) -> mlua::Result<u16> {
+    resolve_color_for_layer(doc, "", value)
+}
+
+/// 带图层上下文的取色：锁着的层越界颜色就近归队，没锁的层原样放行。
+/// `layer` 为空串（全局查询、没有当前层）时不做仲裁。
+pub fn resolve_color_for_layer(doc: &mut Document, layer: &str, value: Value) -> mlua::Result<u16> {
     match value {
         Value::Integer(i) => {
             if i < 0 || i as usize >= doc.palette.len() {
@@ -795,6 +805,7 @@ pub fn resolve_color(doc: &mut Document, value: Value) -> mlua::Result<u16> {
             }
             let color = Rgba::parse_hex(&text)
                 .ok_or_else(|| mlua::Error::RuntimeError(format!("bad color literal {text}")))?;
+            let color = doc.color_for_layer(layer, color);
             doc.intern_color(color)
                 .map_err(|e| mlua::Error::RuntimeError(e.to_string()))
         }

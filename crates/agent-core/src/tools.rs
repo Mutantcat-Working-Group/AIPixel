@@ -46,7 +46,7 @@ pub fn specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "pixel_apply_operations".into(),
-            description: "Apply ONE transaction of typed pixel/layer/frame/palette operations. Structure ops (create/move/delete/duplicate/rename layers and frames, set duration, add or replace the palette) and tiny precise pixel patches (set_pixels, stamp_grid, draw_shape, bucket_fill, clear_region). set_palette replaces the palette and remaps painted pixels to the nearest color. Fails atomically if any operation is invalid; the error names the failing operation index.".into(),
+            description: "Apply ONE transaction of typed pixel/layer/frame/palette operations. Structure ops (create/move/delete/duplicate/rename layers and frames, set duration, add or replace the palette) and tiny precise pixel patches (set_pixels, stamp_grid, draw_shape, bucket_fill, clear_region). Color ranges: each layer points at one named palette; set_layer_locked(true) restricts that layer to its range (out-of-range colors snap to the nearest in range), set_layer_locked(false) lets it use any color. Builtin ranges are read-only: to change one, create_palette with from=<id> to fork it, then set_layer_palette. set_palette replaces the document palette and remaps painted pixels to the nearest color. Fails atomically if any operation is invalid; the error names the failing operation index.".into(),
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -57,7 +57,7 @@ pub fn specs() -> Vec<ToolSpec> {
                             "properties": {
                                 "op": {
                                     "type": "string",
-                                    "enum": ["create_frame","delete_frame","duplicate_frame","move_frame","set_frame_duration","create_layer","delete_layer","move_layer","rename_layer","set_layer_properties","add_palette_colors","set_palette","set_pixels","bucket_fill","draw_shape","clear_region","stamp_grid"]
+                                    "enum": ["create_frame","delete_frame","duplicate_frame","move_frame","set_frame_duration","create_layer","delete_layer","move_layer","rename_layer","set_layer_properties","add_palette_colors","set_palette","create_palette","delete_palette","rename_palette","add_palette_color","remove_palette_color","set_layer_palette","set_layer_locked","set_pixels","bucket_fill","draw_shape","clear_region","stamp_grid"]
                                 },
                                 "id": {"type": "string"},
                                 "after": {"type": "string"},
@@ -76,6 +76,10 @@ pub fn specs() -> Vec<ToolSpec> {
                                 "rows": {"type": "array", "items": {"type": "string"}},
                                 "legend": {"type": "object", "additionalProperties": {"type": "string"}},
                                 "colors": {"type": "array", "items": {"type": "string"}},
+                                "palette_id": {"type": "string", "description": "named color range id, e.g. sweetie16"},
+                                "from": {"type": "string", "description": "create_palette: copy this range as the starting point"},
+                                "index": {"type": "integer"},
+                                "locked": {"type": "boolean", "description": "true = this layer may only use colors inside its range"},
                                 "visible": {"type": "boolean"},
                                 "opacity": {"type": "integer"}
                             },

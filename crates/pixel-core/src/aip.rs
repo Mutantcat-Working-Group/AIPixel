@@ -6,7 +6,7 @@
 //! - 预留 @anim 元信息（fps/loop），命名带引号可含空格，支持 # 注释
 //! - 符号分配与文档 RLE 上下文完全一致（同一套 rle::SYMBOLS）
 
-use super::document::{Cel, Document, Frame, Layer, Rgba};
+use super::document::{Cel, Document, Frame, Layer, NamedPalette, Rgba};
 use super::rle::{encode_row, SYMBOLS};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -99,12 +99,33 @@ pub fn dump_v2(doc: &Document) -> AipResult<String> {
     out.push_str("@layers\n");
     for layer in &doc.layers {
         out.push_str(&format!(
-            "{} \"{}\" {} {}\n",
+            "{} \"{}\" {} {} palette={} {}\n",
             layer.id,
             layer.name.replace('"', "'"),
             if layer.visible { "visible" } else { "hidden" },
-            layer.opacity
+            layer.opacity,
+            layer.palette_id,
+            if layer.locked { "locked" } else { "unlocked" }
         ));
+    }
+
+    // @palettes：命名配色范围。内置的带 builtin 标记，读回来才知道动不得。
+    if !doc.palettes.is_empty() {
+        out.push_str("@palettes\n");
+        for palette in &doc.palettes {
+            let kind = if palette.builtin { "builtin" } else { "custom" };
+            out.push_str(&format!(
+                "{} \"{}\" {}{}\n",
+                palette.id,
+                palette.name.replace('"', "'"),
+                kind,
+                palette
+                    .colors
+                    .iter()
+                    .map(|c| format!(" {}", c.to_hex()))
+                    .collect::<String>()
+            ));
+        }
     }
 
     // @frames
@@ -189,6 +210,7 @@ pub fn parse_v2(text: &str) -> AipResult<Document> {
     symbol_to_index.insert('.', 0);
     let mut layers: Vec<Layer> = Vec::new();
     let mut frames: Vec<Frame> = Vec::new();
+    let mut palettes: Vec<NamedPalette> = Vec::new();
     let mut cels: BTreeMap<String, BTreeMap<String, Cel>> = BTreeMap::new();
     let mut declared: Option<(u32, u32)> = None;
 
@@ -198,6 +220,7 @@ pub fn parse_v2(text: &str) -> AipResult<Document> {
         None,
         Palette,
         Layers,
+        Palettes,
         Frames,
         Cel,
     }
@@ -224,6 +247,8 @@ pub fn parse_v2(text: &str) -> AipResult<Document> {
                 block = Block::Palette;
             } else if line == "@layers" {
                 block = Block::Layers;
+            } else if line == "@palettes" {
+                block = Block::Palettes;
             } else if line == "@frames" {
                 block = Block::Frames;
             } else if line == "@anim" || line.starts_with("@anim ") {
@@ -251,6 +276,7 @@ pub fn parse_v2(text: &str) -> AipResult<Document> {
         match block {
             Block::Palette => parse_palette_line(line, &mut palette, &mut symbol_to_index)?,
             Block::Layers => parse_layer_line(line, &mut layers)?,
+            Block::Palettes => parse_named_palette_line(line, &mut palettes)?,
             Block::Frames => parse_frame_line(line, &mut frames)?,
             Block::Cel => {
                 let Some((layer, frame)) = cel_key.clone() else {
@@ -311,8 +337,48 @@ pub fn parse_v2(text: &str) -> AipResult<Document> {
     doc.layers = layers;
     doc.frames = frames;
     doc.cels = cels;
+    doc.palettes = palettes;
     doc.revision = revision.unwrap_or(0);
+    // 老文件没有配色范围这一段；把内置库补回来、悬空引用重指默认，都在这里收尾。
+    doc.ensure_palette_scope();
     Ok(doc)
+}
+
+/// `id "name" builtin|custom #rrggbb ...`。名字可省，颜色一个都不许少。
+fn parse_named_palette_line(line: &str, palettes: &mut Vec<NamedPalette>) -> AipResult<()> {
+    let (id, rest) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+    let mut rest = rest;
+    let mut name = id.to_string();
+    if let Some(inner) = rest.trim_start().strip_prefix('"') {
+        let end = inner.find('"').unwrap_or(inner.len());
+        name = inner[..end].to_string();
+        rest = &inner[end + 1..];
+    }
+    let mut tokens = rest.split_whitespace();
+    let builtin = match tokens.next() {
+        Some("builtin") => true,
+        Some("custom") => false,
+        Some(other) => return err(format!("bad palette kind: {other}")),
+        None => return err(format!("palette {id} has no colors")),
+    };
+    let mut colors = Vec::new();
+    for token in tokens {
+        let color =
+            Rgba::parse_hex(token).ok_or_else(|| AipError(format!("bad palette color {token}")))?;
+        if !colors.contains(&color) {
+            colors.push(color);
+        }
+    }
+    if colors.is_empty() {
+        return err(format!("palette {id} has no colors"));
+    }
+    palettes.push(NamedPalette {
+        id: id.to_string(),
+        name,
+        colors,
+        builtin,
+    });
+    Ok(())
 }
 
 fn kv_pairs(text: &str) -> Vec<(String, String)> {
@@ -369,26 +435,42 @@ fn parse_palette_line(
 
 fn parse_layer_line(line: &str, layers: &mut Vec<Layer>) -> AipResult<()> {
     let (id, rest) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
-    let name = if let Some(inner) = rest.strip_prefix('"') {
+    // 行格式：`id "name" visible|hidden <opacity> palette=<id> locked`
+    // 老文件没有后两段，解析不出来就默认值：颜色范围交给 ensure_palette_scope 收拾。
+    let mut rest = rest;
+    let mut name = format!("Layer {}", layers.len() + 1);
+    if let Some(inner) = rest.trim_start().strip_prefix('"') {
         // 引号名字取到闭合引号为止；没闭合就整段当名字，别让解析崩在半个 layer 行上
-        match inner.find('"') {
-            Some(i) => inner[..i].to_string(),
-            None => inner.to_string(),
+        let end = inner.find('"').unwrap_or(inner.len());
+        name = inner[..end].to_string();
+        rest = &inner[end + 1..];
+    }
+    let mut visible = true;
+    let mut opacity = 255u8;
+    let mut palette_id = super::document::MISSING_PALETTE_ID.to_string();
+    let mut locked = false;
+    for token in rest.split_whitespace() {
+        match token {
+            "visible" => visible = true,
+            "hidden" => visible = false,
+            "locked" => locked = true,
+            "unlocked" => locked = false,
+            other => {
+                if let Some(value) = other.strip_prefix("palette=") {
+                    palette_id = value.to_string();
+                } else if let Ok(parsed) = other.parse::<u8>() {
+                    opacity = parsed;
+                }
+            }
         }
-    } else {
-        format!("Layer {}", layers.len() + 1)
-    };
-    let visible = !rest.contains("hidden");
-    let opacity = rest
-        .split_whitespace()
-        .last()
-        .and_then(|t| t.parse::<u8>().ok())
-        .unwrap_or(255);
+    }
     layers.push(Layer {
         id: id.to_string(),
         name,
         visible,
         opacity,
+        palette_id,
+        locked,
     });
     Ok(())
 }

@@ -81,14 +81,35 @@ pub fn catalog(doc: &Document) -> String {
             out.push_str(&format!("  {} {}\n", i, c.to_hex()));
         }
     }
+    if !doc.palettes.is_empty() {
+        out.push_str(&format!("color ranges ({}):\n", doc.palettes.len()));
+        for palette in &doc.palettes {
+            out.push_str(&format!(
+                "  {} \"{}\" [{}] {} colors\n",
+                palette.id,
+                palette.name,
+                if palette.builtin { "builtin" } else { "custom" },
+                palette.colors.len()
+            ));
+        }
+    }
     out.push_str(&format!("layers ({}):\n", doc.layers.len()));
     for (i, l) in doc.layers.iter().enumerate() {
+        let range = doc
+            .layer_palette(&l.id)
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| "unbounded".to_string());
         out.push_str(&format!(
-            "  {i}: {} [{}] opacity={} {}\n",
+            "  {i}: {} [{}] opacity={} {visible} range={range} {lock}\n",
             l.id,
             l.name,
-            if l.visible { "visible" } else { "hidden" },
-            l.opacity
+            l.opacity,
+            visible = if l.visible { "visible" } else { "hidden" },
+            lock = if l.locked {
+                "LOCKED (only these colors)"
+            } else {
+                "unlocked"
+            }
         ));
     }
     out.push_str(&format!("frames ({}):\n", doc.frames.len()));

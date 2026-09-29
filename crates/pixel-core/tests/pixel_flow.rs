@@ -576,3 +576,394 @@ fn set_palette_remaps_painted_pixels_to_nearest_color() {
     assert_eq!(flat.get_pixel(0, 0).0, [0xFF, 0xFF, 0xFF, 0xFF]);
     assert_eq!(flat.get_pixel(0, 1).0, [0x00, 0x00, 0x00, 0xFF]);
 }
+
+// ---- 命名配色范围 ----
+
+/// 每层各自认领一套范围，锁着的那层越界颜色要被拉回范围里。
+#[test]
+fn locked_layer_clamps_colors_into_its_own_range() {
+    let mut doc = blank();
+    let (l0, f0) = (doc.layers[0].id.clone(), doc.frames[0].id.clone());
+    ops::apply_batch(
+        &mut doc,
+        &[
+            PixelOperation::CreateLayer {
+                after: Some(l0.clone()),
+                name: Some("mono".into()),
+                id: None,
+            },
+            PixelOperation::SetLayerPalette {
+                layer: "L1".into(),
+                palette_id: "onebit".into(),
+            },
+            PixelOperation::SetLayerLocked {
+                layer: "L1".into(),
+                locked: true,
+            },
+        ],
+    )
+    .expect("batch applies");
+
+    // 两层原先是同一套范围；现在 L1 锁在黑白二色上，L0 还开着。
+    assert_eq!(doc.layer("L1").unwrap().palette_id, "onebit");
+    assert_eq!(doc.layer("L0").unwrap().palette_id, "sweetie16");
+
+    for layer in ["L0", "L1"] {
+        ops::apply_batch(
+            &mut doc,
+            &[PixelOperation::SetPixels {
+                layer: layer.into(),
+                frame: f0.clone(),
+                cells: vec![ops::PixelCell {
+                    x: 0,
+                    y: 0,
+                    color: "#88ff00".into(),
+                }],
+            }],
+        )
+        .expect("paint applies");
+    }
+
+    // 开着的层原样落笔；锁住的层被拉回黑或白。
+    assert_eq!(
+        doc.cel("L0", &f0).unwrap().indices[0],
+        doc.palette_index_of(Rgba::rgb(0x88, 0xff, 0x00)).unwrap(),
+        "未锁的层不许动颜色"
+    );
+    let clamped = doc.palette[doc.cel("L1", &f0).unwrap().indices[0] as usize - 1];
+    let range = &doc.layer_palette("L1").unwrap().colors;
+    assert!(
+        range.contains(&clamped),
+        "锁住的层必须用范围里的颜色，实际落了 {} ",
+        clamped.to_hex()
+    );
+}
+
+#[test]
+fn layer_ranges_are_independent() {
+    let mut doc = blank();
+    let (l0, f0) = (doc.layers[0].id.clone(), doc.frames[0].id.clone());
+    ops::apply_batch(
+        &mut doc,
+        &[
+            PixelOperation::SetLayerPalette {
+                layer: l0.clone(),
+                palette_id: "gameboy".into(),
+            },
+            PixelOperation::SetLayerLocked {
+                layer: l0.clone(),
+                locked: true,
+            },
+            PixelOperation::CreateLayer {
+                after: Some(l0.clone()),
+                name: Some("free".into()),
+                id: None,
+            },
+            PixelOperation::SetLayerPalette {
+                layer: "L1".into(),
+                palette_id: "pico8".into(),
+            },
+        ],
+    )
+    .expect("batch applies");
+
+    assert_eq!(doc.layer("L0").unwrap().palette_id, "gameboy");
+    assert_eq!(doc.layer("L1").unwrap().palette_id, "pico8");
+    assert!(doc.layer("L0").unwrap().locked);
+    // 紧挨着插进来的层连着「锁不锁」一起继承，换范围时才把锁解开。
+    ops::apply_batch(
+        &mut doc,
+        &[PixelOperation::SetLayerLocked {
+            layer: "L1".into(),
+            locked: false,
+        }],
+    )
+    .expect("unlock applies");
+    assert!(!doc.layer("L1").unwrap().locked);
+    assert!(doc.layer("L0").unwrap().locked, "另一层的锁不许被顺手改掉");
+    let _ = f0;
+}
+
+#[test]
+fn set_layer_palette_requantizes_only_that_layer() {
+    let mut doc = blank();
+    let (l0, f0) = (doc.layers[0].id.clone(), doc.frames[0].id.clone());
+    ops::apply_batch(
+        &mut doc,
+        &[
+            PixelOperation::CreateLayer {
+                after: Some(l0.clone()),
+                name: Some("other".into()),
+                id: None,
+            },
+            PixelOperation::SetPixels {
+                layer: l0.clone(),
+                frame: f0.clone(),
+                cells: vec![ops::PixelCell {
+                    x: 0,
+                    y: 0,
+                    color: "#ff004d".into(),
+                }],
+            },
+            PixelOperation::SetPixels {
+                layer: "L1".into(),
+                frame: f0.clone(),
+                cells: vec![ops::PixelCell {
+                    x: 0,
+                    y: 0,
+                    color: "#ff004d".into(),
+                }],
+            },
+            PixelOperation::SetLayerPalette {
+                layer: l0.clone(),
+                palette_id: "onebit".into(),
+            },
+        ],
+    )
+    .expect("batch applies");
+
+    let range = doc.layer_palette("L0").unwrap().colors.clone();
+    let moved = doc.palette[doc.cel("L0", &f0).unwrap().indices[0] as usize - 1];
+    let kept = doc.palette[doc.cel("L1", &f0).unwrap().indices[0] as usize - 1];
+    assert!(range.contains(&moved), "换范围的层要就地归队");
+    assert_eq!(kept, Rgba::rgb(0xff, 0x00, 0x4d), "另一层一个色都不许动");
+}
+
+#[test]
+fn builtin_presets_are_read_only() {
+    let mut doc = blank();
+    let l0 = doc.layers[0].id.clone();
+    ops::apply_batch(
+        &mut doc,
+        &[PixelOperation::SetLayerPalette {
+            layer: l0.clone(),
+            palette_id: "pico8".into(),
+        }],
+    )
+    .expect("switch applies");
+
+    let attempts: Vec<PixelOperation> = vec![
+        PixelOperation::RenamePalette {
+            id: "pico8".into(),
+            name: "我的".into(),
+        },
+        PixelOperation::AddPaletteColor {
+            id: "pico8".into(),
+            color: "#123456".into(),
+        },
+        PixelOperation::RemovePaletteColor {
+            id: "pico8".into(),
+            index: 0,
+        },
+        PixelOperation::DeletePalette { id: "pico8".into() },
+    ];
+    for op in attempts {
+        let err = ops::apply_batch(&mut doc, &[op]).expect_err("内置预设动不得");
+        assert!(
+            matches!(err, ops::OperationError::BuiltinPalette(_)),
+            "expected BuiltinPalette, got {err}"
+        );
+    }
+    assert_eq!(doc.palette_by_id("pico8").unwrap().colors.len(), 16);
+}
+
+#[test]
+fn editing_a_builtin_forks_it_and_leaves_the_original_alone() {
+    let mut doc = blank();
+    let l0 = doc.layers[0].id.clone();
+    let before = doc.palette_by_id("pico8").unwrap().colors.clone();
+
+    ops::apply_batch(
+        &mut doc,
+        &[
+            PixelOperation::SetLayerPalette {
+                layer: l0.clone(),
+                palette_id: "pico8".into(),
+            },
+            PixelOperation::CreatePalette {
+                name: "PICO-8 copy".into(),
+                from: Some("pico8".into()),
+                colors: vec!["#123456".into()],
+                layer: Some(l0.clone()),
+                id: None,
+            },
+        ],
+    )
+    .expect("batch applies");
+
+    assert_eq!(
+        doc.palette_by_id("pico8").unwrap().colors,
+        before,
+        "内置那套一个色都不该变"
+    );
+    let fork_id = doc.layer(&l0).unwrap().palette_id.clone();
+    assert_ne!(fork_id, "pico8");
+    let fork = doc.palette_by_id(&fork_id).unwrap();
+    assert!(!fork.builtin);
+    assert_eq!(fork.colors.len(), before.len() + 1);
+    assert!(fork.colors.contains(&Rgba::rgb(0x12, 0x34, 0x56)));
+}
+
+#[test]
+fn removing_a_palette_color_keeps_pixels_intact() {
+    let mut doc = blank();
+    let l0 = doc.layers[0].id.clone();
+    let (f0, _) = (doc.frames[0].id.clone(), ());
+    ops::apply_batch(
+        &mut doc,
+        &[
+            PixelOperation::CreatePalette {
+                name: "我的配色".into(),
+                from: None,
+                colors: vec!["#ff0000".into(), "#00ff00".into(), "#0000ff".into()],
+                layer: Some(l0.clone()),
+                id: None,
+            },
+            PixelOperation::SetPixels {
+                layer: l0.clone(),
+                frame: f0.clone(),
+                cells: vec![ops::PixelCell {
+                    x: 3,
+                    y: 3,
+                    color: "#ff0000".into(),
+                }],
+            },
+        ],
+    )
+    .expect("batch applies");
+    let palette_id = doc.layer(&l0).unwrap().palette_id.clone();
+    assert_eq!(doc.palette_by_id(&palette_id).unwrap().colors.len(), 3);
+
+    ops::apply_batch(
+        &mut doc,
+        &[PixelOperation::RemovePaletteColor {
+            id: palette_id.clone(),
+            index: 1,
+        }],
+    )
+    .expect("remove applies");
+
+    // 范围少了一色，画面上的像素原样躺着。
+    assert_eq!(doc.palette_by_id(&palette_id).unwrap().colors.len(), 2);
+    let painted =
+        doc.palette[doc.cel(&l0, &f0).unwrap().indices[(3 * 16 + 3) as usize] as usize - 1];
+    assert_eq!(painted, Rgba::rgb(0xff, 0x00, 0x00));
+}
+
+#[test]
+fn deleting_a_palette_in_use_is_refused() {
+    let mut doc = blank();
+    ops::apply_batch(
+        &mut doc,
+        &[PixelOperation::CreatePalette {
+            name: "临时的".into(),
+            from: None,
+            colors: vec!["#ff0000".into()],
+            layer: None,
+            id: None,
+        }],
+    )
+    .expect("create applies");
+    let id = doc.palettes.last().unwrap().id.clone();
+    ops::apply_batch(
+        &mut doc,
+        &[PixelOperation::SetLayerPalette {
+            layer: "L0".into(),
+            palette_id: id.clone(),
+        }],
+    )
+    .expect("switch applies");
+
+    let err = ops::apply_batch(
+        &mut doc,
+        &[PixelOperation::DeletePalette { id: id.clone() }],
+    )
+    .expect_err("还被图层引用的删不掉");
+    assert!(matches!(err, ops::OperationError::PaletteInUse(_, _)));
+    assert!(doc.palette_by_id(&id).is_some());
+}
+
+#[test]
+fn aip_round_trip_keeps_named_palettes() {
+    let mut doc = blank();
+    let l0 = doc.layers[0].id.clone();
+    ops::apply_batch(
+        &mut doc,
+        &[
+            PixelOperation::CreateLayer {
+                after: Some(l0.clone()),
+                name: Some("第二层".into()),
+                id: None,
+            },
+            PixelOperation::SetLayerPalette {
+                layer: "L1".into(),
+                palette_id: "gameboy".into(),
+            },
+            PixelOperation::SetLayerLocked {
+                layer: "L1".into(),
+                locked: true,
+            },
+            PixelOperation::CreatePalette {
+                name: "我的配色".into(),
+                from: None,
+                colors: vec!["#ff0000".into(), "#00ff00".into()],
+                layer: Some(l0.clone()),
+                id: None,
+            },
+        ],
+    )
+    .expect("batch applies");
+
+    let text = aip::dump_v2(&doc).expect("dump");
+    assert!(text.contains("@palettes"), "{text}");
+    let back = aip::parse_v2(&text).expect("parse");
+
+    assert_eq!(back.palettes.len(), doc.palettes.len());
+    assert_eq!(back.layer("L1").unwrap().palette_id, "gameboy");
+    assert!(back.layer("L1").unwrap().locked);
+    assert_eq!(
+        back.layer(&l0).unwrap().palette_id,
+        doc.layer(&l0).unwrap().palette_id
+    );
+    let mine = back.palettes.iter().find(|p| p.name == "我的配色").unwrap();
+    assert_eq!(
+        mine.colors,
+        doc.palette_by_id(&doc.layer(&l0).unwrap().palette_id)
+            .unwrap()
+            .colors
+    );
+    assert!(back.palettes.iter().any(|p| p.id == "pico8" && p.builtin));
+}
+
+/// 老 .aip 没有 @palettes 段：读回来必须补上内置库，否则配色面板开天窗。
+#[test]
+fn old_aip_without_palettes_still_gets_builtin_defaults() {
+    let doc = blank();
+    let text = aip::dump_v2(&doc).expect("dump");
+    // 手工把 @palettes 段剔掉，模拟旧版写出来的文件。
+    let mut out = Vec::new();
+    let mut skipping = false;
+    for line in text.lines() {
+        if line == "@palettes" {
+            skipping = true;
+            continue;
+        }
+        if skipping && !line.starts_with('@') {
+            continue;
+        }
+        skipping = false;
+        out.push(line);
+    }
+    let legacy = out.join("\n");
+    assert!(!legacy.contains("@palettes"));
+
+    let back = aip::parse_v2(&legacy).expect("parse");
+    assert!(!back.palettes.is_empty(), "内置配色库要补回来");
+    for layer in &back.layers {
+        assert!(
+            back.palette_by_id(&layer.palette_id).is_some(),
+            "图层 {} 的范围不能悬空",
+            layer.id
+        );
+    }
+}

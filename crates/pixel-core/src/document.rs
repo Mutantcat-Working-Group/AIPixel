@@ -66,6 +66,41 @@ pub struct Layer {
     pub name: String,
     pub visible: bool,
     pub opacity: u8,
+    /// 这一图层的配色范围指向文档里的哪一套命名调色板。
+    /// 悬空 id 由 `ensure_palette_scope` 兜底，别直接当必然存在。
+    #[serde(default = "missing_palette_id")]
+    pub palette_id: String,
+    /// 锁住 = 只许用 `palette_id` 那套范围里的颜色，越界颜色就近归队；
+    /// 解开 = 这一层可以随便扩色，新颜色并入它的范围。
+    /// 新建文档默认解开：随便取色、随便画，要收敛的人自己上锁。
+    /// 上锁才是「只能用这套范围」的语义，默认锁死会把自由涂色的人全得罪。
+    #[serde(default = "unlocked")]
+    pub locked: bool,
+}
+
+/// 命名调色板：配色范围的一等公民。内置那几套改不得，用户想改就先复制一份。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NamedPalette {
+    pub id: String,
+    pub name: String,
+    pub colors: Vec<Rgba>,
+    #[serde(default)]
+    pub builtin: bool,
+}
+
+/// 新图层默认落在哪套范围上。Sweetie 16 是知名度最高的一套，先当默认不亏。
+pub const DEFAULT_PALETTE_ID: &str = "sweetie16";
+
+fn missing_palette_id() -> String {
+    MISSING_PALETTE_ID.to_string()
+}
+
+/// 图层没带 palette_id（老文档）时的占位。迁移时一律重指到默认范围。
+pub const MISSING_PALETTE_ID: &str = "__unset__";
+
+fn unlocked() -> bool {
+    // 默认解锁：文档保持「取色自由」，范围面板里的预设只是建议起点。
+    false
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,6 +156,9 @@ pub struct Document {
     pub layers: Vec<Layer>,
     pub frames: Vec<Frame>,
     pub cels: BTreeMap<String, BTreeMap<String, Cel>>,
+    /// 文档里的命名调色板库：内置 + 用户自建。图层按 palette_id 认领范围。
+    #[serde(default)]
+    pub palettes: Vec<NamedPalette>,
     pub revision: u64,
 }
 
@@ -155,6 +193,8 @@ impl Document {
             name: "Layer 1".into(),
             visible: true,
             opacity: 255,
+            palette_id: DEFAULT_PALETTE_ID.into(),
+            locked: false,
         };
         let frame = Frame {
             id: "F0".into(),
@@ -175,8 +215,68 @@ impl Document {
             layers: vec![layer],
             frames: vec![frame],
             cels,
+            palettes: crate::palettes::builtin_palettes(),
             revision: 0,
         })
+    }
+
+    pub fn layer(&self, id: &str) -> Option<&Layer> {
+        self.layers.iter().find(|l| l.id == id)
+    }
+
+    /// 某一图层的配色范围。id 悬空时回默认那一套，界面不至于开天窗。
+    pub fn layer_palette(&self, layer_id: &str) -> Option<&NamedPalette> {
+        let id = self.layer(layer_id).map(|l| l.palette_id.as_str());
+        self.palette_by_id(id.unwrap_or(DEFAULT_PALETTE_ID))
+    }
+
+    pub fn palette_by_id(&self, id: &str) -> Option<&NamedPalette> {
+        self.palettes.iter().find(|p| p.id == id)
+    }
+
+    /// 范围仲裁：锁着的层只认范围内的颜色，外来颜色就近归队；没锁就原样放行。
+    /// 透明色不参与归队——擦除永远是合法动作。
+    pub fn color_for_layer(&self, layer_id: &str, color: Rgba) -> Rgba {
+        if color == Rgba::TRANSPARENT {
+            return color;
+        }
+        let Some(layer) = self.layer(layer_id) else {
+            return color;
+        };
+        if !layer.locked {
+            return color;
+        }
+        let Some(range) = self.palette_by_id(&layer.palette_id) else {
+            return color;
+        };
+        if range.colors.contains(&color) {
+            return color;
+        }
+        nearest_color(&range.colors, color).unwrap_or(color)
+    }
+
+    /// 兜底清一遍配置：palettes 空了就把内置那套灌回来，图层指向不存在的
+    /// 范围就改指默认。读老文件、手改 JSON 之后都得靠这个函数收拾。
+    pub fn ensure_palette_scope(&mut self) {
+        if self.palettes.is_empty() {
+            self.palettes = crate::palettes::builtin_palettes();
+        }
+        // 默认那套还在就指它，被用户删了就退到库里第一套，总比开天窗强。
+        let fallback = if self.palettes.iter().any(|p| p.id == DEFAULT_PALETTE_ID) {
+            DEFAULT_PALETTE_ID.to_string()
+        } else {
+            match self.palettes.first() {
+                Some(first) => first.id.clone(),
+                None => return,
+            }
+        };
+        // id 清单先取出来：循环里不能再借 self，layers 正被改着呢。
+        let ids: Vec<String> = self.palettes.iter().map(|p| p.id.clone()).collect();
+        for layer in self.layers.iter_mut() {
+            if !ids.contains(&layer.palette_id) {
+                layer.palette_id = fallback.clone();
+            }
+        }
     }
 
     pub fn palette_index_of(&self, color: Rgba) -> Option<u16> {
@@ -238,4 +338,37 @@ impl Document {
         }
         Ok(())
     }
+
+    /// 就近归队到这一层范围里的某个颜色：色不在范围内时用，锁着那一层全靠它兜底。
+    pub fn nearest_in_range(&self, layer_id: &str, color: Rgba) -> Option<Rgba> {
+        let range = self.layer_palette(layer_id)?;
+        nearest_color(&range.colors, color)
+    }
+}
+
+/// redmean 加权距离：人眼对绿差敏感、对暗部红差迟钝。
+/// 和前端 palette.ts 用同一把尺子，两侧「就近归队」的结果才对得上。
+pub fn color_distance(a: Rgba, b: Rgba) -> f64 {
+    let r_mean = (a.r as f64 + b.r as f64) / 2.0;
+    let dr = a.r as f64 - b.r as f64;
+    let dg = a.g as f64 - b.g as f64;
+    let db = a.b as f64 - b.b as f64;
+    let weight_r = 2.0 + r_mean / 256.0;
+    let weight_g = 4.0;
+    let weight_b = 2.0 + (255.0 - r_mean) / 256.0;
+    dr * dr * weight_r + dg * dg * weight_g + db * db * weight_b
+}
+
+/// 候选里最近的那个。同距留在前面，结果才稳定可复现。
+pub fn nearest_color(candidates: &[Rgba], target: Rgba) -> Option<Rgba> {
+    let mut best: Option<Rgba> = None;
+    let mut best_distance = f64::INFINITY;
+    for candidate in candidates {
+        let distance = color_distance(*candidate, target);
+        if distance < best_distance {
+            best_distance = distance;
+            best = Some(*candidate);
+        }
+    }
+    best
 }
