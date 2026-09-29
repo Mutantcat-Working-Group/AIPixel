@@ -182,7 +182,8 @@ const [hexDraft, setHexDraft] = useState("");
   // store，让帧条、高亮和 png 对齐。时长极端短的帧也兜个底，不然 setTimeout
   // 会被压成一锅粥。
   // playFrame 刻意不进依赖：它每次播放都在变，把它算进去会让计时器不断重置。
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+  // 单行注释放这儿盖不住依赖数组上的告警，用块级注释把整个 effect 罩住。
+  /* eslint-disable react-hooks/exhaustive-deps */
   useEffect(() => {
     if (!playing || !document || document.frames.length < 2) return;
     const frames = document.frames;
@@ -203,6 +204,7 @@ const [hexDraft, setHexDraft] = useState("");
     tick();
     return () => window.clearTimeout(timer);
   }, [playing, document, onion]);
+  /* eslint-enable react-hooks/exhaustive-deps */
 
   // 不播放时，切帧、洋葱皮开关、文档改动（document_updated / 落笔 / 撤销）
   // 都要把当前帧重新画回来。
@@ -219,11 +221,12 @@ const [hexDraft, setHexDraft] = useState("");
   // 文档对象、或者同一快照被复用）时，useStore((s) => s.document) 认不出
   // 变化，重绘就整段跳过。revision 每次 document_updated 都涨，拿它当
   // 第二把钥匙，画布才一定跟得上后端。
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+  /* eslint-disable react-hooks/exhaustive-deps */
   useEffect(() => {
     if (playing || !document) return;
     paintFrame(frameIndex, onion && frameIndex > 0 ? frameIndex - 1 : null);
   }, [playing, onion, frameIndex, document, revision]);
+  /* eslint-enable react-hooks/exhaustive-deps */
 
   // 预览区可用宽度决定放大倍率，侧栏变窄（<1180px）时倍率要跟着缩。
   useEffect(() => {

@@ -499,12 +499,14 @@ function handler(cmd: string, raw?: unknown): unknown {
     }
     case "session_reorder":
       // 按新次序整批改写排序位，id 不在簿里就当没发生过。
-      const ids = (payload.ids as string[] | undefined) ?? [];
-      ids.forEach((sessionId, index) => {
-        if (!previewSessions.includes(sessionId)) return;
-        sessionOrders[sessionId] = index + 1;
-      });
-      return null;
+      {
+        const ids = (payload.ids as string[] | undefined) ?? [];
+        ids.forEach((sessionId, index) => {
+          if (!previewSessions.includes(sessionId)) return;
+          sessionOrders[sessionId] = index + 1;
+        });
+        return null;
+      }
     case "model_set_active":
     case "model_upsert":
       return { active_id: MODEL.id, entries: [MODEL] };
