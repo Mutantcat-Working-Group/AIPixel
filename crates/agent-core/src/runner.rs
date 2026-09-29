@@ -98,6 +98,40 @@ const MIN_CONTINUATION_GAIN: usize = 24;
 /// 回灌「你写到哪里了」时，尾巴截多长。
 const RESUME_TAIL_CHARS: usize = 400;
 
+/// 结尾是不是断在半截。
+///
+/// 有的 provider 不老实：撞了输出上限，finish_reason 却报成 `stop`，或者干脆不返回
+/// 这个字段。对这种平台，唯一的线索是文字本身没写完——代码块没合上、一行以连接符
+/// 收尾。只收高精度的信号：猜错一次就要白跑一整轮续写。
+///
+/// 猜错也不要紧。续写发出去，模型只会答「没什么要补充的」，那时候照原样收场，
+/// 不会拿一句报错把好好一条回复判成失败。
+fn looks_cut_off(text: &str) -> bool {
+    let trimmed = text.trim_end();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // 奇数个 ``` 一定意味着后面还有内容。写像素画脚本的 agent 最吃这一条。
+    if trimmed.matches("```").count() % 2 == 1 {
+        return true;
+    }
+    let last = trimmed.lines().last().unwrap_or_default().trim_end();
+    // 一行以连接符收尾：表达式、参数表、对象字面量都被从中间剪了一刀。
+    // 中文破折号「——」是全角字符，碰不到这张 ASCII 表，不会被误伤。
+    const DANGLING: &[&str] = &[",", "+", "&&", "||", "=>", "->", "(", "{", "[", "="];
+    DANGLING.iter().any(|tail| last.ends_with(tail))
+}
+
+/// 这一发实际该给多少 max_tokens。
+///
+/// 优先级：provider 报过的上限 < 用户显式填的值 < 按模型名查表。
+/// 用户填过的值必须被尊重；provider 报过的上限是硬事实，谁的数小听谁的。
+/// 输出短了不丢人——续写机制会把几截拼成一条完整回复。
+fn resolve_max_tokens(user: Option<u32>, model: &str, ceiling: Option<u32>) -> u32 {
+    let wanted = user.unwrap_or_else(|| limits::ceiling_for(model));
+    ceiling.map_or(wanted, |c| c.min(wanted))
+}
+
 /// 一次请求失败后最多重试几次：网络抖动、连接被代理掐断、流直接报错。
 const MAX_ROUND_RETRIES: usize = 5;
 
@@ -603,19 +637,38 @@ impl AgentSession {
             // 光说一句「继续」，它会当新问题重想一遍、把开头再念一次。
             let mut carried = String::new();
             let mut stalled = false;
+            // provider 直说过「最多给这么多」时记住它，本逻辑轮内都照这个来。
+            let mut token_ceiling: Option<u32> = None;
+            // provider 报的 stop reason 明明是「说完了」，结尾却断在半截。
+            let mut inferred_cut = false;
             // 重试与续写都收在这个小循环里。请求每一发都重装：历史里刚 push 的
             // 半截回复必须在这发请求里生效，不然就是白续一次。
-            let raw: RoundRaw = loop {
+            let mut raw: RoundRaw = loop {
                 // 退避睡到一半用户点了中断：别等睡醒再开口，直接收。
                 if self.is_cancelled() {
                     emit(&tx, AgentEvent::Interrupted);
                     return;
                 }
-                let request = self.chat_request(&runner_config);
+                let request = self.chat_request(&runner_config, token_ceiling);
 
                 let stream = match provider.request(&request).await {
                     Ok(stream) => stream,
                     Err(e) => {
+                        // provider 说「max_tokens 太大了，最多 N」：降下来重发，
+                        // 别让整轮请求因为一个猜大的数字跑黄。下一次这个循环迭代
+                        // 就会带上新上限，输出短了由续写拼完整。
+                        if let Some(cap) = providers::token_cap_from_error(&e)
+                            .filter(|cap| token_ceiling.is_none_or(|known| *cap < known))
+                        {
+                            token_ceiling = Some(cap);
+                            emit(
+                                &tx,
+                                AgentEvent::Status {
+                                    message: lowering_status(cap),
+                                },
+                            );
+                            continue;
+                        }
                         // 发不出去：网络抖动、代理掐线、base_url 填错。比起把一句
                         // 「失败」摔在用户脸上，按退避重发更有人味。
                         if retries < MAX_ROUND_RETRIES && retryable(&e) {
@@ -669,6 +722,15 @@ impl AgentSession {
                 retries = 0;
                 // 这一轮确实收到了东西，失败额度重新算：下次失误仍该有五次机会。
 
+                // 有的平台撞了上限也不吭声。文字断在半截就当它掐了：续写会把
+                // 剩下半截接上。猜错也不要紧，见收场处的处理。
+                if raw.stop == StopKind::Finished
+                    && !raw.text.is_empty()
+                    && looks_cut_off(&raw.text)
+                {
+                    raw.stop = StopKind::Truncated;
+                    inferred_cut = true;
+                }
                 // 话没说完就接着问。前半截已经逐字推给前端了，续写只是继续追加，
                 // 用户看到的是一段完整输出，而不是半句摆在屏幕上。
                 if raw.stop == StopKind::Truncated && raw.resumable() {
@@ -700,22 +762,51 @@ impl AgentSession {
             // 没写出个结果就收场了：如实告诉用户断在哪、为什么断，
             // 别让一段半截 Lua 看起来像是画完了。
             if raw.stop == StopKind::Truncated {
-                let message = if stalled {
-                    // 「原样再写一遍」和「几乎没吐新东西」都走这一条，
-                    // 话说得太死会冤枉了后者。
-                    "the reply stopped making progress: the model either repeated text it had already written or produced almost nothing new, so the run stopped at the point shown above"
-                        .to_string()
-                } else if raw.resumable() {
-                    format!(
-                        "the reply still hit the output limit after {} continuation(s); raise Max tokens in model settings and resend your request",
-                        continuations
-                    )
-                } else {
-                    "the model produced nothing before the output limit; raise Max tokens in model settings"
-                        .to_string()
-                };
-                emit(&tx, AgentEvent::Error { message });
-                return;
+                // 猜错了的续写：provider 说「说完了」，只是结尾长得像断在半截。
+                // 续写发出去模型只会答「没什么要补充的」——那就照原样收场，
+                // 别拿一句报错把好好一条回复判成失败。
+                let wrong_guess = stalled && inferred_cut;
+                if !wrong_guess {
+                    let message = if stalled {
+                        // 「原样再写一遍」和「几乎没吐新东西」都走这一条，
+                        // 话说得太死会冤枉了后者。
+                        "the reply stopped making progress: the model either repeated text it had already written or produced almost nothing new, so the run stopped at the point shown above"
+                            .to_string()
+                    } else if raw.resumable() {
+                        format!(
+                            "the reply still hit the output limit after {} continuation(s); raise Max tokens in model settings and resend your request",
+                            continuations
+                        )
+                    } else {
+                        "the model produced nothing before the output limit; raise Max tokens in model settings"
+                            .to_string()
+                    };
+                    emit(&tx, AgentEvent::Error { message });
+                    return;
+                }
+                self.undo_resume();
+                raw = RoundRaw::empty();
+                emit(
+                    &tx,
+                    AgentEvent::Status {
+                        message: finished_whole_status(),
+                    },
+                );
+            } else if inferred_cut {
+                // 续写回来了，provider 说这一轮也说完了。它到底补上了东西没有？
+                // 没补上就说明模型自己都觉得前面已经写完了：撤掉那句没被答复的
+                // 追问，历史停在那条完整回复上，别把「没什么要补充的」当正文。
+                let fresh = format!("{}{}", raw.reasoning, raw.text);
+                if !continuation_progressed(&carried, &fresh) {
+                    self.undo_resume();
+                    raw = RoundRaw::empty();
+                    emit(
+                        &tx,
+                        AgentEvent::Status {
+                            message: finished_whole_status(),
+                        },
+                    );
+                }
             }
 
             let mut blocks = raw.blocks();
@@ -935,7 +1026,7 @@ impl AgentSession {
     /// 组装一轮请求。抽出来是因为重试和续写都要重新发一次请求：
     /// 历史每条消息都锁一次会碎，合成一次才看得出「这一轮到底发了什么」。
     /// 锁顺序固定为 document -> active -> messages，全程一致，不会自锁。
-    fn chat_request(&self, cfg: &RunnerConfig) -> ChatRequest {
+    fn chat_request(&self, cfg: &RunnerConfig, ceiling: Option<u32>) -> ChatRequest {
         let doc = self.document.lock().unwrap();
         let active = self.active.lock().unwrap();
         let engine = self.engine.lock().unwrap();
@@ -954,12 +1045,9 @@ impl AgentSession {
                 specs.extend(self.mcp_specs());
                 specs
             },
-            max_tokens: engine
-                .config
-                .max_tokens
-                // 没配过就按模型名取常用上限：4096 装不下一段分镜脚本，
-                // 而用户不该被要求先去翻文档才知道该填多少。
-                .unwrap_or_else(|| limits::ceiling_for(&engine.config.model)),
+            // 三层取最小：用户填过的值最该被尊重，没填过就按模型名查表，
+            // 而 provider 报过的上限是硬事实，谁小听谁。
+            max_tokens: resolve_max_tokens(engine.config.max_tokens, &engine.config.model, ceiling),
             temperature: engine.config.temperature,
             // 推理模型要拿回上一轮的思考，不然续写时它会当新问题重想一遍。
             echo_reasoning: providers::echoes_reasoning(&engine.config.model),
@@ -1061,6 +1149,15 @@ impl AgentSession {
         let mut messages = self.messages.lock().unwrap();
         messages.push(Message::assistant(raw.blocks()));
         messages.push(Message::user_text(nudge));
+    }
+
+    /// 撤掉最后那条「继续」指令。
+    ///
+    /// 猜错了的续写才用得上：模型已经没什么要补充的，那句没被答复的追问留在
+    /// 历史里，下一轮只会看到一句悬空的 user 消息。`push_resume` 永远以这条
+    /// 指令收尾，所以退一条就够。
+    fn undo_resume(&self) {
+        self.messages.lock().unwrap().pop();
     }
 
     /// agent 生图工具：让模型直接产出位图，再量化落到画布。与同步工具分开跑，
@@ -1208,6 +1305,25 @@ fn retrying_status(reason: &str, attempt: usize, max: usize) -> UiText {
     .with("reason", short)
     .with("attempt", attempt as u64)
     .with("max", max as u64)
+}
+
+/// 「provider 对输出上限有意见，我们按它说的数降下来了」的状态条。
+///
+/// 带上新数字：用户看到字段里填的还是自己那个值，会以为降级没生效。
+fn lowering_status(cap: u32) -> UiText {
+    UiText::new(
+        "agent.lowering_tokens",
+        "this model accepts at most {cap} output tokens; switched to that and the reply will be stitched together",
+    )
+    .with("cap", cap as u64)
+}
+
+/// 「以为被掐断了，其实已经写完」的状态条。
+fn finished_whole_status() -> UiText {
+    UiText::new(
+        "agent.finished_whole",
+        "the reply already looks complete, nothing more to continue",
+    )
 }
 
 /// 工具结果首行摘要，用于 UI 工具卡片标题。
@@ -1999,5 +2115,164 @@ mod tests {
         assert!(s
             .resolve_approval("call-1", ApprovalDecision::Approve)
             .is_err());
+    }
+
+    #[test]
+    fn a_half_open_fence_reads_as_a_cut_off_reply() {
+        // 奇数个 ``` 是「后面还有内容」最硬的证据。
+        assert!(looks_cut_off("```lua\npset(1, 1, red)\n"));
+        // 一行以连接符收尾：表达式、参数表、对象字面量被从中间剪了一刀。
+        assert!(looks_cut_off("let palette = {"));
+        assert!(looks_cut_off("draw(cat,\n"));
+        assert!(looks_cut_off("if walking &&\n"));
+    }
+
+    #[test]
+    fn a_reply_that_lands_cleanly_does_not_look_cut_off() {
+        // 猜错一次要白跑一整轮续写，所以只认最硬的信号。
+        assert!(!looks_cut_off("```lua\npset(1, 1, red)\n```\n画完了"));
+        assert!(!looks_cut_off("五帧行走图已经画好，帧时长都是 100ms。"));
+        assert!(!looks_cut_off(""));
+        assert!(!looks_cut_off("   "));
+        // 中文破折号是全角字符，碰不到那张 ASCII 表。
+        assert!(!looks_cut_off("收尾之后——"));
+    }
+
+    #[test]
+    fn the_smallest_token_budget_wins() {
+        // 用户填过的值必须被尊重。
+        assert_eq!(
+            resolve_max_tokens(Some(4096), "claude-sonnet-4-5", None),
+            4096
+        );
+        // 没填过就按模型名查表。
+        assert_eq!(resolve_max_tokens(None, "deepseek-v4.1-flash", None), 65536);
+        assert_eq!(
+            resolve_max_tokens(None, "some-unknown-model", None),
+            limits::FALLBACK_MAX_TOKENS
+        );
+        // provider 报过的上限是硬事实，谁小听谁。
+        assert_eq!(
+            resolve_max_tokens(Some(64000), "claude-sonnet-4-5", Some(8192)),
+            8192
+        );
+        assert_eq!(
+            resolve_max_tokens(None, "deepseek-v4.1-flash", Some(131072)),
+            65536,
+            "provider 的上限比我们想要的还大时，不该把人往上抬"
+        );
+    }
+
+    /// 假 provider：一发请求一个结果，并把每发真的要到的 max_tokens 记下来。
+    /// 用来验「provider 嫌上限给大了就降下来重发」这条路。
+    /// 一发起飞的剧本：整轮要么报错，要么吐一串事件。
+    type RoundScript = Vec<Result<LlmEvent, ProviderError>>;
+    /// 剧本库：request 一次取一截，报错那一发占一股。
+    type RoundScripts = Vec<Result<RoundScript, ProviderError>>;
+
+    struct RecordingProvider {
+        outcomes: Mutex<RoundScripts>,
+        asked: Mutex<Vec<u32>>,
+    }
+
+    #[async_trait::async_trait]
+    impl providers::LlmProvider for RecordingProvider {
+        async fn request(
+            &self,
+            req: &ChatRequest,
+        ) -> Result<providers::EventStream, ProviderError> {
+            self.asked.lock().unwrap().push(req.max_tokens);
+            match self.outcomes.lock().unwrap().remove(0) {
+                Ok(script) => Ok(Box::pin(futures_util::stream::iter(script))),
+                Err(e) => Err(e),
+            }
+        }
+    }
+
+    fn rewire_recording(s: &AgentSession, outcomes: RoundScripts) -> Arc<RecordingProvider> {
+        let provider = Arc::new(RecordingProvider {
+            outcomes: Mutex::new(outcomes),
+            asked: Mutex::new(Vec::new()),
+        });
+        let mut config = s.engine.lock().unwrap().config.clone();
+        config.model = "deepseek-v4.1-flash".into();
+        config.max_tokens = None;
+        *s.engine.lock().unwrap() = Engine {
+            config,
+            provider: provider.clone(),
+        };
+        provider
+    }
+
+    /// provider 说「max_tokens 太大了，最多 8192」：降下来重发，别让整轮跑黄。
+    /// 用户一个字都不用改，输出短了由续写拼成一条完整回复。
+    #[tokio::test]
+    async fn a_rejected_ceiling_is_lowered_and_the_run_carries_on() {
+        let s = session();
+        let provider = rewire_recording(
+            &s,
+            vec![
+                Err(ProviderError::Http {
+                    status: 400,
+                    body: r#"{"error":{"message":"max_tokens is too large: 65536, maximum allowed is 8192"}}"#.into(),
+                }),
+                Ok(cut("前半段")),
+                Ok(done("后半段")),
+            ],
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("画一只猫".into(), Vec::new(), tx).await;
+        let flow = drain(rx);
+
+        assert!(flow.error.is_none(), "{:?}", flow.error);
+        assert!(flow.completed, "降级之后该正常跑完");
+        assert_eq!(
+            provider.asked.lock().unwrap().as_slice(),
+            &[65536, 8192, 8192],
+            "被拒之后每一发都得带上新上限"
+        );
+        assert!(
+            flow.statuses.contains(&"agent.lowering_tokens".to_string()),
+            "用户该知道我们降了上限：{:?}",
+            flow.statuses
+        );
+        assert_eq!(flow.text, "前半段后半段");
+    }
+
+    /// provider 说「说完了」，结尾却断在半截。续写发出去模型只会答「没什么要
+    /// 补充的」——那就照原样收场，而不是判成失败，更不能把追问留在历史里。
+    #[tokio::test]
+    async fn a_finished_but_half_open_reply_gets_one_continue_then_is_kept() {
+        let s = session();
+        rewire(
+            &s,
+            vec![
+                vec![
+                    Ok(LlmEvent::Token("```lua\npset(1, 1, red)\n".into())),
+                    Ok(LlmEvent::Done {
+                        stop_reason: "end_turn".into(),
+                    }),
+                ],
+                done("没什么要补充的"),
+            ],
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("画一只猫".into(), Vec::new(), tx).await;
+        let flow = drain(rx);
+
+        assert!(flow.error.is_none(), "{:?}", flow.error);
+        assert!(flow.completed, "猜错的那发续写不该把整轮判成失败");
+        assert_eq!(
+            flow.statuses,
+            vec!["agent.continuing", "agent.finished_whole"],
+            "续了一发发现没东西可补，就该收场"
+        );
+        assert_eq!(flow.text, "```lua\npset(1, 1, red)\n没什么要补充的");
+        let messages = s.messages.lock().unwrap();
+        assert_eq!(messages.len(), 2, "追问指令该被撤掉");
+        assert_eq!(messages[0].role, Role::User);
+        assert_eq!(messages[1].role, Role::Assistant);
     }
 }

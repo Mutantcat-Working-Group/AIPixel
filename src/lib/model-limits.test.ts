@@ -8,6 +8,7 @@ import {
   MAX_TOKENS_FALLBACK,
   maxTokensForModel,
   maxTokensHint,
+  resolveAlias,
 } from "./model-limits";
 
 describe("maxTokensHint", () => {
@@ -28,7 +29,9 @@ describe("maxTokensHint", () => {
   it("认得出带厂商前缀的模型名", () => {
     expect(maxTokensHint("openai/gpt-4o")).toBe(16384);
     expect(maxTokensHint("zhipu/glm-4.6")).toBe(32768);
-    expect(maxTokensHint("accounts/fireworks/models/llama-3.3-70b-instruct")).toBe(32768);
+    expect(
+      maxTokensHint("accounts/fireworks/models/llama-3.3-70b-instruct"),
+    ).toBe(32768);
   });
 
   it("大小写不影响匹配", () => {
@@ -47,6 +50,36 @@ describe("maxTokensHint", () => {
     expect(maxTokensHint("some-mystery-model")).toBeNull();
     expect(maxTokensHint("")).toBeNull();
     expect(maxTokensHint("   ")).toBeNull();
+  });
+
+  it("同一个模型换几种写法也查到同一份上限", () => {
+    // 用户手里真实存在的情况：一个模型，三个平台三个叫法。
+    for (const name of [
+      "deepseek-v4.1-flash",
+      "deepseek-v4-1-flash",
+      "DeepSeek-V4-1-Flash",
+      "vendor/models/deepseek_v4.1_flash",
+      "deepseek-flash",
+    ]) {
+      expect(maxTokensHint(name)).toBe(65536);
+    }
+  });
+});
+
+describe("resolveAlias", () => {
+  it("省掉版本号的简名认回自家那一支", () => {
+    expect(resolveAlias("deepseek-flash")).toBe("deepseek-v4-1-flash");
+    // 后缀得跟着搬：补回的版本号接着原来的日期。
+    expect(resolveAlias("deepseek-flash-20260101")).toBe(
+      "deepseek-v4-1-flash-20260101",
+    );
+  });
+
+  it("没登记的简名不硬猜", () => {
+    // 猜错的代价是上限填错：`deepseek-pro` 该跟 deepseek-v4.1-pro 是一个数吗？
+    // 没人知道，所以原样交表，查不到就回落。
+    expect(resolveAlias("deepseek-pro")).toBe("deepseek-pro");
+    expect(maxTokensHint("deepseek-pro")).toBeNull();
   });
 });
 

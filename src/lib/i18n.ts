@@ -67,7 +67,8 @@ export const zh = {
   // ---------- 对话面板 ----------
   "chat.title": "智能体",
   "chat.running": "运行中",
-  "chat.empty": "要一张精灵图、一套配色，或者一次着色器处理。画布是唯一的事实来源。",
+  "chat.empty":
+    "要一张精灵图、一套配色，或者一次着色器处理。画布是唯一的事实来源。",
   "chat.placeholder": "描述你想要的像素画...",
   "chat.send": "发送",
   "chat.stop": "停止",
@@ -87,9 +88,13 @@ export const zh = {
   "chat.thinking": "正在思考",
   "chat.retry": "重试",
   "chat.retry_tip": "这一轮没有跑完，重发刚才的话继续",
-  "chat.stall": "已经 {secs} 秒没有新动静，可能卡住了。可以重发，也可以先中断。",
+  "chat.stall":
+    "已经 {secs} 秒没有新动静，可能卡住了。可以重发，也可以先中断。",
   "agent.interrupted": "已中断这一轮",
   "agent.continuing": "回答到了输出上限，正在接着写（第 {done}/{max} 次）",
+  "agent.lowering_tokens":
+    "这个模型最多收 {cap} 个输出 token，已按它说的来，回答分几截拼起来",
+  "agent.finished_whole": "这一段本来就已经写完了，没什么要补充的",
   "agent.retrying": "这次请求没成（{reason}），正在重试 {attempt}/{max}",
   "chat.tool_no_output": "（无输出）",
 
@@ -121,7 +126,8 @@ export const zh = {
   "doc.transparent": "透明（索引 0）。用画笔时即擦除。",
   "doc.palette_current": "沿用文档当前配色",
   "doc.palette_custom": "任意颜色",
-  "doc.palette_custom_tip": "挑一个颜色加进范围：一个预设只带得动一个，拖动即预览，松手才算落。",
+  "doc.palette_custom_tip":
+    "挑一个颜色加进范围：一个预设只带得动一个，拖动即预览，松手才算落。",
   "doc.tile_tip": "瓦片底图：把画面平铺成 1x1 / 2x2 / 3x3，接缝一眼看完",
   "doc.swatch": "{hex} · 索引 {index}",
   "doc.aip_tooltip": "查看本文档的 .aip v2 文本",
@@ -169,7 +175,8 @@ export const zh = {
   "settings.capabilities": "能力",
   "settings.capabilities_hint": "由你声明，工作流坞才知道这个模型能跑什么",
   "roles.title": "模型分工",
-  "roles.hint": "只对当前会话生效。生图、读图、读视频可以各绑一个模型，不绑的那项跟着主模型跑。",
+  "roles.hint":
+    "只对当前会话生效。生图、读图、读视频可以各绑一个模型，不绑的那项跟着主模型跑。",
   "roles.chat": "主模型（对话）",
   "roles.image_gen": "生图",
   "roles.vision": "读图",
@@ -189,7 +196,8 @@ export const zh = {
   "settings.cap.video": "读视频",
   "settings.cap.video.hint": "模型能接受视频输入，因此可以把帧直接喂给它。",
   "settings.cap.reasoning": "会思考",
-  "settings.cap.reasoning.hint": "模型会先输出推理内容（thinking），聊天里按思考块展示，结束再收起。",
+  "settings.cap.reasoning.hint":
+    "模型会先输出推理内容（thinking），聊天里按思考块展示，结束再收起。",
   "settings.key_stored": "密钥已存在本机",
   "settings.no_key_stored": "尚未存储密钥",
   "settings.set_active": "设为激活",
@@ -200,7 +208,8 @@ export const zh = {
   "about.publisher_value": "异猫工作群",
   "about.site": "网站",
   "about.repo": "源码仓库",
-  "about.blurb": "像素资产生成的桌面智能体：模型自带 Provider，本机运行，无登录无计费。",
+  "about.blurb":
+    "像素资产生成的桌面智能体：模型自带 Provider，本机运行，无登录无计费。",
 
   // ---------- MCP 面板 ----------
   "mcp.title": "MCP 工具服务器",
@@ -287,7 +296,8 @@ export const zh = {
   "dock.frames_unit": "帧",
   "dock.pull_frames": "抽取帧",
   "dock.read_clip": "读成简报",
-  "dock.tween_need_frames": "先画至少两帧。首尾帧是事实来源，这里只补中间的部分。",
+  "dock.tween_need_frames":
+    "先画至少两帧。首尾帧是事实来源，这里只补中间的部分。",
   "dock.from": "从",
   "dock.to": "到",
   "dock.frame_chip": "第 {index} 帧 · {ms}ms",
@@ -351,28 +361,38 @@ export const zh = {
   "wf.video_frames.summary": "从一段视频里抽出关键帧，然后逐帧画到各自的帧上。",
   "wf.video_frames.output": "由视频静帧绘成的帧序列",
   "wf.video_brief.title": "视频运动简报",
-  "wf.video_brief.summary": "读视频模型把一段视频读成结构化运动简报，然后照着画。",
+  "wf.video_brief.summary":
+    "读视频模型把一段视频读成结构化运动简报，然后照着画。",
   "wf.video_brief.output": "可编辑的运动简报文本加一块画好的画布",
   "wf.frame_tween.title": "补间帧",
   "wf.frame_tween.summary": "在两个已有帧之间生成补间帧，全部在本机计算。",
   "wf.frame_tween.output": "插在末帧之前的新帧",
   "wf.prompt_refine.title": "提示词微调",
-  "wf.prompt_refine.summary": "把一句大白话改写成可以逐行编辑的结构化像素画提示词。",
+  "wf.prompt_refine.summary":
+    "把一句大白话改写成可以逐行编辑的结构化像素画提示词。",
   "wf.prompt_refine.output": "一条可发送、可继续修改的提示词",
   "wf.quantize.title": "量化",
   "wf.quantize.summary": "把一张位图丢到网格上。纯本机运行，不需要模型。",
   "wf.quantize.output": "一格量化好的像素",
 
   // ---------- Rust 回执与状态 ----------
-  "outcome.bitmap_landed": "已落在图层 {layer} 的帧 {frame}（{colors} 色，新增 {added}，走 {transport}）",
-  "outcome.pixelize_landed": "已量化到图层 {layer} 的帧 {frame}（{colors} 色，新增 {added}）",
-  "outcome.tween_inserted": "已在图层 {layer} 的 {from} 与 {to} 之间插入 {count} 帧；改动 {changed} 像素",
-  "outcome.video_landed.ffprobe": "ffmpeg 取出的 {count} 帧，落在图层 {layer} 的 {from} 到 {to}",
-  "outcome.video_landed.directory": "静帧目录里的 {count} 帧，落在图层 {layer} 的 {from} 到 {to}",
+  "outcome.bitmap_landed":
+    "已落在图层 {layer} 的帧 {frame}（{colors} 色，新增 {added}，走 {transport}）",
+  "outcome.pixelize_landed":
+    "已量化到图层 {layer} 的帧 {frame}（{colors} 色，新增 {added}）",
+  "outcome.tween_inserted":
+    "已在图层 {layer} 的 {from} 与 {to} 之间插入 {count} 帧；改动 {changed} 像素",
+  "outcome.video_landed.ffprobe":
+    "ffmpeg 取出的 {count} 帧，落在图层 {layer} 的 {from} 到 {to}",
+  "outcome.video_landed.directory":
+    "静帧目录里的 {count} 帧，落在图层 {layer} 的 {from} 到 {to}",
   "outcome.video_landed.none": "{count} 帧落在图层 {layer} 的 {from} 到 {to}",
-  "outcome.video_skipped.ffprobe": "ffmpeg 取出的 {count} 帧，落在图层 {layer} 的 {from} 到 {to}；{skipped} 帧跳过",
-  "outcome.video_skipped.directory": "静帧目录里的 {count} 帧，落在图层 {layer} 的 {from} 到 {to}；{skipped} 帧跳过",
-  "outcome.video_skipped.none": "{count} 帧落在图层 {layer} 的 {from} 到 {to}；{skipped} 帧跳过",
+  "outcome.video_skipped.ffprobe":
+    "ffmpeg 取出的 {count} 帧，落在图层 {layer} 的 {from} 到 {to}；{skipped} 帧跳过",
+  "outcome.video_skipped.directory":
+    "静帧目录里的 {count} 帧，落在图层 {layer} 的 {from} 到 {to}；{skipped} 帧跳过",
+  "outcome.video_skipped.none":
+    "{count} 帧落在图层 {layer} 的 {from} 到 {to}；{skipped} 帧跳过",
   "status.asking_image": "正在请模型出图",
   "status.quantizing": "正在把模型出的图量化到网格上",
   "status.reading_frame": "正在读取第 {index} 帧，共 {total} 帧",
@@ -410,7 +430,8 @@ export const zh = {
 
   // ---------- 批量工作台 ----------
   "batch.title": "批量工作台",
-  "batch.blurb": "一个文件夹进、一个文件夹出，全程本机、不吃模型。同样的输入与同样的参数必得同样的输出，所以能复跑、能版本管理。",
+  "batch.blurb":
+    "一个文件夹进、一个文件夹出，全程本机、不吃模型。同样的输入与同样的参数必得同样的输出，所以能复跑、能版本管理。",
   "batch.kind": "做什么",
   "batch.kind.quantize": "位图转 .aip",
   "batch.kind.export": ".aip 出图",
@@ -446,7 +467,8 @@ export const zh = {
   "batch.recipe.save": "存成配方",
   "batch.recipe.book": "已存配方",
   "batch.recipe.pick": "从配方簿挑一条",
-  "batch.recipe.empty": "还没有配方。参数调顺手之后起个名字存下来，下次直接取。",
+  "batch.recipe.empty":
+    "还没有配方。参数调顺手之后起个名字存下来，下次直接取。",
   "batch.recipe.confirm_delete": "删掉「{name}」？这一条就从本机配方簿里没了。",
   "batch.recipe.delete_ok": "删除",
   "batch.recipe.delete_cancel": "取消",
@@ -461,11 +483,13 @@ export const zh = {
   "batch.recipe_exported": "已导出 {count} 条配方到 {path}",
   "batch.recipe.file": "配方文件",
   "batch.recipe.file.button": "导入 / 导出",
-  "batch.recipe.file.hint": "配方是纯文本 JSON：能直接发给别人，也能在任何编辑器里改。",
+  "batch.recipe.file.hint":
+    "配方是纯文本 JSON：能直接发给别人，也能在任何编辑器里改。",
   "batch.recipe.export_one": "导出当前这条",
   "batch.recipe.export_all": "导出整本",
   "batch.recipe.import": "从 .aipr 导入",
-  "batch.recipe.import_note": "读进 {count} 条：{imported} 条进来、{renamed} 条改名、{skipped} 条跳过",
+  "batch.recipe.import_note":
+    "读进 {count} 条：{imported} 条进来、{renamed} 条改名、{skipped} 条跳过",
   "batch.recipe.import.row.renamed": "「{name}」本机已有，改名存成「{final}」",
   "batch.recipe.import.row.skipped": "「{name}」跳过：{note}",
   "batch.recipe_delete_failed": "删除配方失败：{error}",
@@ -488,12 +512,14 @@ export const en: Record<TKey, string> = {
   "perm.chat.title": "Reads run free, writes ask one by one",
   "perm.ask.title": "Ask before every tool call",
   "perm.tooltip": "Permission mode: how much the agent may do on its own",
-  "topbar.model": "Model bound to this session (your own provider, no login, no billing)",
+  "topbar.model":
+    "Model bound to this session (your own provider, no login, no billing)",
   "topbar.select_model": "Select model",
   "topbar.model_unset": "No model set",
   "topbar.open_aip": "Open a .aip file (v2 or the older format)",
   "topbar.save_aip": "Save this document as .aip v2 text",
-  "topbar.attach_reference": "Load reference images, sent with your next message",
+  "topbar.attach_reference":
+    "Load reference images, sent with your next message",
   "topbar.settings": "Model and provider settings",
   "topbar.mcp": "MCP tool servers",
   "topbar.export": "Export",
@@ -520,7 +546,8 @@ export const en: Record<TKey, string> = {
   "sidebar.repo": "AIPixel on GitHub",
   "sidebar.modal_title": "New canvas",
   "sidebar.presets": "Common sizes",
-  "sidebar.size_hint": "16 or 32 is the safest start for pixel art; the size can change later.",
+  "sidebar.size_hint":
+    "16 or 32 is the safest start for pixel art; the size can change later.",
   "sidebar.size_readout": "{width} x {height} px, {cells} cells",
   "sidebar.modal_ok": "Create",
   "sidebar.modal_cancel": "Cancel",
@@ -529,12 +556,14 @@ export const en: Record<TKey, string> = {
 
   "chat.title": "Agent",
   "chat.running": "running",
-  "chat.empty": "Ask for a sprite, a palette, or a shader pass. The canvas is the only source of truth.",
+  "chat.empty":
+    "Ask for a sprite, a palette, or a shader pass. The canvas is the only source of truth.",
   "chat.placeholder": "Describe the pixel art you want...",
   "chat.send": "Send",
   "chat.stop": "Stop",
   "chat.attach_reference": "Attach reference images (visual ground truth)",
-  "chat.attach_snapshot": "Attach the current canvas as a snapshot (context only)",
+  "chat.attach_snapshot":
+    "Attach the current canvas as a snapshot (context only)",
   "chat.remove_attachment": "Remove",
   "chat.role_snapshot": "snap",
   "chat.role_reference": "ref",
@@ -548,11 +577,19 @@ export const en: Record<TKey, string> = {
   "chat.processing": "On it, give me a moment...",
   "chat.thinking": "Thinking",
   "chat.retry": "Retry",
-  "chat.retry_tip": "This round did not finish; resend your last message to continue",
-  "chat.stall": "No new output for {secs}s. It may be stuck - resend, or interrupt this round.",
+  "chat.retry_tip":
+    "This round did not finish; resend your last message to continue",
+  "chat.stall":
+    "No new output for {secs}s. It may be stuck - resend, or interrupt this round.",
   "agent.interrupted": "This round was interrupted",
-  "agent.continuing": "The reply hit the output limit, continuing ({done} of {max})",
-  "agent.retrying": "That request failed ({reason}); retrying {attempt} of {max}",
+  "agent.continuing":
+    "The reply hit the output limit, continuing ({done} of {max})",
+  "agent.lowering_tokens":
+    "This model accepts at most {cap} output tokens; switched to that and the reply will be stitched together",
+  "agent.finished_whole":
+    "The reply already looks complete, nothing more to continue",
+  "agent.retrying":
+    "That request failed ({reason}); retrying {attempt} of {max}",
   "chat.tool_no_output": "(no output)",
 
   "doc.brush": "Brush",
@@ -576,7 +613,8 @@ export const en: Record<TKey, string> = {
   "doc.frame_duration": "Hold on this frame",
   "doc.layer_up": "Move this layer up so it covers more layers",
   "doc.layer_down": "Move this layer down so more layers cover it",
-  "doc.layer_visible": "Show or hide this layer. Hiding only hides it, nothing is lost.",
+  "doc.layer_visible":
+    "Show or hide this layer. Hiding only hides it, nothing is lost.",
   "doc.layer_opacity": "Opacity",
   "doc.palette": "Color range",
   "doc.transparent": "Transparent (index 0). With the brush it erases.",
@@ -584,7 +622,8 @@ export const en: Record<TKey, string> = {
   "doc.palette_custom": "Any color",
   "doc.palette_custom_tip":
     "Add one color of your own to the range: a preset carries exactly one slot, drag to preview and release to commit.",
-  "doc.tile_tip": "Tiled backdrop: repeat the art as 1x1 / 2x2 / 3x3 so seams show",
+  "doc.tile_tip":
+    "Tiled backdrop: repeat the art as 1x1 / 2x2 / 3x3 so seams show",
   "doc.swatch": "{hex} · index {index}",
   "doc.aip_tooltip": "Inspect the .aip v2 text for this document",
   "doc.show_aip": "Show .aip",
@@ -615,7 +654,8 @@ export const en: Record<TKey, string> = {
   "settings.model_placeholder": "claude-sonnet-4-5",
   "settings.fetch": "Fetch",
   "settings.fetching": "Fetching",
-  "settings.fetch_need_key": "Fill in the base URL; a blank API key reuses the stored one",
+  "settings.fetch_need_key":
+    "Fill in the base URL; a blank API key reuses the stored one",
   "settings.fetch_empty": "The provider returned no usable model",
   "settings.fetch_failed": "could not fetch the model list: {error}",
   "settings.model_count": "{count} models found",
@@ -625,10 +665,12 @@ export const en: Record<TKey, string> = {
   "settings.api_key_placeholder": "sk-...",
   "settings.sampling": "Sampling",
   "settings.max_tokens": "Max tokens",
-  "settings.max_tokens_auto": "Filled from the usual limit for {model}; edit it if you like",
+  "settings.max_tokens_auto":
+    "Filled from the usual limit for {model}; edit it if you like",
   "settings.temperature": "Temperature",
   "settings.capabilities": "Capabilities",
-  "settings.capabilities_hint": "declared by you, so the dock knows what this model can run",
+  "settings.capabilities_hint":
+    "declared by you, so the dock knows what this model can run",
   "roles.title": "Model roles",
   "roles.hint":
     "Applies to this session only. Image gen, vision and video can each bind their own model; unbound roles follow the session model.",
@@ -645,13 +687,17 @@ export const en: Record<TKey, string> = {
   "roles.served_fallback": "Run by session model {model}",
   "roles.session_needed": "Create a session first",
   "settings.cap.vision": "Read images",
-  "settings.cap.vision.hint": "Multimodal input: the model can look at a reference you attach.",
+  "settings.cap.vision.hint":
+    "Multimodal input: the model can look at a reference you attach.",
   "settings.cap.image_gen": "Generate images",
-  "settings.cap.image_gen.hint": "The model can return an image bitmap instead of only text.",
+  "settings.cap.image_gen.hint":
+    "The model can return an image bitmap instead of only text.",
   "settings.cap.video": "Read video",
-  "settings.cap.video.hint": "The model accepts video input, so frames can go straight to it.",
+  "settings.cap.video.hint":
+    "The model accepts video input, so frames can go straight to it.",
   "settings.cap.reasoning": "Think first",
-  "settings.cap.reasoning.hint": "The model emits reasoning (thinking) first, shown as a thinking block that collapses when done.",
+  "settings.cap.reasoning.hint":
+    "The model emits reasoning (thinking) first, shown as a thinking block that collapses when done.",
   "settings.key_stored": "key stored locally",
   "settings.no_key_stored": "no key stored",
   "settings.set_active": "Set active",
@@ -662,7 +708,8 @@ export const en: Record<TKey, string> = {
   "about.publisher_value": "Mutantcat Working Group",
   "about.site": "Website",
   "about.repo": "Source repository",
-  "about.blurb": "A desktop agent for pixel assets: bring your own provider, everything runs on this machine, no sign-in, no billing.",
+  "about.blurb":
+    "A desktop agent for pixel assets: bring your own provider, everything runs on this machine, no sign-in, no billing.",
 
   "mcp.title": "MCP tool servers",
   "mcp.close": "Close",
@@ -706,7 +753,8 @@ export const en: Record<TKey, string> = {
   "dock.pending": "readiness",
   "dock.readiness": "Reading what the bound model can do...",
   "dock.blocked_title": "This model cannot run: {title}",
-  "dock.blocked_hint": "It is missing {missing}. Switch the model, or turn the capability on in settings.",
+  "dock.blocked_hint":
+    "It is missing {missing}. Switch the model, or turn the capability on in settings.",
   "dock.settings_link": "Model settings",
   "dock.needs": "needs {missing}",
   "dock.blocked_tooltip": "{summary} Missing: {missing}.",
@@ -727,7 +775,8 @@ export const en: Record<TKey, string> = {
   "dock.send_to_chat": "Send to chat",
   "dock.model_said_more": "The model said more",
   "dock.prompt": "Prompt",
-  "dock.prompt_placeholder": "16x16 sprite, hard edges, four colors, no antialiasing",
+  "dock.prompt_placeholder":
+    "16x16 sprite, hard edges, four colors, no antialiasing",
   "dock.size": "Size",
   "dock.reference": "Reference",
   "dock.pick_reference": "Pick a reference image",
@@ -800,36 +849,52 @@ export const en: Record<TKey, string> = {
   "wf.agent.summary": "Chat to draw. Runs one sandboxed Lua script per edit.",
   "wf.agent.output": "Edited canvas document",
   "wf.image_gen.title": "Image Generate",
-  "wf.image_gen.summary": "Model renders a bitmap, then it is quantized onto the canvas grid.",
+  "wf.image_gen.summary":
+    "Model renders a bitmap, then it is quantized onto the canvas grid.",
   "wf.image_gen.output": "One new cel of pixelized art",
   "wf.vision_brief.title": "Reference Brief",
-  "wf.vision_brief.summary": "A vision model reads your reference into a structured brief, then draws.",
+  "wf.vision_brief.summary":
+    "A vision model reads your reference into a structured brief, then draws.",
   "wf.vision_brief.output": "Brief text plus a drawn canvas",
   "wf.video_frames.title": "Video Frames",
-  "wf.video_frames.summary": "Pull key frames out of a clip, then draw each one on its own frame.",
+  "wf.video_frames.summary":
+    "Pull key frames out of a clip, then draw each one on its own frame.",
   "wf.video_frames.output": "A frame sequence drawn from video stills",
   "wf.video_brief.title": "Video Brief",
-  "wf.video_brief.summary": "A video model reads a clip into a structured motion brief, then draws.",
+  "wf.video_brief.summary":
+    "A video model reads a clip into a structured motion brief, then draws.",
   "wf.video_brief.output": "Editable motion brief text plus a drawn canvas",
   "wf.frame_tween.title": "In-between",
-  "wf.frame_tween.summary": "Generate tween frames between two existing frames, on this machine.",
+  "wf.frame_tween.summary":
+    "Generate tween frames between two existing frames, on this machine.",
   "wf.frame_tween.output": "New frames inserted before the end frame",
   "wf.prompt_refine.title": "Prompt Refine",
-  "wf.prompt_refine.summary": "Turn a plain sentence into a structured pixel-art prompt you can edit.",
+  "wf.prompt_refine.summary":
+    "Turn a plain sentence into a structured pixel-art prompt you can edit.",
   "wf.prompt_refine.output": "A refined prompt you can send or keep editing",
   "wf.quantize.title": "Quantize",
-  "wf.quantize.summary": "Drop a bitmap onto the grid. Runs on this machine, no model needed.",
+  "wf.quantize.summary":
+    "Drop a bitmap onto the grid. Runs on this machine, no model needed.",
   "wf.quantize.output": "One cel of quantized pixels",
 
-  "outcome.bitmap_landed": "landed on layer {layer} frame {frame} ({colors} colors, {added} new, via {transport})",
-  "outcome.pixelize_landed": "quantized onto layer {layer} frame {frame} ({colors} colors, {added} new)",
-  "outcome.tween_inserted": "{count} frame(s) inserted between {from} and {to} on layer {layer}; {changed} px changed",
-  "outcome.video_landed.ffprobe": "{count} frame(s) from ffmpeg landed on layer {layer} frames {from}-{to}",
-  "outcome.video_landed.directory": "{count} frame(s) from a stills directory landed on layer {layer} frames {from}-{to}",
-  "outcome.video_landed.none": "{count} frame(s) landed on layer {layer} frames {from}-{to}",
-  "outcome.video_skipped.ffprobe": "{count} frame(s) from ffmpeg landed on layer {layer} frames {from}-{to} ({skipped} skipped)",
-  "outcome.video_skipped.directory": "{count} frame(s) from a stills directory landed on layer {layer} frames {from}-{to} ({skipped} skipped)",
-  "outcome.video_skipped.none": "{count} frame(s) landed on layer {layer} frames {from}-{to} ({skipped} skipped)",
+  "outcome.bitmap_landed":
+    "landed on layer {layer} frame {frame} ({colors} colors, {added} new, via {transport})",
+  "outcome.pixelize_landed":
+    "quantized onto layer {layer} frame {frame} ({colors} colors, {added} new)",
+  "outcome.tween_inserted":
+    "{count} frame(s) inserted between {from} and {to} on layer {layer}; {changed} px changed",
+  "outcome.video_landed.ffprobe":
+    "{count} frame(s) from ffmpeg landed on layer {layer} frames {from}-{to}",
+  "outcome.video_landed.directory":
+    "{count} frame(s) from a stills directory landed on layer {layer} frames {from}-{to}",
+  "outcome.video_landed.none":
+    "{count} frame(s) landed on layer {layer} frames {from}-{to}",
+  "outcome.video_skipped.ffprobe":
+    "{count} frame(s) from ffmpeg landed on layer {layer} frames {from}-{to} ({skipped} skipped)",
+  "outcome.video_skipped.directory":
+    "{count} frame(s) from a stills directory landed on layer {layer} frames {from}-{to} ({skipped} skipped)",
+  "outcome.video_skipped.none":
+    "{count} frame(s) landed on layer {layer} frames {from}-{to} ({skipped} skipped)",
   "status.asking_image": "asking the model for an image",
   "status.quantizing": "quantizing the generated image onto the grid",
   "status.reading_frame": "reading frame {index} of {total}",
@@ -838,7 +903,8 @@ export const en: Record<TKey, string> = {
   "store.read_mcp_failed": "could not read the MCP server config: {error}",
   "store.read_sessions_failed": "could not read the session list: {error}",
   "store.no_session": "no session yet",
-  "store.no_model": "No usable model yet. Add a model definition in Settings first.",
+  "store.no_model":
+    "No usable model yet. Add a model definition in Settings first.",
   "store.send_failed": "send failed: {error}",
   "store.interrupt_failed": "interrupt failed: {error}",
   "store.save_mcp_failed": "could not save the MCP server: {error}",
@@ -866,11 +932,13 @@ export const en: Record<TKey, string> = {
 
   // ---------- Batch bench ----------
   "batch.title": "Batch Bench",
-  "batch.blurb": "One folder in, one folder out, entirely on this machine. The same input and the same recipe always yield the same output, so a run can be repeated and versioned.",
+  "batch.blurb":
+    "One folder in, one folder out, entirely on this machine. The same input and the same recipe always yield the same output, so a run can be repeated and versioned.",
   "batch.kind": "Do what",
   "batch.kind.quantize": "Bitmaps to .aip",
   "batch.kind.export": ".aip to images",
-  "batch.kind.quantize.hint": "Reverse every bitmap in the folder into a .aip pixel document.",
+  "batch.kind.quantize.hint":
+    "Reverse every bitmap in the folder into a .aip pixel document.",
   "batch.kind.export.hint": "Render every .aip in the folder to PNG or GIF.",
   "batch.input": "Input folder",
   "batch.output": "Output folder",
@@ -879,7 +947,8 @@ export const en: Record<TKey, string> = {
   "batch.rescan": "Rescan",
   "batch.scan_ready": "{count} matching file(s) found",
   "batch.scan_empty": "No matching files in this folder",
-  "batch.scan_truncated": "Too many files: only the first {count} are listed, run in batches",
+  "batch.scan_truncated":
+    "Too many files: only the first {count} are listed, run in batches",
   "batch.run": "Run batch",
   "batch.running": "Running {done} / {total}",
   "batch.done": "Done: {ok} ok, {skipped} skipped, {failed} failed",
@@ -890,7 +959,8 @@ export const en: Record<TKey, string> = {
   "batch.export_format": "Export format",
   "batch.need_dirs": "Pick the input and output folders first",
   "batch.need_scan": "Scan once to confirm the folder has matching files",
-  "batch.idle": "Pick the folders and scan once, then run. Every file shows up in the list as it is handled.",
+  "batch.idle":
+    "Pick the folders and scan once, then run. Every file shows up in the list as it is handled.",
   "batch.clear": "Clear log",
   "batch.state.ok": "ok",
   "batch.state.skipped": "skipped",
@@ -902,14 +972,18 @@ export const en: Record<TKey, string> = {
   "batch.recipe.save": "Save recipe",
   "batch.recipe.book": "Saved recipes",
   "batch.recipe.pick": "Pick one from the recipe book",
-  "batch.recipe.empty": "No recipes yet. Dial the settings in, name it, save it, and it is there next time.",
-  "batch.recipe.confirm_delete": "Delete \"{name}\"? It is gone from the local recipe book.",
+  "batch.recipe.empty":
+    "No recipes yet. Dial the settings in, name it, save it, and it is there next time.",
+  "batch.recipe.confirm_delete":
+    'Delete "{name}"? It is gone from the local recipe book.',
   "batch.recipe.delete_ok": "Delete",
   "batch.recipe.delete_cancel": "Cancel",
   "batch.recipe.problem.empty": "Give it a name first",
   "batch.recipe.problem.long": "Names are limited to {count} characters",
-  "batch.recipe.problem.chars": "Names cannot contain slashes or control characters",
-  "batch.recipe.problem.full": "Recipe book is full ({count} entries), delete one first",
+  "batch.recipe.problem.chars":
+    "Names cannot contain slashes or control characters",
+  "batch.recipe.problem.full":
+    "Recipe book is full ({count} entries), delete one first",
   "batch.read_recipes_failed": "could not read recipes: {error}",
   "batch.recipe_save_failed": "could not save recipe: {error}",
   "batch.recipe_export_failed": "could not export recipes: {error}",
@@ -917,13 +991,16 @@ export const en: Record<TKey, string> = {
   "batch.recipe_exported": "Exported {count} recipe(s) to {path}",
   "batch.recipe.file": "Recipe file",
   "batch.recipe.file.button": "Import / export",
-  "batch.recipe.file.hint": "Recipes are plain JSON: hand them to anyone, or edit them in any text editor.",
+  "batch.recipe.file.hint":
+    "Recipes are plain JSON: hand them to anyone, or edit them in any text editor.",
   "batch.recipe.export_one": "Export this one",
   "batch.recipe.export_all": "Export the whole book",
   "batch.recipe.import": "Import from .aipr",
-  "batch.recipe.import_note": "Read {count}: {imported} came in, {renamed} renamed, {skipped} skipped",
-  "batch.recipe.import.row.renamed": "\"{name}\" already exists here, saved as \"{final}\"",
-  "batch.recipe.import.row.skipped": "\"{name}\" skipped: {note}",
+  "batch.recipe.import_note":
+    "Read {count}: {imported} came in, {renamed} renamed, {skipped} skipped",
+  "batch.recipe.import.row.renamed":
+    '"{name}" already exists here, saved as "{final}"',
+  "batch.recipe.import.row.skipped": '"{name}" skipped: {note}',
   "batch.recipe_delete_failed": "could not delete recipe: {error}",
 };
 
@@ -943,7 +1020,12 @@ export function translate(lang: Lang, key: TKey, vars?: TVARS): string {
  * Rust 传来的 UiText：键在字典里就按当前语言拼，不在（版本错位）就退回英文后备。
  * 后备总是英文原文，因此字典缺键永远不会把用户扔在一句空话上。
  */
-export function translateText(lang: Lang, key: string, vars: TVARS | undefined, fallback: string): string {
+export function translateText(
+  lang: Lang,
+  key: string,
+  vars: TVARS | undefined,
+  fallback: string,
+): string {
   const dict: Record<string, string> = lang === "zh" ? zh : en;
   const template = dict[key];
   return interpolate(template ?? fallback, vars);

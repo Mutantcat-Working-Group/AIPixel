@@ -21,13 +21,12 @@ pub const DEFAULT_MAX_TOKENS: u32 = crate::limits::FALLBACK_MAX_TOKENS;
 /// `reasoning_content`，否则模型不认这段历史，下一轮会当新问题重想一遍。
 /// 通义千问 QwQ、智谱 GLM 的思考版、Kimi K2 思考版同理。
 /// OpenAI、Anthropic、Gemini 不认这个字段，回传反而会被端点拒掉，所以不放行。
+///
+/// 认模型名走 `limits::resolve_alias`：中转站把 `deepseek-v4.1-flash` 简写成
+/// `deepseek-flash` 时，这条判定也必须跟着认出来。认不出的代价很具体——
+/// 推理历史被丢掉，续写时模型当新问题重想一遍，用户看到的就是通篇重写。
 pub fn echoes_reasoning(model: &str) -> bool {
-    let name = model
-        .rsplit('/')
-        .next()
-        .unwrap_or(model)
-        .trim()
-        .to_lowercase();
+    let name = crate::limits::resolve_alias(model);
     const MARKS: &[&str] = &[
         "deepseek-reasoner",
         "deepseek-r1",
@@ -43,6 +42,89 @@ pub fn echoes_reasoning(model: &str) -> bool {
         "ernie-x1",
     ];
     MARKS.iter().any(|m| crate::limits::name_matches(&name, m))
+}
+
+/// 从 4xx 报错里抠出 provider 允许的输出上限。
+///
+/// 表里的花名认不全，猜大了 provider 会当场拒掉整轮请求。这种错不必让用户手改
+/// 配置：它报的数就是上限，降下来重发一次就好。输出短了也不丢人——runner 的
+/// 续写机制会把几截拼成一条完整回复。
+pub fn token_cap_from_error(err: &ProviderError) -> Option<u32> {
+    let ProviderError::Http { status, body } = err else {
+        return None;
+    };
+    if !(400..500).contains(status) {
+        return None;
+    }
+    let low = body.to_lowercase();
+    // 先确认这是「输出上限」相关的抱怨，再在附近找它允许多少。
+    let (anchor, keyword) = [
+        "max_tokens",
+        "max tokens",
+        "max_completion_tokens",
+        "max_output_tokens",
+        "maxoutputtokens",
+        "output token",
+    ]
+    .iter()
+    .filter_map(|k| low.find(k).map(|at| (at, *k)))
+    .min_by_key(|(at, _)| *at)?;
+    // 只看报错里紧跟其后的那一小段：再往远就是另一段话了。
+    let window: String = low[anchor + keyword.len()..].chars().take(160).collect();
+    // 取最靠前的那句「允许多少」。泛泛地捡窗口里第一个数，捡到的多半是
+    // 我们自己发过去的请求值，等于什么都没问出来。
+    let mut best: Option<(usize, u32)> = None;
+    for phrase in CAP_PHRASES {
+        let Some(at) = window.find(phrase) else {
+            continue;
+        };
+        let Some(n) = first_number(&window[at + phrase.len()..]) else {
+            continue;
+        };
+        if !(MIN_TOKEN_CAP..=MAX_TOKEN_CAP).contains(&n) {
+            continue;
+        }
+        if best.is_none_or(|(pos, _)| at < pos) {
+            best = Some((at, n));
+        }
+    }
+    best.map(|(_, n)| n)
+}
+
+/// 「它允许多少」的常见说法。英文为主，国内中转站的中文报错也见得到。
+const CAP_PHRASES: &[&str] = &[
+    "at most",
+    "no more than",
+    "not exceed",
+    "cannot exceed",
+    "less than or equal",
+    "max allowed",
+    "maximum allowed",
+    "maximum",
+    "allowed is",
+    "allowed value",
+    "limit is",
+    "limit of",
+    "up to",
+    "<=",
+    "上限为",
+    "最大值",
+    "最多",
+    "不超过",
+];
+
+/// 抠出来的数得像个输出上限才算数，不然一条裹着 URL 的报错能把任何数字喂进来。
+const MIN_TOKEN_CAP: u32 = 256;
+const MAX_TOKEN_CAP: u32 = 1_000_000;
+
+/// 窗口里第一段连续数字。
+fn first_number(text: &str) -> Option<u32> {
+    let start = text.find(|c: char| c.is_ascii_digit())?;
+    let digits: String = text[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
 }
 
 pub type EventStream = Pin<Box<dyn Stream<Item = Result<LlmEvent, ProviderError>> + Send>>;
@@ -256,6 +338,10 @@ mod tests {
         ] {
             assert!(echoes_reasoning(model), "{model} 该回传推理内容");
         }
+        // 简名 `deepseek-flash` 也是推理系：认不出的代价是模型当新问题重想一遍。
+        assert!(echoes_reasoning("deepseek-flash"));
+        assert!(echoes_reasoning("deepseek-v4-1-flash"));
+        assert!(echoes_reasoning("deepseek-flash-20260101"));
         // 这些端点不认 reasoning_content，硬塞会被拒掉，或者白丢一半上下文。
         for model in [
             "gpt-4o",
@@ -269,6 +355,70 @@ mod tests {
         ] {
             assert!(!echoes_reasoning(model), "{model} 不该回传推理内容");
         }
+    }
+
+    fn http(status: u16, body: &str) -> ProviderError {
+        ProviderError::Http {
+            status,
+            body: body.into(),
+        }
+    }
+
+    #[test]
+    fn a_provider_that_names_its_ceiling_gets_clamped_to_it() {
+        // 中转站嫌我们给的 max_tokens 太大，顺手告诉我们它允许多少。
+        assert_eq!(
+            token_cap_from_error(&http(
+                400,
+                r#"{"error":{"message":"max_tokens is too large: 65536, maximum allowed is 8192","type":"invalid_request_error"}}"#
+            )),
+            Some(8192)
+        );
+        // 我们自己发过去的那个数不能被误当成上限。
+        assert_eq!(
+            token_cap_from_error(&http(
+                400,
+                "max_tokens must be at most 16384 but 65536 was requested"
+            )),
+            Some(16384)
+        );
+        assert_eq!(
+            token_cap_from_error(&http(400, "max_tokens <= 32768")),
+            Some(32768)
+        );
+        assert_eq!(
+            token_cap_from_error(&http(400, "max_tokens 上限为 32768")),
+            Some(32768)
+        );
+        assert_eq!(
+            token_cap_from_error(&http(400, "supports up to 64000 output tokens")),
+            None,
+            "没提 max_tokens 就不关输出上限的事"
+        );
+    }
+
+    #[test]
+    fn an_unrelated_complaint_says_nothing_about_tokens() {
+        assert_eq!(token_cap_from_error(&http(401, "bad api key")), None);
+        assert_eq!(token_cap_from_error(&http(404, "no such model")), None);
+        assert_eq!(
+            token_cap_from_error(&http(500, "internal error near max_tokens")),
+            None,
+            "5xx 是服务端自己的毛病，跟上限无关"
+        );
+        assert_eq!(
+            token_cap_from_error(&http(400, "max_tokens: invalid")),
+            None,
+            "一句含糊的抱怨里没有可用的数"
+        );
+        assert_eq!(
+            token_cap_from_error(&ProviderError::Network("connection reset".into())),
+            None
+        );
+        assert_eq!(
+            token_cap_from_error(&ProviderError::Config("missing api key".into())),
+            None
+        );
     }
 
     /// 回传与否只看开关：开着才补这个字段，塞错端点是会被整包拒掉的。

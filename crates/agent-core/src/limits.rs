@@ -6,12 +6,24 @@
 //!
 //! 匹配只看裸模型名最后一段：`openai/gpt-4o`、`accounts/fireworks/models/claude-sonnet-4-5`
 //! 都是常见写法。分隔符必须是 `-` 或到头，不然 `gpt-4.1` 会被 `gpt-4` 抢走。
+//!
+//! 同一个模型在不同平台上的马甲也归这里管：先 `canonical_name` 抹平 `.` `_` `-`
+//! 的手滑，再照 `ALIASES` 认那几个省掉版本号的简名。认不出的代价不只是上限填错——
+//! `providers::echoes_reasoning` 会把它判成非推理模型，推理历史一丢，模型下一轮
+//! 就把整个问题重新想一遍。那正是「每次续写都是重写」的病根。
 
 /// 表里查不到这个模型时的默认输出上限。
 ///
 /// 取 32768 而不是 8192：现在连小模型都普遍支持到 32k 以上，给少了用户只会
 /// 看到半截代码。用户显式填过的值永远优先，这里只兜底。
 pub const FALLBACK_MAX_TOKENS: u32 = 32768;
+
+/// 同一个模型在不同平台上的简名。左边是别名叫，右边是表里的正式名。
+///
+/// 平台之间从来不商量命名：官方叫 `deepseek-v4.1-flash`，中转站可能写成
+/// `deepseek-v4-1-flash`（分隔符手滑），也可能干脆只留 `deepseek-flash`
+/// （版本整段省掉）。前一种 `canonical_name` 就能对上，后一种只能照表认亲。
+const ALIASES: &[(&str, &str)] = &[("deepseek-flash", "deepseek-v4.1-flash")];
 
 /// 一条对照记录：模型名前缀 + 常用输出上限。
 struct Limit {
@@ -328,7 +340,7 @@ fn bare_name(model: &str) -> &str {
 ///
 /// 长 pattern 优先匹配，避免 `gpt-4o-mini` 输给 `gpt-4o`。
 pub fn ceiling_for(model: &str) -> u32 {
-    let name = bare_name(model).to_lowercase();
+    let name = resolve_alias(model);
     if name.is_empty() {
         return FALLBACK_MAX_TOKENS;
     }
@@ -350,26 +362,66 @@ pub fn ceiling_for(model: &str) -> u32 {
     best.map(|b| b.max_tokens).unwrap_or(FALLBACK_MAX_TOKENS)
 }
 
+/// 归一到可以比较的形式：剥掉厂商路径前缀、小写，`.` 和 `_` 都换成 `-`。
+///
+/// `deepseek-v4.1-flash`、`deepseek-v4-1-flash`、`DeepSeek_V4.1_Flash` 是同一个
+/// 东西，分开记三条就等着漏。归一之后分隔符只剩 `-`，前缀匹配也只需要考虑
+/// 一种边界。
+pub fn canonical_name(model: &str) -> String {
+    let bare = bare_name(model);
+    let mut out = String::with_capacity(bare.len());
+    for ch in bare.chars() {
+        match ch {
+            '.' | '_' => out.push('-'),
+            other => out.extend(other.to_lowercase()),
+        }
+    }
+    out
+}
+
+/// 认过别名再交表：同一个模型换几个马甲也查到同一份上限。
+pub fn resolve_alias(model: &str) -> String {
+    let canonical = canonical_name(model);
+    for (alias, target) in ALIASES {
+        let alias = canonical_name(alias);
+        let rest = if canonical == alias {
+            Some("")
+        } else {
+            canonical
+                .strip_prefix(alias.as_str())
+                .and_then(|r| r.strip_prefix('-'))
+        };
+        if let Some(rest) = rest {
+            let target = canonical_name(target);
+            // 简名后面挂着日期之类的后缀时，把后缀一起搬过去：
+            // `deepseek-flash-20260101` 该变成 `deepseek-v4-1-flash-20260101`。
+            return if rest.is_empty() {
+                target
+            } else {
+                format!("{target}-{rest}")
+            };
+        }
+    }
+    canonical
+}
+
 /// 模型名算不算这个 pattern 的自家人：名字相同，或者跟着分隔符往后接版本号。
 ///
-/// `-` 和 `.` 都算：`deepseek-v4` 该认下 `deepseek-v4.1-flash`，否则用户手里的
-/// 新版本只差一个小数点就查不到自己的上限了。分隔符不能省——`gpt-4` 不能抢走
-/// `gpt-4o`，`qwen` 也不能抢走 `qwen2.5`。
+/// 入参会先过 `canonical_name`：`-` 和 `.` 都当分隔符，所以 `deepseek-v4` 认得下
+/// `deepseek-v4.1-flash`，也认得下手滑写成 `deepseek-v4-1-flash` 的那个。分隔符
+/// 不能省——`gpt-4` 不能抢走 `gpt-4o`，`qwen` 也不能抢走 `qwen2.5`。
 pub(crate) fn name_matches(name: &str, pattern: &str) -> bool {
-    let name = name.trim().to_lowercase();
-    let pattern = pattern.trim().to_lowercase();
+    let name = canonical_name(name);
+    let pattern = canonical_name(pattern);
     if pattern.is_empty() {
         return false;
     }
     if name == pattern {
         return true;
     }
-    for sep in ['-', '.'] {
-        if name.strip_prefix(&format!("{pattern}{sep}")).is_some() {
-            return true;
-        }
-    }
-    false
+    // 归一之后只剩 `-` 一种分隔符：跟着它往后接的才算自家人。
+    name.strip_prefix(pattern.as_str())
+        .is_some_and(|rest| rest.starts_with('-'))
 }
 
 #[cfg(test)]
@@ -416,12 +468,40 @@ mod tests {
     fn a_dotted_variant_still_counts_as_the_same_family() {
         assert!(name_matches("deepseek-v4.1-flash", "deepseek-v4"));
         assert!(name_matches("glm-4.5-air", "glm-4.5"));
+        // 分隔符手滑也认：`.` 和 `-` 混着写不该换个上限。
+        assert!(name_matches("deepseek-v4-1-flash", "deepseek-v4"));
+        assert!(name_matches("deepseek_v4.1_flash", "deepseek-v4"));
         // 但分隔符不能省：gpt-4 不能顺着 qwen2.5 摸过去。
         assert!(!name_matches("gpt-4o", "gpt-4"));
         assert!(!name_matches("qwen2.5", "qwen"));
         assert!(!name_matches("gpt-4o", "gpt-4o-mini"), "短的认不下长的");
         assert!(!name_matches("", "gpt-4"));
         assert!(!name_matches("gpt-4", ""), "空 pattern 谁都不认");
+    }
+
+    /// 同一个 flash 的三种写法必须拿到同一份上限、同一个推理判定。
+    /// 这是用户手里真实存在的情况：同一个模型，三个平台三个叫法。
+    #[test]
+    fn one_model_written_three_ways_resolves_alike() {
+        for name in [
+            "deepseek-v4.1-flash",
+            "deepseek-v4-1-flash",
+            "DeepSeek-V4-1-Flash",
+            "vendor/models/deepseek_v4.1_flash",
+            "deepseek-flash",
+        ] {
+            assert_eq!(ceiling_for(name), 65536, "{name} 该拿到 65536 的上限");
+            assert_eq!(resolve_alias(name), resolve_alias("deepseek-v4.1-flash"));
+        }
+        // 简名认到别的型号头上不算本事，得认准自家那一支。
+        assert_eq!(resolve_alias("deepseek-flash"), "deepseek-v4-1-flash");
+    }
+
+    #[test]
+    fn an_unknown_short_name_is_left_alone() {
+        // 没登记的简名不硬猜，原样交表，查不到就回落。
+        assert_eq!(resolve_alias("deepseek-pro"), "deepseek-pro");
+        assert_eq!(ceiling_for("deepseek-pro"), FALLBACK_MAX_TOKENS);
     }
 
     #[test]

@@ -7,8 +7,12 @@
  *
  * 只有前缀匹配：模型名后面常挂日期（claude-sonnet-4-5-20250929）、常带厂商前缀
  * （openai/gpt-4o、accounts/fireworks/models/...），把最后一段 `/` 之后的名字拿出来比。
- * 分隔符必须是 `-` 或 `.`：`deepseek-v4` 得认下 `deepseek-v4.1-flash`，不然用户手里
- * 最新那个型号只差一个小数点就查不到自己的上限了。
+ * 名字先归一再比，`-` `.` `_` 三种分隔符一视同仁：`deepseek-v4` 得认下
+ * `deepseek-v4.1-flash`，不然用户手里最新那个型号只差一个小数点就查不到上限了。
+ *
+ * 同一个模型在不同平台上的马甲也归这里管，见 `ALIASES`。认不出的代价不只是上限填错：
+ * Rust 侧 `providers::echoes_reasoning` 会把它判成非推理模型，推理历史一丢，续写时
+ * 模型当新问题重想一遍，用户看到的就是通篇重写。
  */
 
 /** 表里没有这个模型时的默认值，必须和 Rust 侧的 FALLBACK_MAX_TOKENS 保持一致。
@@ -102,32 +106,68 @@ const LIMITS: { pattern: string; max_tokens: number }[] = [
   { pattern: "llama-3.1", max_tokens: 32768 },
 ];
 
-/** 长模式排前面：gpt-4o-mini 不能输给 gpt-4o，claude-3-5-sonnet 不能输给 claude-3-opus。 */
-const SORTED = [...LIMITS].sort((a, b) => b.pattern.length - a.pattern.length);
-
-/** 名字算这个 pattern 的自家人吗：名字相同，或者跟着分隔符往后接版本号。
+/** 同一个模型在不同平台上的简名。左边是别名叫，右边是表里的正式名。
  *
- * `-` 和 `.` 都算。分隔符不能省——`gpt-4` 不能抢走 `gpt-4o`，`qwen` 也不能抢走 `qwen2.5`。
- * 与 Rust 侧 `limits::name_matches` 同一套规则。
+ * 平台之间从来不商量命名：官方叫 `deepseek-v4.1-flash`，中转站可能写成
+ * `deepseek-v4-1-flash`（归一就能对上），也可能干脆只留 `deepseek-flash`
+ * （版本整段省掉）。和 Rust 侧 `limits::ALIASES` 必须是同一份名单，两边各改一处
+ * 就会一个填上限一个不填。
  */
-function nameMatches(name: string, pattern: string): boolean {
-  if (!pattern) return false;
-  if (name === pattern) return true;
-  return name.startsWith(`${pattern}-`) || name.startsWith(`${pattern}.`);
-}
+const ALIASES: { alias: string; target: string }[] = [
+  { alias: "deepseek-flash", target: "deepseek-v4.1-flash" },
+];
 
-/** 剥掉 `vendor/` 一类的路径前缀，只留模型本名。 */
-function bareName(model: string): string {
+/** 归一到可以比较的形式：剥掉厂商路径前缀、小写，`.` 和 `_` 都换成 `-`。
+ *
+ * `deepseek-v4.1-flash`、`deepseek-v4-1-flash`、`DeepSeek_V4.1_Flash` 是同一个东西，
+ * 分开记三条就等着漏。归一之后分隔符只剩 `-`，前缀匹配也只需要考虑一种边界。
+ * 与 Rust 侧 `limits::canonical_name` 同一套规则。
+ */
+function canonicalName(model: string): string {
   const tail = model.split("/").pop() ?? model;
-  return tail.trim().toLowerCase();
+  return tail.trim().toLowerCase().replace(/[._]/g, "-");
 }
 
-/** 表里查得到就返回常用上限，查不到返回 null（调用方决定回落）。 */
+/** 认过别名再交表：同一个模型换几个马甲也查到同一份上限。
+ *
+ * 简名后面挂着日期之类的后缀时，把后缀一起搬过去：
+ * `deepseek-flash-20260101` 该变成 `deepseek-v4-1-flash-20260101`。
+ * 与 Rust 侧 `limits::resolve_alias` 同一套规则。
+ */
+export function resolveAlias(model: string): string {
+  const name = canonicalName(model);
+  for (const { alias, target } of ALIASES) {
+    const rest =
+      name === alias
+        ? ""
+        : name.startsWith(`${alias}-`)
+          ? name.slice(alias.length + 1)
+          : null;
+    if (rest === null) continue;
+    const full = canonicalName(target);
+    return rest ? `${full}-${rest}` : full;
+  }
+  return name;
+}
+
+/** 表里查得到就返回常用上限，查不到返回 null（调用方决定回落）。
+ *
+ * 命中的最长者赢，跟表里的书写顺序无关：`gpt-4o-mini` 不能输给 `gpt-4o`，
+ * `claude-3-5-sonnet` 也不能输给 `claude-3-opus`。与 Rust 侧 `ceiling_for` 同规则。
+ */
 export function maxTokensHint(model: string): number | null {
-  const name = bareName(model);
+  const name = resolveAlias(model);
   if (!name) return null;
-  const hit = SORTED.find((row) => nameMatches(name, row.pattern));
-  return hit ? hit.max_tokens : null;
+  let best: { len: number; tokens: number } | null = null;
+  for (const row of LIMITS) {
+    const pattern = canonicalName(row.pattern);
+    if (!pattern) continue;
+    if (name !== pattern && !name.startsWith(`${pattern}-`)) continue;
+    if (!best || pattern.length > best.len) {
+      best = { len: pattern.length, tokens: row.max_tokens };
+    }
+  }
+  return best ? best.tokens : null;
 }
 
 /** 设界面直接要的数：表里有就用表里的，没有就 8192。 */
