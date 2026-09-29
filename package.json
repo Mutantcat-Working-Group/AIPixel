@@ -1,7 +1,7 @@
 {
   "name": "aipixel",
   "private": true,
-  "version": "1.0.20261004",
+  "version": "1.0.20261005",
   "type": "module",
   "scripts": {
     "dev": "vite",
