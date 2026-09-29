@@ -1133,7 +1133,12 @@ impl AgentSession {
     /// 组装一轮请求。抽出来是因为重试和续写都要重新发一次请求：
     /// 历史每条消息都锁一次会碎，合成一次才看得出「这一轮到底发了什么」。
     /// 锁顺序固定为 document -> active -> messages，全程一致，不会自锁。
-    fn chat_request(&self, cfg: &RunnerConfig, ceiling: Option<u32>, disable_thinking: bool) -> ChatRequest {
+    fn chat_request(
+        &self,
+        cfg: &RunnerConfig,
+        ceiling: Option<u32>,
+        disable_thinking: bool,
+    ) -> ChatRequest {
         let doc = self.document.lock().unwrap();
         let active = self.active.lock().unwrap();
         let engine = self.engine.lock().unwrap();
@@ -2239,7 +2244,8 @@ mod tests {
             "第一发照模型默认来，翻盘后那发才带关思考",
         );
         assert!(
-            flow.statuses.contains(&"agent.thinking_off_retry".to_string()),
+            flow.statuses
+                .contains(&"agent.thinking_off_retry".to_string()),
             "用户该知道我们关了思考：{:?}",
             flow.statuses,
         );
@@ -2260,7 +2266,9 @@ mod tests {
 
         assert_eq!(watched.seen.lock().unwrap().as_slice(), &[true]);
         assert!(
-            !flow.statuses.contains(&"agent.thinking_off_retry".to_string()),
+            !flow
+                .statuses
+                .contains(&"agent.thinking_off_retry".to_string()),
             "用户自己选的不该再弹状态条：{:?}",
             flow.statuses,
         );
