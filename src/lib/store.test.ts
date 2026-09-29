@@ -936,3 +936,66 @@ describe("静默提醒（模型半天不吭声）", () => {
     }
   });
 });
+
+describe("回合只由它自己结束，侧道失败不陪葬", () => {
+  afterEach(() => {
+    delete invokeErrors["document_png_url"];
+    delete invokeErrors["editor_paint_stroke"];
+    delete invokeErrors["agent_set_active"];
+  });
+
+  /** 一个还在跑的回合，末尾挂着占位节点：模型那半截话没说完。 */
+  function liveTurn() {
+    useStore.setState({
+      activeId: "doc-01",
+      document: seedDocument(),
+      frameIndex: 0,
+      revision: 7,
+      pngRevision: 7,
+      active: { layer: "L0", frame: "F0", color: null },
+      lang: "zh",
+      entries: [{ key: "p-live", kind: "pending", thinking: true }],
+      notice: null,
+      running: true,
+      runStartedAt: Date.now(),
+      stalled: false,
+    });
+  }
+
+  it("模型画画途中渲染失败：报警，但回合照跑、占位节点照闪", async () => {
+    liveTurn();
+    invokeErrors["document_png_url"] = "webview gone";
+    await useStore.getState().refreshPng();
+
+    const state = useStore.getState();
+    expect(state.running).toBe(true);
+    expect(state.runStartedAt).not.toBeNull();
+    // 没封口：光标接着闪，用户才知道模型还在画。
+    expect(state.entries.some((e) => e.kind === "pending")).toBe(true);
+    expect(state.notice?.isError).toBe(true);
+    expect(state.notice?.text).toContain("渲染画布失败");
+  });
+
+  it("用户落笔失败也只报警：画崩了不关模型那一回合的事", async () => {
+    liveTurn();
+    invokeErrors["editor_paint_stroke"] = "cel locked";
+    await useStore.getState().paintStroke([{ x: 1, y: 2 }], null);
+
+    const state = useStore.getState();
+    expect(state.running).toBe(true);
+    expect(state.entries.some((e) => e.kind === "pending")).toBe(true);
+    expect(state.notice?.isError).toBe(true);
+  });
+
+  it("选中项回传失败只嘟囔一声，切层本身照样切过来", async () => {
+    liveTurn();
+    invokeErrors["agent_set_active"] = "session gone";
+    await useStore.getState().setActiveLayer("L1");
+
+    const state = useStore.getState();
+    expect(state.active.layer).toBe("L1");
+    expect(state.running).toBe(true);
+    expect(state.notice?.isError).toBe(true);
+    expect(state.notice?.text).toContain("同步选中项失败");
+  });
+});

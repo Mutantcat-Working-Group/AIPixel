@@ -544,7 +544,13 @@ function pushUndo(stack: PixelDocument[], doc: PixelDocument): PixelDocument[] {
 }
 
 export const useStore = create<StoreState & StoreActions>()((setState, getState) => {
-  /** 键控失败：措辞跟着当前界面语言走，Rust 的原文当 {error} 追在后面。 */
+  /**
+   * 回合级失败：发通知、封口占位节点、把 running 收掉。
+   *
+   * 只有「这一回合确实走不下去」时才走这里——目前就是发送入口那两处：没会话可发、
+   * 消息没能递到 agent。其余一律走 flagKey。
+   * 措辞跟着当前界面语言走，Rust 的原文当 {error} 追在后面。
+   */
   function failKey(key: TKey, vars?: TVARS) {
     // 发出去的那一句可能还挂着占位节点（思考节点 / 「在处理」）。收尾时
     // 不封口的话，一个跑不起来的回合会在对话里留一枚一直闪的光标，
@@ -562,6 +568,31 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       running: false,
       runStartedAt: null,
       runElapsedMs: elapsed,
+    });
+  }
+
+  /**
+   * 侧道失败：只发一条红色通知，不封口、不动 running。
+   *
+   * 渲染刷新、侧栏改名、落笔、存盘、MCP 这一路动作随时可能在模型画画的途中失败
+   * （多数由用户点出来，也可能由 document_updated 带出来）。这些失败跟这一回合能不
+   * 不能继续没有关系，绝不能把 running 一起收掉——否则一个好好活着的回合会被误判成
+   * 结束：占位节点封口、光标停闪，用户以为模型已经答完。
+   * 回合的生死只由 agent 事件（completed / error / interrupted）和发送入口决定。
+   */
+  function flagKey(key: TKey, vars?: TVARS) {
+    setState({ notice: { text: translate(getState().lang, key, vars), isError: true } });
+  }
+
+  /**
+   * 把界面上的选中项回传后端。失败只嘟囔一声，不往外抛。
+   *
+   * 这一下失败意味着模型的下一步编辑会落在旧的选中上，值得让用户知道；但它跟回合
+   * 死活无关，也不该把调用方（切层、选帧、document_updated 的收尾）一起带垮。
+   */
+  function syncActive(id: string, active: ActiveContext) {
+    bridge.setActive(id, active).catch((error) => {
+      flagKey("store.set_active_failed", { error: String(error) });
     });
   }
 
@@ -633,7 +664,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     setState({ ...next, active });
     if (activeChanged) {
       const id = getState().activeId;
-      if (id) void bridge.setActive(id, active);
+      if (id) syncActive(id, active);
     }
     void getState().refreshPng();
   }
@@ -742,7 +773,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       color: getState().active.color ?? defaultInkHex(snapshot.document, firstLayer),
     };
     setState({ active });
-    await bridge.setActive(id, active);
+    syncActive(id, active);
     await getState().refreshPng();
     await getState().refreshWorkflows();
   }
@@ -806,7 +837,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
 
     boot: async () => {
       if (booting) return booting;
-      booting = (async () => {
+      const attempt = (async () => {
         // 配方簿和批量通道一样与会话无关：开机读回来，用户随时能从簿子里挑一条。
         await getState().loadRecipes();
         await ensureListener();
@@ -816,7 +847,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         try {
           models = await bridge.listModels();
         } catch (error) {
-          failKey("store.read_models_failed", { error: String(error) });
+          flagKey("store.read_models_failed", { error: String(error) });
           models = EMPTY_MODELS;
         }
         setState({ models });
@@ -826,7 +857,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         try {
           mcpServers = await bridge.listMcpServers();
         } catch (error) {
-          failKey("store.read_mcp_failed", { error: String(error) });
+          flagKey("store.read_mcp_failed", { error: String(error) });
           mcpServers = EMPTY_MCP;
         }
         setState({ mcpServers });
@@ -834,7 +865,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         try {
           sessions = await bridge.listSessions();
         } catch (error) {
-          failKey("store.read_sessions_failed", { error: String(error) });
+          flagKey("store.read_sessions_failed", { error: String(error) });
         }
         if (sessions.length === 0) {
           const created = await bridge.createSession();
@@ -848,6 +879,13 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         }
         setState({ booted: true });
       })();
+      booting = attempt;
+      // 启动失败不能把这次尝试记成永久结论：一次文档读取抽风之后，若还挂着这个
+      // reject，后面每次 boot() 都拿到同一张判死刑的票，界面永远停在未就绪。
+      // 这期间若又有人重新 boot，别把新的那次一起作废。
+      attempt.catch(() => {
+        if (booting === attempt) booting = null;
+      });
       return booting;
     },
 
@@ -998,7 +1036,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       try {
         await bridge.interrupt(id);
       } catch (error) {
-        failKey("store.interrupt_failed", { error: String(error) });
+        flagKey("store.interrupt_failed", { error: String(error) });
       }
     },
 
@@ -1042,7 +1080,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       try {
         setState({ loopLimits: await bridge.setLoopLimits(next) });
       } catch (error) {
-        failKey("store.save_limits_failed", { error: String(error) });
+        flagKey("store.save_limits_failed", { error: String(error) });
         await getState().refreshLoopLimits();
       }
     },
@@ -1053,7 +1091,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       try {
         setState({ mcpServers: await bridge.listMcpServers() });
       } catch (error) {
-        failKey("store.read_mcp_failed", { error: String(error) });
+        flagKey("store.read_mcp_failed", { error: String(error) });
       }
     },
 
@@ -1074,7 +1112,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         // 回值才算生效：Rust 可能拒掉（比如磁盘写不进去），界面上要跟着回值走。
         setState({ mcpEnabled: await bridge.setMcpEnabled(enabled) });
       } catch (error) {
-        failKey("store.set_mcp_enabled_failed", { error: String(error) });
+        flagKey("store.set_mcp_enabled_failed", { error: String(error) });
         await getState().refreshMcpEnabled();
       }
     },
@@ -1092,7 +1130,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
           ),
         });
       } catch (error) {
-        failKey("store.rename_session_failed", { error: String(error) });
+        flagKey("store.rename_session_failed", { error: String(error) });
       }
     },
 
@@ -1109,7 +1147,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       try {
         await bridge.reorderSessions(ids);
       } catch (error) {
-        failKey("store.reorder_sessions_failed", { error: String(error) });
+        flagKey("store.reorder_sessions_failed", { error: String(error) });
       }
       await getState().refreshSessions();
     },
@@ -1119,7 +1157,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       try {
         setState({ mcpServers: await bridge.upsertMcpServer(config) });
       } catch (error) {
-        failKey("store.save_mcp_failed", { error: String(error) });
+        flagKey("store.save_mcp_failed", { error: String(error) });
       } finally {
         setState({ mcpBusy: false });
       }
@@ -1130,7 +1168,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       try {
         setState({ mcpServers: await bridge.removeMcpServer(name) });
       } catch (error) {
-        failKey("store.remove_mcp_failed", { error: String(error) });
+        flagKey("store.remove_mcp_failed", { error: String(error) });
       } finally {
         setState({ mcpBusy: false });
       }
@@ -1143,7 +1181,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       } catch (error) {
         // 失败原因由 Rust 带回视图；这里只负责把视图刷出来让用户看见。
         setState({ mcpServers: await bridge.listMcpServers() });
-        failKey("store.connect_mcp_failed", { error: String(error) });
+        flagKey("store.connect_mcp_failed", { error: String(error) });
       } finally {
         setState({ mcpBusy: false });
       }
@@ -1154,7 +1192,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       try {
         setState({ mcpServers: await bridge.disconnectMcpServer(name) });
       } catch (error) {
-        failKey("store.disconnect_mcp_failed", { error: String(error) });
+        flagKey("store.disconnect_mcp_failed", { error: String(error) });
       } finally {
         setState({ mcpBusy: false });
       }
@@ -1174,7 +1212,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
             previewUrl: dataUrl(attachment.media_type, attachment.data_base64),
           });
         } catch (error) {
-          failKey("store.read_image_failed", { name: baseName(path), error: String(error) });
+          flagKey("store.read_image_failed", { name: baseName(path), error: String(error) });
         }
       }
       if (pending.length > 0) setState({ attachments: [...getState().attachments, ...pending] });
@@ -1189,7 +1227,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         const url = await bridge.pngUrl(id, getState().frameIndex);
         const { mediaType, data } = stripDataUrl(url);
         if (!data) {
-          failKey("store.empty_snapshot");
+          flagKey("store.empty_snapshot");
           return;
         }
        snapshotSeq += 1;
@@ -1207,7 +1245,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
           ],
         });
       } catch (error) {
-        failKey("store.snapshot_failed", { error: String(error) });
+        flagKey("store.snapshot_failed", { error: String(error) });
       }
     },
 
@@ -1227,7 +1265,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         color: inkForLayer(getState().document, layerId, getState().active.color),
       };
       setState({ active });
-      void bridge.setActive(id, active);
+      syncActive(id, active);
     },
 
     setActiveFrame: (index) => {
@@ -1238,7 +1276,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       if (!frame) return;
       const active = { ...getState().active, frame: frame.id };
       setState({ active, frameIndex: index });
-      void bridge.setActive(id, active);
+      syncActive(id, active);
       void getState().refreshPng();
     },
 
@@ -1247,7 +1285,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       if (!id) return;
       const active = { ...getState().active, color };
       setState({ active });
-      void bridge.setActive(id, active);
+      syncActive(id, active);
     },
 
     refreshDocument: async () => {
@@ -1268,7 +1306,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         const url = await bridge.pngUrl(id, frameIndex);
         if (getState().revision === requested) setState({ pngUrl: url });
       } catch (error) {
-        failKey("store.render_failed", { error: String(error) });
+        flagKey("store.render_failed", { error: String(error) });
       }
     },
 
@@ -1284,7 +1322,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       noteKey("store.loaded", { name: baseName(path) });
         await getState().refreshDocument();
       } catch (error) {
-        failKey("store.open_aip_failed", { error: String(error) });
+        flagKey("store.open_aip_failed", { error: String(error) });
       } finally {
         setState({ busy: false });
       }
@@ -1298,7 +1336,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         await bridge.aipSave(id, path);
         noteKey("store.saved", { name: baseName(path) });
       } catch (error) {
-        failKey("store.save_failed", { error: String(error) });
+        flagKey("store.save_failed", { error: String(error) });
       } finally {
         setState({ busy: false });
       }
@@ -1312,7 +1350,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         await bridge.documentExport(id, format, path, options);
         noteKey("store.exported", { name: baseName(path) });
       } catch (error) {
-        failKey("store.export_failed", { error: String(error) });
+        flagKey("store.export_failed", { error: String(error) });
       } finally {
         setState({ busy: false });
       }
@@ -1324,14 +1362,13 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       try {
         return await bridge.aipText(id);
       } catch (error) {
-        failKey("store.read_aip_failed", { error: String(error) });
+        flagKey("store.read_aip_failed", { error: String(error) });
         return null;
       }
     },
 
     clearNotice: () => setState({ notice: null }),
-    warnKey: (key, vars) =>
-      setState({ notice: { text: translate(getState().lang, key, vars), isError: true } }),
+    warnKey: flagKey,
 
     setLang: (lang) => {
       try {
@@ -1371,7 +1408,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     runWorkflow: async (kind, params) => {
       const id = getState().activeId;
       if (!id) {
-        failKey("store.no_session");
+        flagKey("store.no_session");
         return null;
       }
       setState({ workflowBusy: true, outcomeError: null });
@@ -1399,7 +1436,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     runPixelize: async (params) => {
       const id = getState().activeId;
       if (!id) {
-        failKey("store.no_session");
+        flagKey("store.no_session");
         return null;
       }
       setState({ workflowBusy: true, outcomeError: null });
@@ -1427,11 +1464,11 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     refinePrompt: async (idea) => {
       const id = getState().activeId;
       if (!id) {
-        failKey("store.no_session");
+        flagKey("store.no_session");
         return;
       }
       if (idea.trim() === "") {
-        failKey("store.refine_empty");
+        flagKey("store.refine_empty");
         return;
       }
       setState({ workflowBusy: true, outcomeError: null, refined: null });
@@ -1455,7 +1492,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     briefReference: async (path) => {
       const id = getState().activeId;
       if (!id) {
-        failKey("store.no_session");
+        flagKey("store.no_session");
         return;
       }
       setState({ workflowBusy: true, outcomeError: null, vision: null });
@@ -1472,7 +1509,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     briefVideo: async (path, count) => {
       const id = getState().activeId;
       if (!id) {
-        failKey("store.no_session");
+        flagKey("store.no_session");
         return;
       }
       setState({ workflowBusy: true, outcomeError: null, videoBrief: null });
@@ -1546,7 +1583,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         await bridge.resolveApproval(id, pending.callId, decision);
       } catch (error) {
         // 多半是这一轮已经翻页（新一轮开始 / 被中断），票自然作废，不是死锁。
-        failKey("store.approval_failed", { error: String(error) });
+        flagKey("store.approval_failed", { error: String(error) });
       }
     },
 
@@ -1566,7 +1603,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         });
       } catch (error) {
         disarmUndoCapture();
-        failKey("store.paint_failed", { error: String(error) });
+        flagKey("store.paint_failed", { error: String(error) });
       }
     },
 
@@ -1586,7 +1623,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         );
       } catch (error) {
         disarmUndoCapture();
-        failKey("store.fill_failed", { error: String(error) });
+        flagKey("store.fill_failed", { error: String(error) });
       }
     },
 
@@ -1601,7 +1638,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       } catch (error) {
         setState({ pendingFrameIndex: null });
         disarmUndoCapture();
-        failKey("store.edit_failed", { error: String(error) });
+        flagKey("store.edit_failed", { error: String(error) });
         return null;
       }
     },
@@ -1799,7 +1836,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         });
         await getState().refreshPng();
       } catch (error) {
-        failKey("store.undo_failed", { error: String(error) });
+        flagKey("store.undo_failed", { error: String(error) });
       }
     },
 
@@ -1833,7 +1870,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     scanBatchInput: async () => {
       const { recipe } = getState();
       if (recipe.input_dir.trim() === "") {
-        failKey("batch.need_dirs");
+        flagKey("batch.need_dirs");
         return;
       }
       setState({ scanBusy: true });
@@ -1843,7 +1880,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         setState({ scan, run: EMPTY_BATCH_RUN });
       } catch (error) {
         setState({ scan: null });
-        failKey("batch.scan_failed", { error: String(error) });
+        flagKey("batch.scan_failed", { error: String(error) });
       } finally {
         setState({ scanBusy: false });
       }
@@ -1852,11 +1889,11 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     runBatch: async () => {
       const { recipe, scan, run } = getState();
       if (recipe.input_dir.trim() === "" || recipe.output_dir.trim() === "") {
-        failKey("batch.need_dirs");
+        flagKey("batch.need_dirs");
         return;
       }
       if (!scan || !scanMatchesKind(scan, recipe.kind) || !canRunBatch(scan, run)) {
-        failKey("batch.need_scan");
+        flagKey("batch.need_scan");
         return;
       }
       // 命令即刻返回、事件随后才来；先把按钮转上，免得连点开出两趟互踩。
@@ -1865,7 +1902,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         await bridge.runBatch(recipe);
       } catch (error) {
         setState({ run: { ...EMPTY_BATCH_RUN, error: String(error) } });
-        failKey("batch.run_failed", { error: String(error) });
+        flagKey("batch.run_failed", { error: String(error) });
       }
     },
 
@@ -1878,7 +1915,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       } catch (error) {
         // 配方簿是锦上添花：读不到就是没有，别为它弹错误。
         setState({ recipeBook: [] });
-        failKey("batch.read_recipes_failed", { error: String(error) });
+        flagKey("batch.read_recipes_failed", { error: String(error) });
       }
     },
 
@@ -1893,7 +1930,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         // 清空名字而不是留住它：簿子里新出现的这一条就是「存好了」的确认。
         setState({ recipeBook: await bridge.listBatchRecipes(), recipeName: "" });
       } catch (error) {
-        failKey("batch.recipe_save_failed", { error: String(error) });
+        flagKey("batch.recipe_save_failed", { error: String(error) });
       } finally {
         setState({ recipeBusy: false });
       }
@@ -1918,7 +1955,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         // 删的正是当前这条，就把输入框一起清掉，免得名字还在、条目没了。
         setState({ recipeBook, recipeName: getState().recipeName === name ? "" : getState().recipeName });
       } catch (error) {
-        failKey("batch.recipe_delete_failed", { error: String(error) });
+        flagKey("batch.recipe_delete_failed", { error: String(error) });
       }
     },
 
@@ -1929,7 +1966,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         const written = await bridge.exportBatchRecipes(entries, path);
         noteKey("batch.recipe_exported", { count: entries.length, path: written });
       } catch (error) {
-        failKey("batch.recipe_export_failed", { error: String(error) });
+        flagKey("batch.recipe_export_failed", { error: String(error) });
       } finally {
         setState({ recipeBusy: false });
       }
@@ -1943,7 +1980,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         setState({ recipeBook: report.entries, recipeImport: report });
       } catch (error) {
         setState({ recipeImport: null });
-        failKey("batch.recipe_import_failed", { error: String(error) });
+        flagKey("batch.recipe_import_failed", { error: String(error) });
       } finally {
         setState({ recipeBusy: false });
       }
