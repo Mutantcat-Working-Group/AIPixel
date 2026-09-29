@@ -2,6 +2,7 @@
 //! 规则按本项目自己的 craft 约束组织，编码约定对齐我们自己的 RLE（`<count><symbol>`，`.` 透明）。
 
 use super::models::ActiveContext;
+use super::{colornames, glossary};
 use pixel_core::context;
 
 /// 静态部分：工作流 + 像素/动画 craft + 编码规则。
@@ -65,6 +66,12 @@ pub fn build_system_prompt(
 ) -> String {
     let mut out = String::new();
     out.push_str(SYSTEM_CRAFT);
+    // 两张对照表跟在规则后面：模型先学怎么画，再学「用户嘴里说的那个东西叫什么」。
+    // 颜色名表决定用户说「蓝」时落到哪个 hex，术语表决定用户说「勾线」时去搜什么。
+    out.push('\n');
+    out.push_str(&colornames::prompt_table());
+    out.push('\n');
+    out.push_str(&glossary::prompt_table());
     out.push_str("\n\nCurrent canvas context:\n");
     out.push_str(&context::system_context(
         doc,

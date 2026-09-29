@@ -55,6 +55,8 @@ pub fn run() {
             commands::session_create,
             commands::session_drop,
             commands::session_list,
+            commands::session_rename,
+            commands::session_reorder,
             workflow::prompt_refine,
             workflow::video_probe,
             workflow::video_brief,

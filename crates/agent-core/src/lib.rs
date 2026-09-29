@@ -10,6 +10,8 @@
 //! 前后端边界：本 crate 只做纯 Rust，不依赖 Tauri。UI 通过一个 `tokio::sync::mpsc` 通道接收
 //! `AgentEvent`，由上层（src-tauri）转成 Tauri 事件广播。
 
+pub mod colornames;
+pub mod glossary;
 pub mod imagegen;
 pub mod limits;
 pub mod mcp;
@@ -26,6 +28,7 @@ pub mod video_brief;
 pub mod vision;
 pub mod workflows;
 
+pub use colornames::{describe as describe_color, nearest_named, NAMED_COLORS};
 pub use imagegen::LandSpot;
 pub use mcp::{
     namespaced_tool, McpClient, McpRegistry, McpServerConfig, McpTool, McpTransportConfig,

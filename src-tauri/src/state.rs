@@ -362,6 +362,8 @@ impl AppState {
         let mut counter = self.counter.lock().unwrap();
         *counter += 1;
         let id = format!("s{}", *counter);
+        // 排序位直接取创建序号：新会话天然排最后，侧边栏顺序与创建顺序一致。
+        let order = *counter;
         drop(counter);
         // 新会话第一轮就得带上当前护栏：在这里漏掉，用户改完设置还得开个新会话才生效。
         let runner_config = RunnerConfig {
@@ -371,7 +373,8 @@ impl AppState {
         let session = Arc::new(
             AgentSession::new(id.clone(), self.active_config(), document)
                 .with_mcp_registry(self.mcp.clone())
-                .with_runner_config(runner_config),
+                .with_runner_config(runner_config)
+                .with_order(order),
         );
         self.sessions
             .lock()

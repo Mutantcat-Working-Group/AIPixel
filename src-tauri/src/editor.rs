@@ -142,6 +142,7 @@ pub fn editor_paint_stroke(
 ) -> Result<u64, String> {
     let session = state.session(&id)?;
     let revision = session.with_document_mut(|doc| apply_stroke(doc, &stroke))?;
+    session.note_edit(stroke_note(&stroke, &session.document()));
     emit_document(&app, &session);
     Ok(revision)
 }
@@ -165,6 +166,7 @@ pub fn editor_fill(
             fill.color.as_deref(),
         )
     })?;
+    session.note_edit(fill_note(&fill));
     emit_document(&app, &session);
     Ok(revision)
 }
@@ -181,8 +183,156 @@ pub fn editor_apply_ops(
     let session = state.session(&id)?;
     let revision =
         session.with_document_mut(|doc| ops::apply_batch(doc, &ops).map_err(|e| e.to_string()))?;
+    session.note_edit(ops_note(&ops));
     emit_document(&app, &session);
     Ok(revision)
+}
+
+/// 一句话簿记：在哪儿画了几个格子、用的什么颜色。
+/// 颜色给 hex 原样，不换算色名——读这条的是模型，它要的是能直接写回笔尖的值。
+fn stroke_note(stroke: &StrokeRequest, doc: &Document) -> String {
+    let color = match stroke.color.as_deref() {
+        Some(hex) => hex.to_string(),
+        None => "transparent (erased)".to_string(),
+    };
+    let spot = describe_cel(doc, &stroke.layer, &stroke.frame);
+    format!(
+        "brush stroke of {} cell(s) on {} using {}",
+        stroke.cells.len(),
+        spot,
+        color
+    )
+}
+
+/// 一句话簿记：从哪一格里浸染出去、浸成了什么颜色。
+fn fill_note(fill: &FillRequest) -> String {
+    let color = fill
+        .color
+        .as_deref()
+        .unwrap_or("transparent (erased)")
+        .to_string();
+    format!(
+        "paint bucket from ({},{}) on {}/{} flooded to {}",
+        fill.x, fill.y, fill.layer, fill.frame, color
+    )
+}
+
+/// cel 的一句话名片：图层名 / 帧号，再加一句「这是第几帧」。
+/// 模型读到的 layer/frame 是 id（L0/F2），而用户脑子里是名字，两个都给最稳。
+fn describe_cel(doc: &Document, layer: &str, frame: &str) -> String {
+    let layer_name = doc
+        .layers
+        .iter()
+        .find(|l| l.id == layer)
+        .map(|l| l.name.clone())
+        .unwrap_or_else(|| layer.to_string());
+    let (frame_no, frame_name) = doc
+        .frames
+        .iter()
+        .enumerate()
+        .find(|(_, f)| f.id == frame)
+        .map(|(i, f)| (i + 1, f.id.clone()))
+        .unwrap_or((0, frame.to_string()));
+    let _ = frame_name;
+    format!("layer {layer} \"{layer_name}\", frame {frame} (#{frame_no})")
+}
+
+/// 结构与帧操作的簿记：把这一批 op 说成人话，一条一批。
+/// 模型下一轮要判断「用户已经把这些结构动过了」，不需要每个字段都背下来。
+fn ops_note(ops: &[PixelOperation]) -> String {
+    if ops.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<String> = ops.iter().map(op_summary).collect();
+    format!("structure edits applied: {}", parts.join("; "))
+}
+
+fn op_summary(op: &PixelOperation) -> String {
+    match op {
+        PixelOperation::CreateFrame { after, .. } => {
+            format!("created a frame after {after:?}")
+        }
+        PixelOperation::DeleteFrame { id } => format!("deleted frame {id}"),
+        PixelOperation::DuplicateFrame { id } => format!("duplicated frame {id}"),
+        PixelOperation::MoveFrame { id, to_index } => {
+            format!("moved frame {id} to slot {to_index}")
+        }
+        PixelOperation::SetFrameDuration { id, duration_ms } => {
+            format!("frame {id} now lasts {duration_ms}ms")
+        }
+        PixelOperation::CreateLayer { after, name, .. } => {
+            format!("created layer {name:?} after {after:?}")
+        }
+        PixelOperation::DeleteLayer { id } => format!("deleted layer {id}"),
+        PixelOperation::MoveLayer { id, to_index } => {
+            format!("moved layer {id} to slot {to_index}")
+        }
+        PixelOperation::RenameLayer { id, name } => {
+            format!("renamed layer {id} to \"{name}\"")
+        }
+        PixelOperation::SetLayerProperties {
+            id,
+            visible,
+            opacity,
+        } => {
+            format!("layer {id} properties now visible={visible:?} opacity={opacity:?}")
+        }
+        PixelOperation::AddPaletteColors { colors } => {
+            format!(
+                "added {} palette color(s): {}",
+                colors.len(),
+                colors.join(" ")
+            )
+        }
+        PixelOperation::SetPalette { colors } => {
+            format!(
+                "palette replaced with {} color(s): {}",
+                colors.len(),
+                colors.join(" ")
+            )
+        }
+        PixelOperation::SetPixels { layer, frame, .. } => {
+            format!("set pixels directly on {layer}/{frame}")
+        }
+        PixelOperation::BucketFill {
+            layer, frame, x, y, ..
+        } => {
+            format!("bucket fill on {layer}/{frame} from ({x},{y})")
+        }
+        PixelOperation::DrawShape {
+            layer,
+            frame,
+            shape,
+            ..
+        } => {
+            format!("drew a {shape:?} on {layer}/{frame}")
+        }
+        PixelOperation::StampGrid { layer, frame, .. } => {
+            format!("stamped a grid on {layer}/{frame}")
+        }
+        PixelOperation::ClearRegion { layer, frame, .. } => {
+            format!("cleared a region on {layer}/{frame}")
+        }
+        PixelOperation::CreatePalette { name, .. } => {
+            format!("created color range \"{name}\"")
+        }
+        PixelOperation::DeletePalette { id } => format!("deleted color range {id}"),
+        PixelOperation::RenamePalette { id, name } => {
+            format!("renamed color range {id} to \"{name}\"")
+        }
+        PixelOperation::AddPaletteColor { id, color } => {
+            format!("added {color} to color range {id}")
+        }
+        PixelOperation::RemovePaletteColor { id, index } => {
+            format!("removed color #{index} from color range {id}")
+        }
+        PixelOperation::SetLayerPalette { layer, palette_id } => {
+            format!("layer {layer} now uses color range {palette_id}")
+        }
+        PixelOperation::SetLayerLocked { layer, locked } => {
+            format!("layer {layer} color lock = {locked}")
+        }
+    }
 }
 
 #[cfg(test)]

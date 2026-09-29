@@ -11,7 +11,7 @@
 //! - 中断：流式期间按 120ms 轮询取消标志，`interrupt()` 立刻收尾并回 `Interrupted`。
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -65,6 +65,12 @@ const STREAM_IDLE_LIMIT: Duration = Duration::from_secs(180);
 /// 当场拦住再问一次。催的次数必须封顶，不然一个轴模型能把整轮预算
 /// 全耗在互相瞪眼上。
 const MAX_TOOL_NUDGES: usize = 2;
+
+/// 「用户在编辑器里动了什么」最多攒几条。
+///
+/// 用户可能连着涂抹几十下才想起问模型一句。全塞进去既浪费 token 也让模型
+/// 找不到重点；挤掉最旧的，是因为越近的改动对「下一步该画什么」越有参考价值。
+const MAX_PENDING_EDITS: usize = 12;
 
 /// 流静默计时器：记下最后一次见到字节的时刻，答一句「是不是该判死刑了」。
 #[derive(Debug, Clone, Copy)]
@@ -328,6 +334,13 @@ pub struct AgentSession {
     approval: Mutex<Option<ApprovalSlot>>,
     /// 用户自配的 MCP 工具服务器注册表；None 表示这个会话不接外部工具。
     mcp: Option<Arc<McpRegistry>>,
+    /// 侧边栏显示名。None = 用默认编号，用户改过就是改过的名字。
+    title: Mutex<Option<String>>,
+    /// 排序位。新建时拿自增序号，前端拖动排序后整批改写。
+    order: AtomicU64,
+    /// 用户在编辑器里动手的痕迹（一句话一条）。下一轮请求前冲刷成一条 user 消息，
+    /// 让模型知道「画面已经被人改过了」，别照着自己上一轮的想象继续画。
+    pending_edits: Mutex<Vec<String>>,
 }
 
 impl AgentSession {
@@ -345,6 +358,9 @@ impl AgentSession {
             cancelled: AtomicBool::new(false),
             approval: Mutex::new(None),
             mcp: None,
+            title: Mutex::new(None),
+            order: AtomicU64::new(0),
+            pending_edits: Mutex::new(Vec::new()),
         }
     }
 
@@ -358,6 +374,52 @@ impl AgentSession {
     pub fn with_mcp_registry(mut self, registry: Arc<McpRegistry>) -> Self {
         self.mcp = Some(registry);
         self
+    }
+
+    /// 给会话一个排序位。侧边栏拖动排序后按新的位次整批改写。
+    pub fn with_order(self, order: u64) -> Self {
+        self.order.store(order, Ordering::SeqCst);
+        self
+    }
+
+    pub fn order(&self) -> u64 {
+        self.order.load(Ordering::SeqCst)
+    }
+
+    pub fn set_order(&self, order: u64) {
+        self.order.store(order, Ordering::SeqCst);
+    }
+
+    /// 侧边栏显示名；None 表示还没改过，前端拿默认编号显示。
+    pub fn title(&self) -> Option<String> {
+        self.title.lock().unwrap().clone()
+    }
+
+    pub fn set_title(&self, title: Option<String>) {
+        let trimmed = title
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty());
+        *self.title.lock().unwrap() = trimmed;
+    }
+
+    /// 记一笔「用户在编辑器里动了什么」。空文本不入簿：一条空行只会
+    /// 让下一轮的上下文更啰嗦。簿子有上限，超长的历史会话不会把它撑爆。
+    pub fn note_edit(&self, note: impl Into<String>) {
+        let note = note.into();
+        if note.trim().is_empty() {
+            return;
+        }
+        let mut edits = self.pending_edits.lock().unwrap();
+        // 记到上限就把最旧的一条挤掉：越近的改动对「下一步画什么」越有参考价值。
+        if edits.len() >= MAX_PENDING_EDITS {
+            edits.remove(0);
+        }
+        edits.push(note);
+    }
+
+    /// 取走所有待冲刷的改动记录。取走即清空，没人会读第二遍。
+    pub fn take_edits(&self) -> Vec<String> {
+        std::mem::take(&mut *self.pending_edits.lock().unwrap())
     }
 
     /// 把某个角色另绑到一个模型。配同一个角色就是换模型。
@@ -635,6 +697,18 @@ impl AgentSession {
             role: Role::User,
             content,
         });
+
+        // 用户发消息前在编辑器里动过的痕迹，先冲刷成一条 user 消息。
+        // 少了这一步，模型会照着自己上一轮的想象继续画，把用户的手笔当成不存在。
+        let manual_edits = self.take_edits();
+        if !manual_edits.is_empty() {
+            self.messages.lock().unwrap().push(Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: manual_edit_digest(&manual_edits),
+                }],
+            });
+        }
 
         // 进入 turn 时快照一份预算，避免中途改设置导致行为漂移。
         // mut：Ask 模式下用户点「本次放行」会把它降级成 Auto，只影响本 turn。
@@ -1486,6 +1560,28 @@ fn thinking_off_status() -> UiText {
 fn tool_nudge() -> String {
     "You replied with text only and called no tool, so nothing on the canvas changed. Your turn is not finished: the available canvas tools include pixel_run_shader and pixel_apply_operations. Do the work now - if the request is about artwork, end this reply with the tool call that draws it. Reply with text alone only if you genuinely need one piece of information from the user before you can edit the canvas."
         .to_string()
+}
+
+/// 把「用户手动改了什么」拼成一条模型能读懂的消息。
+///
+/// 语气写成系统在转述用户动作，而不是用户本人在下指令——否则模型容易把这些
+/// 当成新的需求逐条照办，而它真正要做的是「接着这个改过的画面继续」。
+fn manual_edit_digest(edits: &[String]) -> String {
+    let mut out = String::from(
+        "The user hand-edited the canvas in the editor while composing this message. \
+         The canvas state below already contains those edits, and they are now the ground truth: \
+         continue from what is on the canvas, not from what you last drew. \
+         What the user touched, most recent last:\n",
+    );
+    for edit in edits {
+        out.push_str("- ");
+        out.push_str(edit.trim());
+        out.push('\n');
+    }
+    out.push_str(
+        "Keep those parts unless the user asks to change them, and treat the current pixels as authoritative.",
+    );
+    out
 }
 
 /// 用户这句话是不是在要图。

@@ -108,6 +108,10 @@ pub struct SessionInfo {
     pub width: u32,
     pub height: u32,
     pub revision: u64,
+    /// 用户改过的显示名；None = 拿默认编号显示。
+    pub title: Option<String>,
+    /// 侧边栏排序位。拖动排序后整批改写。
+    pub order: u64,
 }
 
 fn session_info(session: &AgentSession) -> SessionInfo {
@@ -121,6 +125,8 @@ fn session_info(session: &AgentSession) -> SessionInfo {
         width: doc.width,
         height: doc.height,
         revision: doc.revision,
+        title: session.title(),
+        order: session.order(),
     }
 }
 
@@ -143,10 +149,40 @@ pub fn session_create(
 pub fn session_list(state: State<'_, AppState>) -> Vec<SessionInfo> {
     let mut ids = state.session_ids();
     ids.sort();
-    ids.iter()
-        .filter_map(|id| state.session(id).ok())
-        .map(|s| session_info(&s))
-        .collect()
+    let mut infos: Vec<SessionInfo> = ids
+        .into_iter()
+        .filter_map(|id| state.session(&id).ok())
+        .map(|session| session_info(&session))
+        .collect();
+    // 按排序位排，不按 id 字典序排：用户拖动过的顺序必须原样端出来。
+    // 同值时用 id 兜底，排序仍然是确定的。
+    infos.sort_by(|a, b| a.order.cmp(&b.order).then_with(|| a.id.cmp(&b.id)));
+    infos
+}
+
+/// 改侧边栏显示名。空白名当取消：不留一个看不见的会话标题。
+#[tauri::command]
+pub fn session_rename(
+    state: State<'_, AppState>,
+    id: String,
+    title: String,
+) -> Result<SessionInfo, String> {
+    let session = state.session(&id)?;
+    session.set_title(Some(title));
+    Ok(session_info(&session))
+}
+
+/// 拖动排序：按新次序整批改写排序位。id 不在簿里就当没发生过。
+#[tauri::command]
+pub fn session_reorder(state: State<'_, AppState>, ids: Vec<String>) -> Result<(), String> {
+    for (index, id) in ids.iter().enumerate() {
+        let Ok(session) = state.session(id) else {
+            continue;
+        };
+        // 从 1 起排：0 留给还没落位的会话。
+        session.set_order(index as u64 + 1);
+    }
+    Ok(())
 }
 
 #[tauri::command]
