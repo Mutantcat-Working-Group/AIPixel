@@ -3,12 +3,14 @@
 //! 设计要点：
 //! - 文档是唯一权威状态，每轮重新组装系统提示词（上一轮工具可能已经改过 canvas）。
 //! - 模型永远不手写矩阵：所有绘制经由 `tools::execute`（ops / Lua 沙箱 / RLE 读回）。
-//! - 预算：`max_tool_steps`（单 turn 工具步数）、`max_turns`（续轮次数）、
+//! - 预算：`max_tool_steps`（单 turn 工具步数）、`max_turns`（工具跑完再来一问的次数）、
 //!   `max_tool_result_bytes`（回灌截断），外加「同一个失败调用连续 3 次」的退避保护。
+//! - 没说完的话：stop reason 是 `max_tokens` / `length` 就自动续写，最多 5 次；
+//!   请求失败（网络、假死）按 1s/2s/4s/8s 退避重发，最多 5 次。
 //! - 中断：流式期间按 120ms 轮询取消标志，`interrupt()` 立刻收尾并回 `Interrupted`。
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -24,9 +26,10 @@ use super::mcp::{self, McpRegistry};
 use super::models::{
     ActiveContext, AgentEvent, ApprovalDecision, Attachment, Capabilities, ChatRequest,
     ContentBlock, LlmEvent, Message, ModelConfig, PermissionMode, Role, RunnerConfig, ToolSpec,
+    UiText,
 };
 use super::prompt;
-use super::providers::{self, LlmProvider};
+use super::providers::{self, LlmProvider, ProviderError};
 use super::roles::{ModelRole, RoleBinding};
 use super::tools::{self, ToolOutcome, IMAGE_GEN_TOOL};
 use pixel_core::decode;
@@ -77,6 +80,106 @@ impl IdleWatch {
     }
 }
 
+/// 回复撞上输出上限时，最多替用户自动续写几次。
+///
+/// provider 报的 stop reason 是 `max_tokens` / `length` 只说明「话没说完」，
+/// 不等于模型说完了。像素画的 Lua 脚本动辄几百行，撞线极其常见；
+/// 不续写的话，用户看到的永远是一段半截代码。
+const MAX_CONTINUATIONS: usize = 5;
+
+/// 一次请求失败后最多重试几次：网络抖动、连接被代理掐断、流直接报错。
+const MAX_ROUND_RETRIES: usize = 5;
+
+/// 这次失败值不值得重发。
+///
+/// 网络抖、连接被代理掐、流解析到一半断了、限流 429、5xx——换个时间再来就好。
+/// 而 400/401/403/404 是请求本身就不被接受，重发五次只是让用户盯着五个
+/// 一模一样的报错干等半分钟。
+fn retryable(err: &ProviderError) -> bool {
+    match err {
+        ProviderError::Network(_) | ProviderError::Decode(_) => true,
+        ProviderError::Http { status, .. } => {
+            (408..=429).contains(status) || (500..=599).contains(status)
+        }
+        ProviderError::Config(_) => false,
+    }
+}
+
+/// 续写时回灌给模型的指令。界面文案走字典，这句是喂模型的，必须英文，
+/// 而且要钉死「别重复、别总结」——不然模型会把前面五百字原样再念一遍。
+const CONTINUE_NUDGE: &str = "Your previous reply was cut off by the output limit before it finished. Continue from exactly where it stopped: do not repeat anything you already wrote, do not summarise or restate earlier text, and finish the sentence or tool call that was in progress.";
+
+/// 重试退避：1s、2s、4s、8s，之后封顶。失败不该把用户晾在原地干等。
+fn retry_backoff(attempt: usize) -> Duration {
+    Duration::from_millis(1000u64 << attempt.saturating_sub(1).min(3))
+}
+
+/// 一次回复是怎么收场的：模型自己说完了，还是被输出上限掐断了。
+/// 两者的后续动作完全相反——一个该收尾，一个该接着写。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StopKind {
+    Finished,
+    Truncated,
+}
+
+/// 只有输出上限算掐断；`end_turn` / `tool_use` / `stop_sequence` / 空值都是说完了。
+fn stop_kind(reason: &str) -> StopKind {
+    match reason {
+        "max_tokens" | "length" => StopKind::Truncated,
+        _ => StopKind::Finished,
+    }
+}
+
+/// 一整轮流式输出的原始收获。单独拎出来是为了「失败可以重发、掐断可以续写」：
+/// 重试时已经收到的文本不能丢，续写时要把它作为历史回灌给模型。
+struct RoundRaw {
+    text: String,
+    reasoning: String,
+    /// 只留完整的 tool_use。掐断那半截入参不可信，更不能进历史——
+    /// 历史里出现残缺的 tool_use 会让下一轮请求直接被 provider 拒掉。
+    accumulator: BTreeMap<usize, (String, String, String)>,
+    stop: StopKind,
+    failure: Option<String>,
+    /// 失败值不值得再发一次：429 该退避重来，401 就现原形。
+    retryable_failure: bool,
+    cancelled: bool,
+}
+
+impl RoundRaw {
+    fn empty() -> Self {
+        Self {
+            text: String::new(),
+            reasoning: String::new(),
+            accumulator: BTreeMap::new(),
+            stop: StopKind::Finished,
+            failure: None,
+            retryable_failure: false,
+            cancelled: false,
+        }
+    }
+
+    /// 还有东西能接着写才算可续。一个字都没吐出来的不算「说了一半」，
+    /// 那是重试该管的事，硬续只会把同一个空回复再要五遍。
+    fn resumable(&self) -> bool {
+        !self.text.is_empty() || !self.reasoning.is_empty()
+    }
+
+    /// 值得进历史的回复块：推理在前、正文在后，与流里的到达顺序一致。
+    fn blocks(&self) -> Vec<ContentBlock> {
+        let mut blocks: Vec<ContentBlock> = Vec::new();
+        if !self.reasoning.is_empty() {
+            blocks.push(ContentBlock::Reasoning {
+                text: self.reasoning.clone(),
+            });
+        }
+        if !self.text.is_empty() {
+            blocks.push(ContentBlock::Text {
+                text: self.text.clone(),
+            });
+        }
+        blocks
+    }
+}
 /// 单个 agent 会话：持有文档（权威状态）、消息历史与 provider。
 /// 纯 Rust，不依赖 Tauri；上层通过 `tokio::sync::mpsc` 通道收 `AgentEvent`。
 struct Engine {
@@ -96,7 +199,6 @@ pub struct AgentSession {
     messages: Mutex<Vec<Message>>,
     document: Mutex<Document>,
     active: Mutex<ActiveContext>,
-    turn: AtomicUsize,
     cancelled: AtomicBool,
     /// 当前挂起的审批发送端；None 表示没有调用在等用户。
     approval: Mutex<Option<ApprovalSlot>>,
@@ -116,7 +218,6 @@ impl AgentSession {
             messages: Mutex::new(Vec::new()),
             document: Mutex::new(document),
             active: Mutex::new(active),
-            turn: AtomicUsize::new(0),
             cancelled: AtomicBool::new(false),
             approval: Mutex::new(None),
             mcp: None,
@@ -377,7 +478,6 @@ impl AgentSession {
         attachments: Vec<Attachment>,
         tx: UnboundedSender<AgentEvent>,
     ) {
-        self.turn.store(0, Ordering::SeqCst);
         self.cancelled.store(false, Ordering::SeqCst);
 
         if text.trim().is_empty() && attachments.is_empty() {
@@ -421,14 +521,20 @@ impl AgentSession {
         let mut usage_in: Option<u32> = None;
         let mut usage_out: Option<u32> = None;
 
+        // 三个配额：逻辑轮次吃 max_turns 预算，续写和重试各自封顶五次。
+        let mut logical_rounds = 0usize;
+        let mut continuations = 0usize;
+        let mut retries = 0usize;
+
         loop {
             if self.is_cancelled() {
                 emit(&tx, AgentEvent::Interrupted);
                 return;
             }
 
-            let round = self.turn.fetch_add(1, Ordering::SeqCst) + 1;
-            if round > runner_config.max_turns {
+            // 只有「工具跑完再来一问」算一个逻辑轮次；同一句话说一半被掐断后
+            // 接着写不算——那本来就是这一轮的尾巴，不该吃掉用户的续轮预算。
+            if logical_rounds >= runner_config.max_turns {
                 emit(
                     &tx,
                     AgentEvent::Error {
@@ -440,132 +546,115 @@ impl AgentSession {
                 );
                 return;
             }
-
-            // 每轮重新组装系统提示词：文档是权威状态，随时可能被上一轮工具改写。
-            // 锁顺序固定为 document -> active -> messages，避免自锁。
-            let request = {
-                let doc = self.document.lock().unwrap();
-                let active = self.active.lock().unwrap();
-                let engine = self.engine.lock().unwrap();
-                ChatRequest {
-                    system: prompt::build_system_prompt(
-                        &doc,
-                        &active.layer,
-                        &active.frame,
-                        active.color.as_deref(),
-                        runner_config.canvas_context_chars,
-                    ),
-                    messages: self.messages.lock().unwrap().clone(),
-                    // MCP 工具追加在内建 pixel_* 之后：模型每轮看到的都是当前真实能力。
-                    tools: {
-                        let mut specs = tools::specs();
-                        specs.extend(self.mcp_specs());
-                        specs
-                    },
-                    max_tokens: engine
-                        .config
-                        .max_tokens
-                        .unwrap_or(providers::DEFAULT_MAX_TOKENS),
-                    temperature: engine.config.temperature,
-                }
-            };
+            logical_rounds += 1;
 
             let provider = self.engine.lock().unwrap().provider.clone();
-            let stream = match provider.request(&request).await {
-                Ok(stream) => stream,
-                Err(e) => {
-                    emit(
-                        &tx,
-                        AgentEvent::Error {
-                            message: e.to_string(),
-                        },
-                    );
+            // 重试与续写都收在这个小循环里。请求每一发都重装：历史里刚 push 的
+            // 半截回复必须在这发请求里生效，不然就是白续一次。
+            let raw: RoundRaw = loop {
+                // 退避睡到一半用户点了中断：别等睡醒再开口，直接收。
+                if self.is_cancelled() {
+                    emit(&tx, AgentEvent::Interrupted);
                     return;
                 }
-            };
+                let request = self.chat_request(&runner_config);
 
-            let mut stream = stream;
-            let mut text_out = String::new();
-            let mut reasoning_out = String::new();
-            let mut accumulator: BTreeMap<usize, (String, String, String)> = BTreeMap::new();
-            let mut tick = tokio::time::interval(Duration::from_millis(120));
-            let mut idle = IdleWatch::new(STREAM_IDLE_LIMIT);
-
-            loop {
-                tokio::select! {
-                    item = stream.next() => {
-                        // 收到什么都算活着：思考越久越要刷新，免得把慢模型误判成假死。
-                        idle.touch();
-                        match item {
-                            Some(Ok(event)) => match event {
-                                LlmEvent::Token(t) => {
-                                    text_out.push_str(&t);
-                                    emit(&tx, AgentEvent::Token { text: t });
-                                }
-                                LlmEvent::Reasoning(t) => {
-                                    reasoning_out.push_str(&t);
-                                    emit(&tx, AgentEvent::Reasoning { text: t });
-                                }
-                                LlmEvent::ToolUseStart { index, id, name } => {
-                                    accumulator.insert(index, (id, name, String::new()));
-                                }
-                                LlmEvent::ToolInputDelta { index, json_partial } => {
-                                    if let Some(slot) = accumulator.get_mut(&index) {
-                                        slot.2.push_str(&json_partial);
-                                    }
-                                }
-                                LlmEvent::Usage { input_tokens, output_tokens } => {
-                                    if input_tokens.is_some() {
-                                        usage_in = input_tokens;
-                                    }
-                                    if output_tokens.is_some() {
-                                        usage_out = output_tokens;
-                                    }
-                                }
-                                LlmEvent::Done { .. } => break,
-                            },
-                            Some(Err(e)) => {
-                                emit(&tx, AgentEvent::Error { message: format!("stream error: {e}") });
-                                return;
-                            }
-                            None => break,
-                        }
-                    }
-                    _ = tick.tick() => {
-                        if self.is_cancelled() {
-                            drop(stream);
-                            emit(&tx, AgentEvent::Interrupted);
-                            return;
-                        }
-                        if idle.expired() {
-                            drop(stream);
+                let stream = match provider.request(&request).await {
+                    Ok(stream) => stream,
+                    Err(e) => {
+                        // 发不出去：网络抖动、代理掐线、base_url 填错。比起把一句
+                        // 「失败」摔在用户脸上，按退避重发更有人味。
+                        if retries < MAX_ROUND_RETRIES && retryable(&e) {
+                            retries += 1;
                             emit(
                                 &tx,
-                                AgentEvent::Error {
-                                    message: format!(
-                                        "no data from the model for {}s, the stream looks stalled",
-                                        STREAM_IDLE_LIMIT.as_secs()
+                                AgentEvent::Status {
+                                    message: retrying_status(
+                                        &e.to_string(),
+                                        retries,
+                                        MAX_ROUND_RETRIES,
                                     ),
                                 },
                             );
-                            return;
+                            tokio::time::sleep(retry_backoff(retries)).await;
+                            continue;
                         }
+                        emit(
+                            &tx,
+                            AgentEvent::Error {
+                                message: e.to_string(),
+                            },
+                        );
+                        return;
                     }
+                };
+
+                let mut raw = self
+                    .consume_stream(stream, &tx, &mut usage_in, &mut usage_out)
+                    .await;
+
+                if raw.cancelled {
+                    emit(&tx, AgentEvent::Interrupted);
+                    return;
                 }
+                if let Some(failure) = raw.failure.take() {
+                    if retries < MAX_ROUND_RETRIES && raw.retryable_failure {
+                        retries += 1;
+                        emit(
+                            &tx,
+                            AgentEvent::Status {
+                                message: retrying_status(&failure, retries, MAX_ROUND_RETRIES),
+                            },
+                        );
+                        tokio::time::sleep(retry_backoff(retries)).await;
+                        continue;
+                    }
+                    emit(&tx, AgentEvent::Error { message: failure });
+                    return;
+                }
+                retries = 0;
+                // 这一轮确实收到了东西，失败额度重新算：下次失误仍该有五次机会。
+
+                // 话没说完就接着问。前半截已经逐字推给前端了，续写只是继续追加，
+                // 用户看到的是一段完整输出，而不是半句摆在屏幕上。
+                if raw.stop == StopKind::Truncated
+                    && raw.resumable()
+                    && continuations < MAX_CONTINUATIONS
+                {
+                    continuations += 1;
+                    self.push_resume(&raw, CONTINUE_NUDGE);
+                    emit(
+                        &tx,
+                        AgentEvent::Status {
+                            message: continuing_status(continuations, MAX_CONTINUATIONS),
+                        },
+                    );
+                    continue;
+                }
+                break raw;
+            };
+
+            // 续写配额也用完了：连着五发都还是被输出上限掐断。如实告诉用户断在哪，
+            // 别让一段半截 Lua 看起来像是画完了。
+            if raw.stop == StopKind::Truncated {
+                let message = if raw.resumable() {
+                    "the reply kept hitting the output limit even after the last continuation; raise Max tokens in model settings and resend your request"
+                } else {
+                    "the model produced nothing before the output limit; raise Max tokens in model settings"
+                };
+                emit(
+                    &tx,
+                    AgentEvent::Error {
+                        message: message.into(),
+                    },
+                );
+                return;
             }
 
-            let mut blocks: Vec<ContentBlock> = Vec::new();
-            if !reasoning_out.is_empty() {
-                blocks.push(ContentBlock::Reasoning {
-                    text: reasoning_out,
-                });
-            }
-            if !text_out.is_empty() {
-                blocks.push(ContentBlock::Text { text: text_out });
-            }
+            let mut blocks = raw.blocks();
 
             let mut calls: Vec<PlannedCall> = Vec::new();
-            for (_, (id, name, partial)) in accumulator {
+            for (_, (id, name, partial)) in raw.accumulator {
                 let trimmed = partial.trim();
                 let (input, parse_error) = if trimmed.is_empty() {
                     (json!({}), None)
@@ -616,7 +705,12 @@ impl AgentSession {
                         output_tokens: usage_out,
                     },
                 );
-                emit(&tx, AgentEvent::Completed { turns: round });
+                emit(
+                    &tx,
+                    AgentEvent::Completed {
+                        turns: logical_rounds,
+                    },
+                );
                 return;
             }
 
@@ -770,6 +864,134 @@ impl AgentSession {
             }
         }
     }
+
+    /// 组装一轮请求。抽出来是因为重试和续写都要重新发一次请求：
+    /// 历史每条消息都锁一次会碎，合成一次才看得出「这一轮到底发了什么」。
+    /// 锁顺序固定为 document -> active -> messages，全程一致，不会自锁。
+    fn chat_request(&self, cfg: &RunnerConfig) -> ChatRequest {
+        let doc = self.document.lock().unwrap();
+        let active = self.active.lock().unwrap();
+        let engine = self.engine.lock().unwrap();
+        ChatRequest {
+            system: prompt::build_system_prompt(
+                &doc,
+                &active.layer,
+                &active.frame,
+                active.color.as_deref(),
+                cfg.canvas_context_chars,
+            ),
+            messages: self.messages.lock().unwrap().clone(),
+            // MCP 工具追加在内建 pixel_* 之后：模型每轮看到的都是当前真实能力。
+            tools: {
+                let mut specs = tools::specs();
+                specs.extend(self.mcp_specs());
+                specs
+            },
+            max_tokens: engine
+                .config
+                .max_tokens
+                .unwrap_or(providers::DEFAULT_MAX_TOKENS),
+            temperature: engine.config.temperature,
+        }
+    }
+
+    /// 把流喝干。失败/取消/掐断都不在这里收尾，只写进 `RoundRaw`，
+    /// 交给调用方决定是重发还是续写——这样这个函数里没有任何 `return` 分支逃逸。
+    async fn consume_stream(
+        &self,
+        mut stream: providers::EventStream,
+        tx: &UnboundedSender<AgentEvent>,
+        usage_in: &mut Option<u32>,
+        usage_out: &mut Option<u32>,
+    ) -> RoundRaw {
+        let mut raw = RoundRaw::empty();
+        let mut tick = tokio::time::interval(Duration::from_millis(120));
+        let mut idle = IdleWatch::new(STREAM_IDLE_LIMIT);
+
+        loop {
+            tokio::select! {
+                item = stream.next() => {
+                    // 收到什么都算活着：思考越久越要刷新，免得把慢模型误判成假死。
+                    idle.touch();
+                    match item {
+                        Some(Ok(event)) => match event {
+                            LlmEvent::Token(t) => {
+                                raw.text.push_str(&t);
+                                emit(tx, AgentEvent::Token { text: t });
+                            }
+                            LlmEvent::Reasoning(t) => {
+                                raw.reasoning.push_str(&t);
+                                emit(tx, AgentEvent::Reasoning { text: t });
+                            }
+                            LlmEvent::ToolUseStart { index, id, name } => {
+                                raw.accumulator.insert(index, (id, name, String::new()));
+                            }
+                            LlmEvent::ToolInputDelta { index, json_partial } => {
+                                if let Some(slot) = raw.accumulator.get_mut(&index) {
+                                    slot.2.push_str(&json_partial);
+                                }
+                            }
+                            LlmEvent::Usage { input_tokens, output_tokens } => {
+                                if input_tokens.is_some() {
+                                    *usage_in = input_tokens;
+                                }
+                                if output_tokens.is_some() {
+                                    *usage_out = output_tokens;
+                                }
+                            }
+                            // stop reason 是关键：max_tokens / length 说明被掐断，不是说完。
+                            LlmEvent::Done { stop_reason } => {
+                                raw.stop = stop_kind(&stop_reason);
+                                break;
+                            }
+                        },
+                        Some(Err(e)) => {
+                            raw.failure = Some(format!("stream error: {e}"));
+                            raw.retryable_failure = retryable(&e);
+                            break;
+                        }
+                        None => break,
+                    }
+                }
+                _ = tick.tick() => {
+                    if self.is_cancelled() {
+                        drop(stream);
+                        raw.cancelled = true;
+                        break;
+                    }
+                    if idle.expired() {
+                        drop(stream);
+                        raw.failure = Some(format!(
+                            "no data from the model for {}s, the stream looks stalled",
+                            STREAM_IDLE_LIMIT.as_secs()
+                        ));
+                        // 假死多半是代理在掐连接，原样再发一次常常就通了。
+                        raw.retryable_failure = true;
+                        break;
+                    }
+                }
+            }
+        }
+        raw
+    }
+
+    /// 续写：把半截回复原样写进历史，再塞一句「接着写」。
+    /// 分两次 push 中间不放开锁——否则换个线程插一条消息，顺序就乱了。
+    fn push_resume(&self, raw: &RoundRaw, nudge: &str) {
+        // 推理块在过网前会被丢掉，只有推理的半截回复推平等于推一条空
+        // content，provider 会当场拒掉整个请求。宁可只推指令那一条。
+        if raw.text.is_empty() {
+            self.messages
+                .lock()
+                .unwrap()
+                .push(Message::user_text(nudge));
+            return;
+        }
+        let mut messages = self.messages.lock().unwrap();
+        messages.push(Message::assistant(raw.blocks()));
+        messages.push(Message::user_text(nudge));
+    }
+
     /// agent 生图工具：让模型直接产出位图，再量化落到画布。与同步工具分开跑，
     /// 因为它要等模型回图，期间绝不能占着文档锁。锁顺序仍是 document -> active。
     async fn run_image_gen(&self, input: &Value) -> ToolOutcome {
@@ -889,6 +1111,34 @@ fn emit(tx: &UnboundedSender<AgentEvent>, event: AgentEvent) {
     let _ = tx.send(event);
 }
 
+/// 「正在接着写」的状态条。前端把它渲染成 notice 节点，让用户知道这不是卡死。
+fn continuing_status(done: usize, max: usize) -> UiText {
+    UiText::new(
+        "agent.continuing",
+        "the reply hit the output limit, continuing ({done} of {max})",
+    )
+    .with("done", done as u64)
+    .with("max", max as u64)
+}
+
+/// 「这次没成，正在重试」的状态条。带上原因，用户才好判断是网的事还是模型的事。
+fn retrying_status(reason: &str, attempt: usize, max: usize) -> UiText {
+    // 报错常常裹着一整条 URL 或响应体，截一刀免得通知条把聊天区撑爆。
+    let short: String = reason.chars().take(160).collect();
+    let short = if reason.chars().count() > 160 {
+        format!("{short}...")
+    } else {
+        short
+    };
+    UiText::new(
+        "agent.retrying",
+        "that request failed ({reason}); retrying {attempt} of {max}",
+    )
+    .with("reason", short)
+    .with("attempt", attempt as u64)
+    .with("max", max as u64)
+}
+
 /// 工具结果首行摘要，用于 UI 工具卡片标题。
 fn summarize(content: &str) -> String {
     let first = content.lines().next().unwrap_or("").trim();
@@ -909,6 +1159,8 @@ mod tests {
     use super::*;
     use pixel_core::document::Document;
 
+    use super::super::providers::ProviderError;
+
     #[test]
     fn idle_watch_only_expires_after_the_limit() {
         let mut watch = IdleWatch::new(Duration::from_millis(20));
@@ -918,6 +1170,405 @@ mod tests {
         // 收到字节就重打表：思考再久也不能算卡住。
         watch.touch();
         assert!(!watch.expired());
+    }
+
+    #[test]
+    fn only_the_output_limit_counts_as_a_cut_off_reply() {
+        // 撞线的两种口径：Anthropic 报 max_tokens，OpenAI 报 length。
+        assert_eq!(stop_kind("max_tokens"), StopKind::Truncated);
+        assert_eq!(stop_kind("length"), StopKind::Truncated);
+        // 其余都是模型自己把话说完了，再「续写」就是硬逼它复读。
+        for reason in ["end_turn", "tool_use", "stop_sequence", "stop", ""] {
+            assert_eq!(
+                stop_kind(reason),
+                StopKind::Finished,
+                "{reason} 不该判成掐断"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_backoff_doubles_then_stops_growing() {
+        assert_eq!(retry_backoff(1), Duration::from_millis(1000));
+        assert_eq!(retry_backoff(2), Duration::from_millis(2000));
+        assert_eq!(retry_backoff(3), Duration::from_millis(4000));
+        assert_eq!(retry_backoff(4), Duration::from_millis(8000));
+        // 再往后也没有更长：用户不该为一次失败等上半天。
+        assert_eq!(retry_backoff(5), Duration::from_millis(8000));
+        assert_eq!(retry_backoff(99), Duration::from_millis(8000));
+    }
+
+    #[test]
+    fn a_round_with_nothing_in_it_is_not_worth_resuming() {
+        let empty = RoundRaw::empty();
+        assert!(!empty.resumable(), "一个字都没有，重发才是正解");
+        assert!(empty.blocks().is_empty());
+
+        let mut thought_only = RoundRaw::empty();
+        thought_only.reasoning = "先想想画什么".into();
+        assert!(thought_only.resumable(), "思考也算说了一半");
+        assert_eq!(thought_only.blocks().len(), 1);
+
+        let mut full = RoundRaw::empty();
+        full.text = "这样画".into();
+        assert!(full.resumable());
+        // 推理在前、正文在后，跟流里的到达顺序一致。
+        let blocks = full.blocks();
+        assert_eq!(blocks.len(), 1);
+        assert!(matches!(blocks[0], ContentBlock::Text { .. }));
+    }
+
+    #[test]
+    fn a_truncated_round_can_replay_its_text_as_history() {
+        let mut raw = RoundRaw::empty();
+        raw.text = "前一半".into();
+        raw.reasoning = "想了想".into();
+        raw.stop = StopKind::Truncated;
+
+        let blocks = raw.blocks();
+        assert_eq!(blocks.len(), 2);
+        match (&blocks[0], &blocks[1]) {
+            (ContentBlock::Reasoning { text }, ContentBlock::Text { text: t }) => {
+                assert_eq!(text, "想了想");
+                assert_eq!(t, "前一半");
+            }
+            _ => panic!("块的顺序应该是推理在前、正文在后"),
+        }
+    }
+
+    #[test]
+    fn the_continue_nudge_forbids_repeating_and_summarising() {
+        // 这句是喂给模型的：必须明确钉死不重复、不复述，否则会把前半段原样再念一遍。
+        let nudge = CONTINUE_NUDGE.to_lowercase();
+        assert!(nudge.contains("do not repeat"), "少了「别重复」");
+        assert!(
+            nudge.contains("continue from exactly where it stopped"),
+            "少了「从断点续」"
+        );
+        assert!(!nudge.contains('确'), "喂模型的话不能夹中文");
+    }
+
+    #[test]
+    fn continuation_and_retry_budgets_are_capped() {
+        assert_eq!(MAX_CONTINUATIONS, 5, "续写上限就是五次");
+        assert_eq!(MAX_ROUND_RETRIES, 5, "重试上限就是五次");
+    }
+
+    #[test]
+    fn the_status_carry_the_counts_the_ui_needs() {
+        let text = continuing_status(2, MAX_CONTINUATIONS);
+        assert_eq!(text.key, "agent.continuing");
+        assert_eq!(text.vars["done"], serde_json::json!(2));
+        assert_eq!(text.vars["max"], serde_json::json!(MAX_CONTINUATIONS));
+        assert_eq!(
+            text.fallback,
+            "the reply hit the output limit, continuing ({done} of {max})"
+        );
+
+        let text = retrying_status("connection refused", 1, MAX_ROUND_RETRIES);
+        assert_eq!(text.key, "agent.retrying");
+        assert_eq!(text.vars["attempt"], serde_json::json!(1));
+        assert_eq!(text.vars["reason"], serde_json::json!("connection refused"));
+    }
+
+    /// 假 provider：按脚本顺序吐出事件。request 一次取一截，取完就闭嘴
+    /// （空流一轮就收场），这样能把「掐断之后重发、重发完接着问」走到底。
+    struct ScriptedProvider {
+        scripts: Mutex<Vec<Vec<Result<LlmEvent, ProviderError>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl providers::LlmProvider for ScriptedProvider {
+        async fn request(
+            &self,
+            _req: &ChatRequest,
+        ) -> Result<providers::EventStream, ProviderError> {
+            let script = self.scripts.lock().unwrap().remove(0);
+            Ok(Box::pin(futures_util::stream::iter(script)))
+        }
+    }
+
+    /// 把会话的 provider 换成假货。engine 的 ModelConfig 原样留着：max_tokens
+    /// 之类的差异不该影响续写逻辑本身。
+    fn rewire(s: &AgentSession, scripts: Vec<Vec<Result<LlmEvent, ProviderError>>>) {
+        let provider = Arc::new(ScriptedProvider {
+            scripts: Mutex::new(scripts),
+        });
+        let config = s.engine.lock().unwrap().config.clone();
+        *s.engine.lock().unwrap() = Engine { config, provider };
+    }
+
+    /// 收集一场 turn 的全部出口：正文、状态键、工具名、是否收尾、报错。
+    struct Flow {
+        text: String,
+        statuses: Vec<String>,
+        tools: Vec<String>,
+        completed: bool,
+        error: Option<String>,
+    }
+
+    fn drain(mut rx: tokio::sync::mpsc::UnboundedReceiver<AgentEvent>) -> Flow {
+        let mut flow = Flow {
+            text: String::new(),
+            statuses: Vec::new(),
+            tools: Vec::new(),
+            completed: false,
+            error: None,
+        };
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                AgentEvent::Token { text } => flow.text.push_str(&text),
+                AgentEvent::Reasoning { text } => flow.text.push_str(&text),
+                AgentEvent::Status { message } => flow.statuses.push(message.key),
+                AgentEvent::ToolCall { name, .. } => flow.tools.push(name),
+                AgentEvent::Completed { .. } => flow.completed = true,
+                AgentEvent::Error { message } => flow.error = Some(message),
+                _ => {}
+            }
+        }
+        flow
+    }
+
+    /// 一截被输出上限掐断的回复。
+    fn cut(chunk: &str) -> Vec<Result<LlmEvent, ProviderError>> {
+        vec![
+            Ok(LlmEvent::Token(chunk.into())),
+            Ok(LlmEvent::Done {
+                stop_reason: "max_tokens".into(),
+            }),
+        ]
+    }
+
+    /// 一截说完了的回复。
+    fn done(chunk: &str) -> Vec<Result<LlmEvent, ProviderError>> {
+        vec![
+            Ok(LlmEvent::Token(chunk.into())),
+            Ok(LlmEvent::Done {
+                stop_reason: "end_turn".into(),
+            }),
+        ]
+    }
+
+    #[tokio::test]
+    async fn a_cut_off_reply_is_continued_until_the_model_finishes() {
+        let s = session();
+        rewire(&s, vec![cut("前半段"), done("后半段")]);
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("画一只猫".into(), Vec::new(), tx).await;
+        let flow = drain(rx);
+
+        // 两截该原样接上，中间的续写指令只走历史，不能挤到用户眼前。
+        assert_eq!(flow.text, "前半段后半段");
+        assert!(flow.completed, "续写之后这一轮该正常收尾");
+        assert!(flow.error.is_none());
+        assert_eq!(flow.statuses, vec!["agent.continuing".to_string()]);
+
+        let history = s.messages.lock().unwrap().clone();
+        let texts: Vec<String> = history.iter().map(|m| m.text_of()).collect();
+        assert_eq!(texts.len(), 4, "原话、半截回复、续写指令、完整回复");
+        assert_eq!(texts[1], "前半段", "半截回复要原样进历史");
+        assert!(
+            texts[2].contains("Continue from exactly where it stopped"),
+            "续写指令得把断点说清楚"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_request_is_retried_before_giving_up() {
+        let s = session();
+        rewire(
+            &s,
+            vec![
+                vec![Err(ProviderError::Network("connection refused".into()))],
+                done("通了"),
+            ],
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("画一只猫".into(), Vec::new(), tx).await;
+        let flow = drain(rx);
+
+        assert_eq!(flow.text, "通了", "重发一次就该拿到正文");
+        assert!(flow.completed);
+        assert!(flow.error.is_none());
+        assert_eq!(flow.statuses, vec!["agent.retrying".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn an_unauthorised_request_is_not_retried_at_all() {
+        let s = session();
+        rewire(
+            &s,
+            vec![
+                vec![Err(ProviderError::Http {
+                    status: 401,
+                    body: "invalid api key".into(),
+                })],
+                done("这本不该被拿到"),
+            ],
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("画一只猫".into(), Vec::new(), tx).await;
+        let flow = drain(rx);
+
+        // 401 重发五次也是同一个 401，还得白等 31 秒。直接现形，让用户去改 key。
+        assert!(!flow.completed);
+        assert!(flow.text.is_empty());
+        assert!(flow.statuses.is_empty(), "不该有重试提示");
+        let error = flow.error.unwrap_or_default();
+        assert!(error.contains("401"), "{error}");
+        assert_eq!(s.messages.lock().unwrap().len(), 1, "只有用户那一句");
+    }
+
+    #[test]
+    fn only_the_transient_failures_are_worth_another_try() {
+        // 换个时间就能好的：网络、解析、限流、超时、服务端 5xx。
+        for err in [
+            ProviderError::Network("reset".into()),
+            ProviderError::Decode("truncated chunk".into()),
+            ProviderError::Http {
+                status: 408,
+                body: String::new(),
+            },
+            ProviderError::Http {
+                status: 429,
+                body: String::new(),
+            },
+            ProviderError::Http {
+                status: 503,
+                body: String::new(),
+            },
+        ] {
+            assert!(retryable(&err), "{err} 该重发");
+        }
+        // 请求本身不被接受：重发只是把同一个报错看五遍。
+        for err in [
+            ProviderError::Http {
+                status: 400,
+                body: String::new(),
+            },
+            ProviderError::Http {
+                status: 401,
+                body: String::new(),
+            },
+            ProviderError::Http {
+                status: 403,
+                body: String::new(),
+            },
+            ProviderError::Http {
+                status: 404,
+                body: String::new(),
+            },
+            ProviderError::Config("no base url".into()),
+        ] {
+            assert!(!retryable(&err), "{err} 不该重发");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stalled_stream_is_retried_and_the_reason_is_reported() {
+        let s = session();
+        // 空流一秒就收场，所以这里用「报错」替假死：两条路都汇到 failure。
+        rewire(
+            &s,
+            vec![
+                vec![Err(ProviderError::Decode("garbled chunk".into()))],
+                done("换了条路"),
+            ],
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("画一只猫".into(), Vec::new(), tx).await;
+        let flow = drain(rx);
+
+        assert_eq!(flow.text, "换了条路");
+        assert!(flow.completed);
+        assert_eq!(flow.statuses, vec!["agent.retrying".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn after_five_continuations_the_run_says_so_out_loud() {
+        let s = session();
+        rewire(&s, (0..6).map(|_| cut("半截")).collect::<Vec<_>>());
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("画一只猫".into(), Vec::new(), tx).await;
+        let flow = drain(rx);
+
+        assert!(!flow.completed, "配额用尽不许悄悄收尾");
+        // 五次续写 = 一共六发请求。第六发读到的正文照样逐字推给用户，
+        // 只是判断出「又被掐断且没额度了」之后才收摊。
+        assert_eq!(flow.text, "半截".repeat(6), "每发读到多少就显示多少");
+        let error = flow.error.unwrap_or_default();
+        assert!(
+            error.contains("output limit"),
+            "报错要说清是输出上限：{error}"
+        );
+        // 原话 + 五套「半截回复 + 续写指令」都留在历史里；第六发是收摊前那一问，
+        // 不再回灌，所以总数停在 11 条。用户能整段复制走自己续。
+        assert_eq!(s.messages.lock().unwrap().len(), 11);
+    }
+
+    #[tokio::test]
+    async fn a_half_written_tool_call_never_reaches_history() {
+        let s = session();
+        rewire(
+            &s,
+            vec![
+                vec![
+                    Ok(LlmEvent::Token("先写脚本".into())),
+                    Ok(LlmEvent::ToolUseStart {
+                        index: 0,
+                        id: "c1".into(),
+                        name: "pixel_apply_operations".into(),
+                    }),
+                    Ok(LlmEvent::ToolInputDelta {
+                        index: 0,
+                        json_partial: "{\"ops\":[{\"op\":\"set".into(),
+                    }),
+                    Ok(LlmEvent::Done {
+                        stop_reason: "max_tokens".into(),
+                    }),
+                ],
+                vec![
+                    Ok(LlmEvent::ToolUseStart {
+                        index: 0,
+                        id: "c2".into(),
+                        name: "pixel_read_canvas".into(),
+                    }),
+                    Ok(LlmEvent::ToolInputDelta {
+                        index: 0,
+                        json_partial: "{}".into(),
+                    }),
+                    Ok(LlmEvent::Done {
+                        stop_reason: "tool_use".into(),
+                    }),
+                ],
+                done("画好了"),
+            ],
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("画一只猫".into(), Vec::new(), tx).await;
+        let flow = drain(rx);
+
+        assert!(flow.completed, "工具跑完接着问，这一轮要能收尾");
+        assert!(flow.error.is_none(), "{:?}", flow.error);
+        assert_eq!(flow.text, "先写脚本画好了");
+        // 半截入参不可信：进历史会被 provider 整包拒掉，续写那次就白发。
+        assert_eq!(flow.tools, vec!["pixel_read_canvas".to_string()]);
+        let history = s.messages.lock().unwrap().clone();
+        let ids: Vec<String> = history
+            .iter()
+            .flat_map(|m| m.content.iter())
+            .filter_map(|b| match b {
+                ContentBlock::ToolUse { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, vec!["c2".to_string()], "残缺的 c1 不该留下任何痕迹");
     }
 
     fn session() -> AgentSession {

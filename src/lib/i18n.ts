@@ -89,6 +89,8 @@ export const zh = {
   "chat.retry_tip": "这一轮没有跑完，重发刚才的话继续",
   "chat.stall": "已经 {secs} 秒没有新动静，可能卡住了。可以重发，也可以先中断。",
   "agent.interrupted": "已中断这一轮",
+  "agent.continuing": "回答到了输出上限，正在接着写（第 {done}/{max} 次）",
+  "agent.retrying": "这次请求没成（{reason}），正在重试 {attempt}/{max}",
   "chat.tool_no_output": "（无输出）",
 
   // ---------- 文档面板 ----------
@@ -549,6 +551,8 @@ export const en: Record<TKey, string> = {
   "chat.retry_tip": "This round did not finish; resend your last message to continue",
   "chat.stall": "No new output for {secs}s. It may be stuck - resend, or interrupt this round.",
   "agent.interrupted": "This round was interrupted",
+  "agent.continuing": "The reply hit the output limit, continuing ({done} of {max})",
+  "agent.retrying": "That request failed ({reason}); retrying {attempt} of {max}",
   "chat.tool_no_output": "(no output)",
 
   "doc.brush": "Brush",
