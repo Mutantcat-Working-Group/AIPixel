@@ -212,8 +212,10 @@ export interface PendingAttachment {
 /** 前端展示用的消息条目，从 AgentEvent 流推导而来。 */
 export type TranscriptEntry =
   | { key: string; kind: "user"; text: string; attachments: PendingAttachment[] }
-  | { key: string; kind: "assistant"; text: string; live: boolean }
-  | { key: string; kind: "reasoning"; text: string; live: boolean }
+  /** caption：流式期间贴在气泡下方的一行小字（续写进度、重试原因）。
+   * 做成气泡自己的属性而不是独立条目，才不会把一轮回复撕成两截。 */
+  | { key: string; kind: "assistant"; text: string; live: boolean; caption?: string }
+  | { key: string; kind: "reasoning"; text: string; live: boolean; caption?: string }
   /** 发送后立即弹出的占位：thinking=true 显示思考节点，否则显示一句「在处理」。 */
   | { key: string; kind: "pending"; thinking: boolean }
   | {

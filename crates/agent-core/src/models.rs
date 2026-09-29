@@ -214,6 +214,12 @@ pub struct ChatRequest {
     pub tools: Vec<ToolSpec>,
     pub max_tokens: u32,
     pub temperature: Option<f32>,
+    /// 是否把 assistant 的推理内容回灌给模型。
+    ///
+    /// DeepSeek-R1 一类的推理模型要求每轮都把上一轮的 `reasoning_content` 原样带回，
+    /// 否则它会当作全新的一轮重新想一遍——续写时表现为把前面写过的又念一次。
+    /// 但不是所有 OpenAI 兼容端点都认这个字段，所以由 provider 按模型名决定。
+    pub echo_reasoning: bool,
 }
 
 /// 运行预算与策略。

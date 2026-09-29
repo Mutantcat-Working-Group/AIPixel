@@ -1,6 +1,6 @@
 // 三条硬规矩：表里点名的模型必须命中；厂商前缀 / 日期后缀不能挡住匹配；
-// 认不出来的模型回落 8192，而不是留空或者瞎猜一个数。
-// `gpt-4.1` 不能被 `gpt-4` 抢走这条是重点——分隔符规则错了就会静默填成 8192。
+// 认不出来的模型回落 MAX_TOKENS_FALLBACK，而不是留空或者瞎猜一个数。
+// `gpt-4.1` 不能被 `gpt-4` 抢走这条是重点——分隔符规则错了就会静默填成小了一截的数。
 
 import { describe, expect, it } from "vitest";
 
@@ -15,6 +15,9 @@ describe("maxTokensHint", () => {
     expect(maxTokensHint("claude-sonnet-4-5")).toBe(64000);
     expect(maxTokensHint("gpt-4o")).toBe(16384);
     expect(maxTokensHint("deepseek-reasoner")).toBe(65536);
+    // 用户手里那台就是 deepseek-v4 系的 flash：小开点也要认作一家人。
+    expect(maxTokensHint("deepseek-v4.1-flash")).toBe(65536);
+    expect(maxTokensHint("deepseek-v4.2-flash")).toBe(65536);
   });
 
   it("认得出带日期后缀的模型名", () => {
@@ -25,12 +28,12 @@ describe("maxTokensHint", () => {
   it("认得出带厂商前缀的模型名", () => {
     expect(maxTokensHint("openai/gpt-4o")).toBe(16384);
     expect(maxTokensHint("zhipu/glm-4.6")).toBe(32768);
-    expect(maxTokensHint("accounts/fireworks/models/llama-3.3-70b-instruct")).toBe(8192);
+    expect(maxTokensHint("accounts/fireworks/models/llama-3.3-70b-instruct")).toBe(32768);
   });
 
   it("大小写不影响匹配", () => {
     expect(maxTokensHint("Claude-Sonnet-4-5")).toBe(64000);
-    expect(maxTokensHint(" DeepSeek-Chat ")).toBe(8192);
+    expect(maxTokensHint(" DeepSeek-Chat ")).toBe(32768);
   });
 
   it("不会把一个模型误判成另一个的前缀", () => {
@@ -54,6 +57,7 @@ describe("maxTokensForModel", () => {
 
   it("没命中就回落默认值，字段永远有值", () => {
     expect(maxTokensForModel("some-mystery-model")).toBe(MAX_TOKENS_FALLBACK);
-    expect(MAX_TOKENS_FALLBACK).toBe(8192);
+    // 兜底至少要装得下一段像样的分镜脚本，不能还是老掉牙的 8192。
+    expect(MAX_TOKENS_FALLBACK).toBe(32768);
   });
 });

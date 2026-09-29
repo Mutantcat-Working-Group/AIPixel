@@ -174,6 +174,47 @@ describe("reduceEvent", () => {
     expect(last.kind).toBe("notice");
     expect(last.kind === "notice" && last.retry).toBe(true);
   });
+
+  // 续写是用户抱怨最狠的一处：状态说明只要变成独立条目，下一发 token
+  // 就会另起一个气泡，一轮回复被撕成两半，看着就像模型把话重写了一遍。
+  it("keeps a status notice inside the bubble it is streaming into", () => {
+    let entries = pushUserMessage([], "hi", []);
+    entries = reduceEvent(entries, { kind: "token", text: "前半段" } as AgentEvent);
+    entries = reduceEvent(entries, {
+      kind: "status",
+      message: {
+        key: "agent.continuing",
+        vars: { done: 1, max: 20 },
+        fallback: "continuing ({done} of {max})",
+      },
+    } as AgentEvent);
+    expect(entries.some((entry) => entry.kind === "notice")).toBe(false);
+
+    // 后续 token 还往同一个气泡里追加，caption 也留着。
+    entries = reduceEvent(entries, { kind: "token", text: "后半段" } as AgentEvent);
+    expect(entries).toHaveLength(2);
+    const last = lastEntry(entries);
+    expect(last.kind).toBe("assistant");
+    expect(last.kind === "assistant" && last.text).toBe("前半段后半段");
+    expect(last.kind === "assistant" && last.caption).toBe(
+      "回答到了输出上限，正在接着写（第 1/20 次）",
+    );
+  });
+
+  it("puts the notice in its own entry when nothing is streaming", () => {
+    const base = pushUserMessage([], "hi", []);
+    const entries = reduceEvent(base, {
+      kind: "status",
+      message: {
+        key: "agent.retrying",
+        vars: { attempt: 1, max: 5, reason: "boom" },
+        fallback: "retrying ({attempt} of {max})",
+      },
+    } as AgentEvent);
+    const last = lastEntry(entries);
+    expect(last.kind).toBe("notice");
+    expect(last.kind === "notice" && last.text).toBe("这次请求没成（boom），正在重试 1/5");
+  });
 });
 
 describe("pushUserMessage", () => {

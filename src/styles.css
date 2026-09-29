@@ -424,6 +424,15 @@ body {
   color: var(--danger);
 }
 
+/* 贴在流式气泡底部的一行小字：续写进度、重试原因。
+   挂在气泡内部而不是单独一条 notice，才不会把一轮回复撕成两截。 */
+.stream-caption {
+  margin-top: 6px;
+  color: var(--text-faint);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
 .attachments-row {
   display: flex;
   flex-wrap: wrap;

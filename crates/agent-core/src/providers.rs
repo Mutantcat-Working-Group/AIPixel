@@ -11,7 +11,39 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-pub const DEFAULT_MAX_TOKENS: u32 = 8192;
+/// 没配 Max tokens 时的输出上限兜底。真值在 `limits`，这里只留一个别名，
+/// 免得两处数字各自漂移。
+pub const DEFAULT_MAX_TOKENS: u32 = crate::limits::FALLBACK_MAX_TOKENS;
+
+/// 这个模型要不要把上一轮的推理内容原样带回。
+///
+/// DeepSeek 的推理系（reasoner / r1 / v3 / v4）在官方文档里写明了必须回传
+/// `reasoning_content`，否则模型不认这段历史，下一轮会当新问题重想一遍。
+/// 通义千问 QwQ、智谱 GLM 的思考版、Kimi K2 思考版同理。
+/// OpenAI、Anthropic、Gemini 不认这个字段，回传反而会被端点拒掉，所以不放行。
+pub fn echoes_reasoning(model: &str) -> bool {
+    let name = model
+        .rsplit('/')
+        .next()
+        .unwrap_or(model)
+        .trim()
+        .to_lowercase();
+    const MARKS: &[&str] = &[
+        "deepseek-reasoner",
+        "deepseek-r1",
+        "deepseek-v3",
+        "deepseek-v4",
+        "qwq",
+        "glm-4.5",
+        "glm-4.6",
+        "glm-z1",
+        "kimi-k2-thinking",
+        "kimi-thinking",
+        "hunyuan-t1",
+        "ernie-x1",
+    ];
+    MARKS.iter().any(|m| crate::limits::name_matches(&name, m))
+}
 
 pub type EventStream = Pin<Box<dyn Stream<Item = Result<LlmEvent, ProviderError>> + Send>>;
 
@@ -203,6 +235,72 @@ mod tests {
             model_list_urls("https://api.example.com"),
             vec!["https://api.example.com/models".to_string()]
         );
+    }
+
+    /// 推理系的模型要把上一轮的思考原样带回，不然下一轮会被当成新问题重想一遍。
+    #[test]
+    fn only_the_reasoning_families_echo_their_thoughts_back() {
+        for model in [
+            "deepseek-reasoner",
+            "deepseek-r1",
+            "deepseek-v3",
+            // 用户手里那台就是 v4 系的 flash：续写时最吃这一口。
+            "deepseek-v4.1-flash",
+            "deepseek-v4-pro",
+            "qwq-plus",
+            "glm-4.6",
+            "kimi-k2-thinking",
+            "hunyuan-t1",
+            // 带目录前缀的中转也得认。
+            "vllm/deepseek-v4.1-flash",
+        ] {
+            assert!(echoes_reasoning(model), "{model} 该回传推理内容");
+        }
+        // 这些端点不认 reasoning_content，硬塞会被拒掉，或者白丢一半上下文。
+        for model in [
+            "gpt-4o",
+            "gpt-5",
+            "o3",
+            "claude-sonnet-4-5",
+            "gemini-2.5-pro",
+            "deepseek-chat",
+            "qwen-max",
+            "grok-4",
+        ] {
+            assert!(!echoes_reasoning(model), "{model} 不该回传推理内容");
+        }
+    }
+
+    /// 回传与否只看开关：开着才补这个字段，塞错端点是会被整包拒掉的。
+    #[test]
+    fn reasoning_content_is_sent_only_when_the_model_asks_for_it() {
+        let messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Reasoning {
+                    text: "先看看画布".into(),
+                },
+                ContentBlock::Text {
+                    text: "我来画".into(),
+                },
+            ],
+        }];
+
+        let with = to_openai_messages(&messages, true);
+        assert_eq!(
+            with[0]["reasoning_content"],
+            json!("先看看画布"),
+            "回传时要把推理原样带上"
+        );
+
+        let without = to_openai_messages(&messages, false);
+        assert!(
+            without[0].get("reasoning_content").is_none(),
+            "不该出现这个字段"
+        );
+        // 两边的正文都在：推理是附带信息，不是正文的替代品。
+        assert_eq!(with[0]["content"], json!("我来画"));
+        assert_eq!(without[0]["content"], json!("我来画"));
     }
 }
 
@@ -601,7 +699,7 @@ impl LlmProvider for OpenAiCompatProvider {
             return Err(ProviderError::Config("missing api key".into()));
         }
         let mut messages = vec![json!({"role": "system", "content": req.system})];
-        messages.extend(to_openai_messages(&req.messages));
+        messages.extend(to_openai_messages(&req.messages, req.echo_reasoning));
         let body = json!({
             "model": self.model,
             "max_tokens": req.max_tokens,
@@ -725,7 +823,7 @@ pub(crate) fn to_anthropic_messages(messages: &[Message]) -> Vec<Value> {
     out
 }
 
-pub(crate) fn to_openai_messages(messages: &[Message]) -> Vec<Value> {
+pub(crate) fn to_openai_messages(messages: &[Message], echo_reasoning: bool) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
     for m in messages {
         match m.role {
@@ -758,11 +856,26 @@ pub(crate) fn to_openai_messages(messages: &[Message]) -> Vec<Value> {
             }
             Role::Assistant => {
                 let text = m.text_of();
+                // 推理模型的连续对话要靠这段：上一轮想过什么不带回去，模型就
+                // 当新问题重想一遍，续写出来的东西自然就是把开头再念一次。
+                let reasoning: String = m
+                    .content
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::Reasoning { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
                 let text = if text.is_empty() {
                     Value::Null
                 } else {
                     json!(text)
                 };
+                let mut msg = json!({"role": "assistant", "content": text});
+                if echo_reasoning && !reasoning.is_empty() {
+                    msg["reasoning_content"] = json!(reasoning);
+                }
                 let tool_calls: Vec<Value> = m
                     .content
                     .iter()
@@ -775,7 +888,6 @@ pub(crate) fn to_openai_messages(messages: &[Message]) -> Vec<Value> {
                         _ => None,
                     })
                     .collect();
-                let mut msg = json!({"role": "assistant", "content": text});
                 if !tool_calls.is_empty() {
                     msg["tool_calls"] = json!(tool_calls);
                 }

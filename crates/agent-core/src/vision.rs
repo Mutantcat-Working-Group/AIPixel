@@ -116,6 +116,8 @@ pub fn brief_request(attachment: &Attachment, width: u32, height: u32) -> ChatRe
         tools: Vec::new(),
         max_tokens: 1500,
         temperature: None,
+        // 简报是单轮请求，历史里没有推理内容可回灌。
+        echo_reasoning: false,
     }
 }
 

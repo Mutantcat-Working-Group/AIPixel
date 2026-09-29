@@ -65,7 +65,9 @@ function toForm(model: ModelView | null): FormShape {
       base_url: "https://api.anthropic.com/v1",
       api_key: "",
       model: "claude-sonnet-4-5",
-      max_tokens: 4096,
+      // 新模型一上来就给个像样的上限：填 4096 的话，一段分镜脚本
+      // 连思考带正文写到一半就被掐断，用户只会以为模型笨。
+      max_tokens: maxTokensForModel("claude-sonnet-4-5"),
       temperature: null,
       capabilities: { ...NO_CAPABILITIES },
     };

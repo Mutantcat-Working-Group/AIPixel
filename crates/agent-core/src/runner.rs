@@ -22,6 +22,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
 use super::imagegen::{self, ImageGenParams, LandSpot};
+use super::limits;
 use super::mcp::{self, McpRegistry};
 use super::models::{
     ActiveContext, AgentEvent, ApprovalDecision, Attachment, Capabilities, ChatRequest,
@@ -85,7 +86,17 @@ impl IdleWatch {
 /// provider 报的 stop reason 是 `max_tokens` / `length` 只说明「话没说完」，
 /// 不等于模型说完了。像素画的 Lua 脚本动辄几百行，撞线极其常见；
 /// 不续写的话，用户看到的永远是一段半截代码。
-const MAX_CONTINUATIONS: usize = 5;
+///
+/// 取 20 而不是 5：按常用模型的 64k 上限算，这相当于一百三十万 token 的总产出，
+/// 对一段分镜脚本来说就是「写不完不收手」。真正的刹车是 `continuation_progressed`——
+/// 模型一旦开始原地复读，第一发就收，不会白烧二十次。
+const MAX_CONTINUATIONS: usize = 20;
+
+/// 续写一次至少要吐出这么多个字符，否则算没推进。
+const MIN_CONTINUATION_GAIN: usize = 24;
+
+/// 回灌「你写到哪里了」时，尾巴截多长。
+const RESUME_TAIL_CHARS: usize = 400;
 
 /// 一次请求失败后最多重试几次：网络抖动、连接被代理掐断、流直接报错。
 const MAX_ROUND_RETRIES: usize = 5;
@@ -105,9 +116,48 @@ fn retryable(err: &ProviderError) -> bool {
     }
 }
 
-/// 续写时回灌给模型的指令。界面文案走字典，这句是喂模型的，必须英文，
-/// 而且要钉死「别重复、别总结」——不然模型会把前面五百字原样再念一遍。
-const CONTINUE_NUDGE: &str = "Your previous reply was cut off by the output limit before it finished. Continue from exactly where it stopped: do not repeat anything you already wrote, do not summarise or restate earlier text, and finish the sentence or tool call that was in progress.";
+/// 续写时回灌给模型的指令。界面文案走字典，这句是喂模型的，必须英文。
+///
+/// 关键是把「你写到哪里了」的原文尾巴一起给它。只说一句泛泛的「继续」，
+/// 模型很可能重起一趟：先复述前面写过的，再往下接——用户看到的就是同一段话
+/// 被写了两遍。把断点原文按在眼前，它只能接着那几个字往下走。
+fn continue_nudge(carried: &str) -> String {
+    let tail: String = carried
+        .chars()
+        .rev()
+        .take(RESUME_TAIL_CHARS)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!(
+        "Your previous reply was cut off by the output limit before it finished. \
+You had already written {} characters, and it stopped mid-stream at exactly this point:\n\n\
+---{tail}\n---\n\n\
+Continue from that exact point. Output only the text that is still missing: \
+do not repeat any of it, do not restate or summarise what you already wrote, \
+do not re-announce a plan, and do not start over. \
+Finish the line, statement, or tool call that was in progress.",
+        carried.chars().count(),
+    )
+}
+
+/// 这一发续写到底有没有往下走。
+///
+/// 模型偶尔会犯轴：把已经写完的原样再吐一遍，或者干脆只吐几个字。长度在涨，
+/// 内容一步没动。这种续写再要二十次也白搭，不如当场收手告诉用户断在哪。
+fn continuation_progressed(carried: &str, fresh: &str) -> bool {
+    // 第一发还没攒下任何内容，没有锚点可比较。此时哪怕只接上几个字
+    // （一个反引号、半个函数名）也算往前走，不该被当成复读。
+    if carried.is_empty() {
+        return !fresh.is_empty();
+    }
+    let gained = fresh.chars().count();
+    if gained < MIN_CONTINUATION_GAIN {
+        return false;
+    }
+    !carried.contains(fresh)
+}
 
 /// 重试退避：1s、2s、4s、8s，之后封顶。失败不该把用户晾在原地干等。
 fn retry_backoff(attempt: usize) -> Duration {
@@ -549,6 +599,10 @@ impl AgentSession {
             logical_rounds += 1;
 
             let provider = self.engine.lock().unwrap().provider.clone();
+            // 本逻辑轮已经写下的正文。续写指令要把断点原文按在模型眼前，
+            // 光说一句「继续」，它会当新问题重想一遍、把开头再念一次。
+            let mut carried = String::new();
+            let mut stalled = false;
             // 重试与续写都收在这个小循环里。请求每一发都重装：历史里刚 push 的
             // 半截回复必须在这发请求里生效，不然就是白续一次。
             let raw: RoundRaw = loop {
@@ -617,12 +671,21 @@ impl AgentSession {
 
                 // 话没说完就接着问。前半截已经逐字推给前端了，续写只是继续追加，
                 // 用户看到的是一段完整输出，而不是半句摆在屏幕上。
-                if raw.stop == StopKind::Truncated
-                    && raw.resumable()
-                    && continuations < MAX_CONTINUATIONS
-                {
+                if raw.stop == StopKind::Truncated && raw.resumable() {
+                    if continuations >= MAX_CONTINUATIONS {
+                        break raw;
+                    }
+                    // 这一轮写下的全部内容：推理算，正文也算。只认正文的话，
+                    // 「一整轮都耗在思考上、一个字没吐」会被当成没推进，
+                    // 而它恰恰是最需要续写的那一种。
+                    let fresh = format!("{}{}", raw.reasoning, raw.text);
+                    if !continuation_progressed(&carried, &fresh) {
+                        stalled = true;
+                        break raw;
+                    }
+                    carried.push_str(&fresh);
                     continuations += 1;
-                    self.push_resume(&raw, CONTINUE_NUDGE);
+                    self.push_resume(&raw, &continue_nudge(&carried));
                     emit(
                         &tx,
                         AgentEvent::Status {
@@ -634,20 +697,24 @@ impl AgentSession {
                 break raw;
             };
 
-            // 续写配额也用完了：连着五发都还是被输出上限掐断。如实告诉用户断在哪，
+            // 没写出个结果就收场了：如实告诉用户断在哪、为什么断，
             // 别让一段半截 Lua 看起来像是画完了。
             if raw.stop == StopKind::Truncated {
-                let message = if raw.resumable() {
-                    "the reply kept hitting the output limit even after the last continuation; raise Max tokens in model settings and resend your request"
+                let message = if stalled {
+                    // 「原样再写一遍」和「几乎没吐新东西」都走这一条，
+                    // 话说得太死会冤枉了后者。
+                    "the reply stopped making progress: the model either repeated text it had already written or produced almost nothing new, so the run stopped at the point shown above"
+                        .to_string()
+                } else if raw.resumable() {
+                    format!(
+                        "the reply still hit the output limit after {} continuation(s); raise Max tokens in model settings and resend your request",
+                        continuations
+                    )
                 } else {
                     "the model produced nothing before the output limit; raise Max tokens in model settings"
+                        .to_string()
                 };
-                emit(
-                    &tx,
-                    AgentEvent::Error {
-                        message: message.into(),
-                    },
-                );
+                emit(&tx, AgentEvent::Error { message });
                 return;
             }
 
@@ -890,8 +957,12 @@ impl AgentSession {
             max_tokens: engine
                 .config
                 .max_tokens
-                .unwrap_or(providers::DEFAULT_MAX_TOKENS),
+                // 没配过就按模型名取常用上限：4096 装不下一段分镜脚本，
+                // 而用户不该被要求先去翻文档才知道该填多少。
+                .unwrap_or_else(|| limits::ceiling_for(&engine.config.model)),
             temperature: engine.config.temperature,
+            // 推理模型要拿回上一轮的思考，不然续写时它会当新问题重想一遍。
+            echo_reasoning: providers::echoes_reasoning(&engine.config.model),
         }
     }
 
@@ -1237,20 +1308,61 @@ mod tests {
     }
 
     #[test]
-    fn the_continue_nudge_forbids_repeating_and_summarising() {
-        // 这句是喂给模型的：必须明确钉死不重复、不复述，否则会把前半段原样再念一遍。
-        let nudge = CONTINUE_NUDGE.to_lowercase();
+    fn the_continue_nudge_pins_the_resume_point() {
+        let carried = "上面已经写好的正文".repeat(40);
+        let nudge = continue_nudge(&carried).to_lowercase();
+        // 断点原文必须原样出现在指令里：模型只能接着那几个字往下走，
+        // 没给它锚点的话它会当新问题重想一遍。
+        let tail: String = carried
+            .chars()
+            .rev()
+            .take(RESUME_TAIL_CHARS)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        assert!(nudge.contains(&tail.to_lowercase()), "指令里少了断点原文");
         assert!(nudge.contains("do not repeat"), "少了「别重复」");
+        assert!(nudge.contains("do not start over"), "少了「别重起」");
         assert!(
-            nudge.contains("continue from exactly where it stopped"),
-            "少了「从断点续」"
+            nudge.contains("do not re-announce a plan"),
+            "少了「别复述计划」"
         );
-        assert!(!nudge.contains('确'), "喂模型的话不能夹中文");
+        assert!(!nudge.contains('续'), "喂模型的话不能夹中文");
+    }
+
+    #[test]
+    fn a_model_retyping_the_same_words_makes_no_progress() {
+        let carried = "前半段正文".repeat(30);
+        assert!(
+            !continuation_progressed(&carried, &carried),
+            "把已有内容原样再吐一遍不算往下走"
+        );
+        assert!(
+            !continuation_progressed(&carried, "嗯"),
+            "只吐一两个字也不算"
+        );
+        // 一穷二白的时候没得可复读：接上个反引号、半个函数名都该放行，
+        // 不然模型第一发只吐出几字符就会被误判成卡住。
+        assert!(continuation_progressed("", "```"), "开头几个字也算推进");
+        assert!(
+            !continuation_progressed("", ""),
+            "一个字符都不吐才是真的没动"
+        );
+        assert!(
+            continuation_progressed(
+                &carried,
+                "紧接着往下写的新内容，长度要足够算一次有效的推进才行"
+            ),
+            "真的往下写了要认"
+        );
     }
 
     #[test]
     fn continuation_and_retry_budgets_are_capped() {
-        assert_eq!(MAX_CONTINUATIONS, 5, "续写上限就是五次");
+        // 上限放到二十次：按 64k 的输出算约一百三十万 token，对一段分镜脚本
+        // 就是「写不完不收手」。真正的刹车是原地复读检测。
+        assert_eq!(MAX_CONTINUATIONS, 20);
         assert_eq!(MAX_ROUND_RETRIES, 5, "重试上限就是五次");
     }
 
@@ -1349,6 +1461,39 @@ mod tests {
         ]
     }
 
+    /// 一整轮都耗在思考上，正文一个字都没吐出来——推理模型被掐断时最常见的形态。
+    fn cut_after_thinking(thought: &str) -> Vec<Result<LlmEvent, ProviderError>> {
+        vec![
+            Ok(LlmEvent::Reasoning(thought.into())),
+            Ok(LlmEvent::Done {
+                stop_reason: "max_tokens".into(),
+            }),
+        ]
+    }
+
+    #[tokio::test]
+    async fn a_round_that_only_thought_is_still_progress() {
+        let s = session();
+        // 推理模型最常见的形态：整轮预算都烧在思考上，正文一个字都没吐。
+        // 这种轮次必须接着续，不能因为「正文为空」就判定它卡死了。
+        rewire(
+            &s,
+            vec![
+                cut_after_thinking("先把这个五帧行走的橘猫从头想一遍，想得很长很长很长"),
+                cut("接着写正文，这一轮终于落到脚本上了，长度足够算推进"),
+                done("写完了"),
+            ],
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("画一只猫".into(), Vec::new(), tx).await;
+        let flow = drain(rx);
+
+        assert!(flow.completed, "两轮续写之后该正常收尾：{:?}", flow.error);
+        assert!(flow.error.is_none(), "{:?}", flow.error);
+        assert_eq!(flow.statuses.len(), 2, "两轮掐断就是两次续写提示");
+    }
+
     #[tokio::test]
     async fn a_cut_off_reply_is_continued_until_the_model_finishes() {
         let s = session();
@@ -1369,8 +1514,12 @@ mod tests {
         assert_eq!(texts.len(), 4, "原话、半截回复、续写指令、完整回复");
         assert_eq!(texts[1], "前半段", "半截回复要原样进历史");
         assert!(
-            texts[2].contains("Continue from exactly where it stopped"),
-            "续写指令得把断点说清楚"
+            texts[2].contains("---前半段\n---"),
+            "续写指令得把断点原文按在模型眼前：{texts:?}"
+        );
+        assert!(
+            texts[2].contains("Continue from that exact point"),
+            "还得明确要求它接着写：{texts:?}"
         );
     }
 
@@ -1489,26 +1638,76 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn after_five_continuations_the_run_says_so_out_loud() {
+    async fn twenty_continuations_still_hit_the_wall() {
         let s = session();
-        rewire(&s, (0..6).map(|_| cut("半截")).collect::<Vec<_>>());
+        // 二十次续写 = 二十一发请求。每一发都得吐出点新东西，不然第一发
+        // 就被复读检测拦下，走不到配额用尽这一步。
+        let scripts = (0..=MAX_CONTINUATIONS)
+            .map(|i| {
+                cut(
+                    &format!("第 {i} 段被掐断的正文，模型确实在往下写，长度足够算一次推进")
+                        .repeat(2),
+                )
+            })
+            .collect::<Vec<_>>();
+        rewire(&s, scripts);
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         s.run_turn("画一只猫".into(), Vec::new(), tx).await;
         let flow = drain(rx);
 
         assert!(!flow.completed, "配额用尽不许悄悄收尾");
-        // 五次续写 = 一共六发请求。第六发读到的正文照样逐字推给用户，
-        // 只是判断出「又被掐断且没额度了」之后才收摊。
-        assert_eq!(flow.text, "半截".repeat(6), "每发读到多少就显示多少");
+        assert_eq!(
+            flow.statuses.len(),
+            MAX_CONTINUATIONS,
+            "每续一次都要给用户一个进度提示"
+        );
+        assert!(
+            flow.statuses.iter().all(|k| k == "agent.continuing"),
+            "{:?}",
+            flow.statuses
+        );
         let error = flow.error.unwrap_or_default();
         assert!(
             error.contains("output limit"),
             "报错要说清是输出上限：{error}"
         );
-        // 原话 + 五套「半截回复 + 续写指令」都留在历史里；第六发是收摊前那一问，
-        // 不再回灌，所以总数停在 11 条。用户能整段复制走自己续。
-        assert_eq!(s.messages.lock().unwrap().len(), 11);
+        // 用户那一句 + 二十套「半截回复 + 续写指令」；第二十一发是收摊前那一问，
+        // 不再回灌，所以总数停在 41 条。用户能整段复制走自己续。
+        assert_eq!(s.messages.lock().unwrap().len(), 41);
+    }
+
+    #[tokio::test]
+    async fn a_model_that_retypes_the_same_words_is_cut_off_early() {
+        let s = session();
+        let repeated = "这段正文模型早就写过了，原样再吐一遍不算任何推进";
+        // 第一发写完好整一段，之后每发都只把它复读出来——与其要二十次，
+        // 不如当场告诉用户断在哪。
+        rewire(
+            &s,
+            vec![
+                cut(repeated),
+                cut(repeated),
+                cut(repeated),
+                done("这发根本不该被打断"),
+            ],
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("画一只猫".into(), Vec::new(), tx).await;
+        let flow = drain(rx);
+
+        assert!(!flow.completed, "卡死了不许悄悄收尾");
+        // 只续了第一次就不再要了：后面那两发复读连同「说完了」都没发生。
+        assert_eq!(flow.text, repeated.repeat(2));
+        assert_eq!(flow.statuses, vec!["agent.continuing".to_string()]);
+        let error = flow.error.unwrap_or_default();
+        assert!(
+            error.contains("stopped making progress"),
+            "要说清是回复不再推进：{error}"
+        );
+        // 用户那一句 + 第一次续写回灌的「半截回复 + 续写指令」，共三条。
+        assert_eq!(s.messages.lock().unwrap().len(), 3);
     }
 
     #[tokio::test]

@@ -147,6 +147,15 @@ function sealLiveAssistant(entries: TranscriptEntry[]): TranscriptEntry[] {
   return next;
 }
 
+/** 最后一个还在往外流的节点（正文或思考）的下标，没有就是 -1。 */
+function lastLiveEntry(entries: TranscriptEntry[]): number {
+  for (let i = entries.length - 1; i >= 0; i -= 1) {
+    const entry = entries[i];
+    if ((entry.kind === "assistant" || entry.kind === "reasoning") && entry.live) return i;
+  }
+  return -1;
+}
+
 /** 折叠一条事件。document_updated 不在这里处理（驱动画布，不是对话内容）。 */
 export function reduceEvent(
   entries: TranscriptEntry[],
@@ -227,10 +236,20 @@ export function reduceEvent(
       return next;
     }
     case "status": {
-      return [
-        ...entries,
-        { key: key(), kind: "notice", text: renderUiText(lang, event.message), isError: false },
-      ];
+      const note = renderUiText(lang, event.message);
+      // 正文正在往外流的时候，状态说明贴在同一个气泡的底部：另起一条 notice
+      // 会把 live 气泡顶到最后一位之外，下一个 token 就换个新气泡接着写，
+      // 用户看到的就是一轮回复被撕成两半。
+      const live = lastLiveEntry(entries);
+      if (live >= 0) {
+        const target = entries[live];
+        if (target.kind === "assistant" || target.kind === "reasoning") {
+          const next = [...entries];
+          next[live] = { ...target, caption: note };
+          return next;
+        }
+      }
+      return [...entries, { key: key(), kind: "notice", text: note, isError: false }];
     }
     case "error": {
       return [

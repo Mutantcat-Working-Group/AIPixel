@@ -136,6 +136,7 @@ function EntryRow({ entry }: { entry: TranscriptEntry }) {
           {entry.text}
           {entry.live ? <span className="caret" /> : null}
         </div>
+        {entry.caption ? <div className="stream-caption">{entry.caption}</div> : null}
       </div>
     );
   }
@@ -177,10 +178,14 @@ function EntryRow({ entry }: { entry: TranscriptEntry }) {
   }
   if (entry.kind === "reasoning") {
     return (
-      <details className="entry-reasoning" open={entry.live}>
-        <summary>{t("chat.reasoning")}</summary>
-        <div className="reasoning-body">{entry.text}</div>
-      </details>
+      <>
+        <details className="entry-reasoning" open={entry.live}>
+          <summary>{t("chat.reasoning")}</summary>
+          <div className="reasoning-body">{entry.text}</div>
+        </details>
+        {/* 思考块折叠起来之后，续写这一行还得看得见：用户得知道它没卡死。 */}
+        {entry.caption ? <div className="stream-caption">{entry.caption}</div> : null}
+      </>
     );
   }
   return (

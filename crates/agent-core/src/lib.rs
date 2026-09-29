@@ -11,6 +11,7 @@
 //! `AgentEvent`，由上层（src-tauri）转成 Tauri 事件广播。
 
 pub mod imagegen;
+pub mod limits;
 pub mod mcp;
 pub mod models;
 pub mod one_shot;

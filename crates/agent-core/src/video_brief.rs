@@ -200,6 +200,8 @@ pub fn brief_request(
         tools: Vec::new(),
         max_tokens: 1500,
         temperature: None,
+        // 简报是单轮请求，历史里没有推理内容可回灌。
+        echo_reasoning: false,
     }
 }
 

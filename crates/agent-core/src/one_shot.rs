@@ -29,6 +29,8 @@ pub async fn chat_once(
         tools: Vec::new(),
         max_tokens: max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         temperature: config.temperature,
+        // 单轮补写也可能挂着一截 reasoning，回灌口径跟着模型走。
+        echo_reasoning: super::providers::echoes_reasoning(&config.model),
     };
     let client = reqwest::Client::new();
     match config.protocol {
@@ -76,7 +78,10 @@ pub async fn chat_once(
         }
         Protocol::OpenAiCompat => {
             let mut messages = vec![json!({"role": "system", "content": req.system})];
-            messages.extend(super::providers::to_openai_messages(&req.messages));
+            messages.extend(super::providers::to_openai_messages(
+                &req.messages,
+                super::providers::echoes_reasoning(&config.model),
+            ));
             let body = json!({
                 "model": config.model,
                 "max_tokens": req.max_tokens,
