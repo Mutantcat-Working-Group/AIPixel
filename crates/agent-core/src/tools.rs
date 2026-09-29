@@ -39,7 +39,7 @@ CANVAS API (each of these also works as canvas.pset, canvas.line, ... - both for
   replace(from, to)          swap one color for another across the whole cel
   outline(color)             1px outline around every existing non-transparent pixel; call it LAST, after the shapes
   clear(color)               erase the cel, or fill it with one color
-  stamp(rows, legend, x, y)  rows are strings of symbols, '.' keeps the pixel, legend maps symbol -> color
+  stamp(rows, legend, x, y)  rows are strings of legend symbols, '.' and space are transparent (they ERASE), legend maps symbol -> color; all rows must share one length
 Shapes clip to the canvas, so a circle larger than the canvas is safe. color is a palette index or "#RRGGBB"/"#RRGGBBAA"; alpha 00 or nil erases. pset does not clip, so pset outside the canvas is a hard error.
 
 BUDGETS: ~20M Lua instructions, 5 seconds, one changed-pixel cap. When the script has a mistake the error names the exact line - fix that line and resubmit; never resubmit the same script unchanged.
@@ -52,6 +52,18 @@ EXAMPLE - static sprite with a ramp, a highlight and an outline: four lines that
   circfill(34, 32, 8, shadow)
   circfill(26, 24, 3, rim)
   outline(mix(shadow, '#000000', 0.6))
+
+EXAMPLE - hand-written rows for ONE small sprite, for when there is no loop to write: shorter than the equivalent script and every pixel placed deliberately. All rows must share one length, so pad the right of each row with '.'.
+  stamp({
+      '.hd.xx..',
+      'hhxxxxx.',
+      'xxxxxxxx',
+      'xxxxxxxx',
+      '.xxxxxx.',
+      '..xxxx..',
+      '...xx...',
+      '........',
+  }, {h='#FF6B6B', d='#B32D2D', x='#E23B3B'}, 0, 0)
 
 EXAMPLE - animate=true bob (phase drives everything; create the frames with pixel_apply_operations first):
   local ink = pal(1)
@@ -83,14 +95,14 @@ COLOR RANGES: every layer points at exactly one named palette.
   Builtin ranges are read-only: to change one, create_palette with from=<builtin id> to fork it, then set_layer_palette.
   locked = true restricts that layer to its range and snaps out-of-range colors to the nearest color inside it; locked = false lets the layer use any color.
 
-PIXEL PATCHES (only for a few pixels each - never for a drawing):
+PIXEL PATCHES (document structure, plus the placement half of a hand-written sprite):
   set_pixels {layer?, frame?, cells: [{x, y, color}], w?, h?}   sparse pixel list
   stamp_grid {layer?, frame?, rows: [string], legend: {sym: color}, x, y}   every row must share one length, '.' is transparent
   draw_shape {layer?, frame?, shape: line|rect|ellipse, x0, y0, x1, y1, w?, h?, color, filled?, layer?}
   bucket_fill {layer?, frame?, x, y, color}           clear_region {layer?, frame?, x, y, w, h}
 Coordinates are 0-based from the top-left; colors are "#RRGGBB" or "#RRGGBBAA" (null clears).
 
-To create a NEW drawing or change a whole sprite, use pixel_run_shader instead. To animate, create the frames here first, then run the shader with animate=true."##;
+Use pixel_run_shader to create or change artwork. Its body is paths and math when the artwork has symmetry, repetition, a cycle or a canvas at 48px and above, and hand-written rows through stamp() when it is one small sprite at 47px and below with no loop to write; stamp_grid here is the same hand-written-row route for a single static frame. To animate, create the frames here first, then run the shader with animate=true."##;
 
 /// 工具回填给模型的 RLE 网格字符预算。
 const TOOL_GRID_CHARS: usize = 3000;

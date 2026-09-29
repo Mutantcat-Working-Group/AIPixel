@@ -1036,3 +1036,67 @@ fn shader_canvas_table_form_draws_too() {
     assert!(cel.indices.iter().any(|i| *i != 0));
     assert!(cel.get(doc.width, 12, 12).is_some() && cel.get(doc.width, 12, 12).unwrap() != 0);
 }
+
+#[test]
+fn shader_hand_written_rows_place_every_pixel() {
+    // 工具说明里给模型的那份手写行示例必须真能跑：示例就是契约。
+    let mut doc = blank();
+    let (layer, frame) = (doc.layers[0].id.clone(), doc.frames[0].id.clone());
+    shader::run_shader(
+        &mut doc,
+        &layer,
+        r##"
+        stamp({
+            '.hd.xx..',
+            'hhxxxxx.',
+            'xxxxxxxx',
+            'xxxxxxxx',
+            '.xxxxxx.',
+            '..xxxx..',
+            '...xx...',
+            '........',
+        }, {h='#FF6B6B', d='#B32D2D', x='#E23B3B'}, 0, 0)
+        "##,
+        false,
+        &ShaderBudget::default(),
+    )
+    .expect("手写行示例要能跑");
+    let cel = doc.cel(&layer, &frame).unwrap();
+    // 高光与暗部相邻，主体实心，两侧 '.' 保持透明。
+    let h = cel.get(doc.width, 1, 0).unwrap();
+    let d = cel.get(doc.width, 2, 0).unwrap();
+    let gap = cel.get(doc.width, 0, 0).unwrap();
+    let body = cel.get(doc.width, 5, 2).unwrap();
+    assert_eq!(gap, 0, "'.' 应该透明，而不是保留原像素");
+    assert_ne!(h, 0, "高光点没画上");
+    assert_ne!(body, 0, "主体没画上");
+    assert_ne!(h, d, "高光和暗部得是两个不同色号");
+    // 收成尖角：第 6 行只有两列着色，第 7 行全透明。
+    let tip = (0..16)
+        .filter(|x| cel.get(doc.width, *x, 6).unwrap() != 0)
+        .count();
+    assert_eq!(tip, 2, "尖端应该只有 2px，实际 {tip}");
+    assert!(
+        (0..16).all(|x| cel.get(doc.width, x, 7).unwrap() == 0),
+        "全点行应该整行透明"
+    );
+}
+
+#[test]
+fn shader_hand_written_rows_reject_a_row_of_the_wrong_width() {
+    // 行宽校验是手写行的安全网：中间漏一列必须报错并点名行号，而不是画歪。
+    let mut doc = blank();
+    let layer = doc.layers[0].id.clone();
+    let err = shader::run_shader(
+        &mut doc,
+        &layer,
+        r##"
+        stamp({'..xx', 'xxx', '..xx'}, {x='#FF004D'}, 0, 0)
+        "##,
+        false,
+        &ShaderBudget::default(),
+    )
+    .expect_err("行宽不一致必须报错");
+    let msg = err.to_string();
+    assert!(msg.contains('2'), "错误要点名那一行：{msg}");
+}

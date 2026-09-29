@@ -1797,42 +1797,52 @@ impl AgentSession {
         }
         let mut changed = Vec::new();
         for update in updates.references {
-            *plan.reference_modes.get_mut(update.index - 1).unwrap() = Some(update.mode);
-            changed.push(format!(
-                "image {} is now {}",
-                update.index,
-                update.mode.as_str()
-            ));
+            let slot = plan.reference_modes.get_mut(update.index - 1).unwrap();
+            if *slot != Some(update.mode) {
+                *slot = Some(update.mode);
+                changed.push(format!(
+                    "image {} is now {}",
+                    update.index,
+                    update.mode.as_str()
+                ));
+            }
         }
         if let Some(intent) = updates.intent {
             match intent {
                 Some(intent) => {
-                    changed.push(format!("the deliverable is now {}", intent.id()));
-                    plan.intent = Some(intent);
+                    if plan.intent != Some(intent) {
+                        plan.intent = Some(intent);
+                        changed.push(format!("the deliverable is now {}", intent.id()));
+                    }
                 }
                 None => {
-                    changed.push("the deliverable is no longer pinned".to_string());
-                    plan.intent = None;
+                    if plan.intent.take().is_some() {
+                        changed.push("the deliverable is no longer pinned".to_string());
+                    }
                 }
             }
         }
         if let Some(style) = updates.style {
             match style {
                 Some(style) => {
-                    changed.push(format!("the art style is now {}", style.id()));
-                    plan.style = Some(style);
+                    if plan.style != Some(style) {
+                        plan.style = Some(style);
+                        changed.push(format!("the art style is now {}", style.id()));
+                    }
                 }
                 None => {
-                    changed.push("the art style is no longer pinned".to_string());
-                    plan.style = None;
+                    if plan.style.take().is_some() {
+                        changed.push("the art style is no longer pinned".to_string());
+                    }
                 }
             }
         }
         if changed.is_empty() {
             return ToolOutcome {
                 content: format!(
-                    "{PLAN_TOOL}: nothing to correct; leave a reference mode, an intent or a \
-                      style, or release one with \"none\""
+                    "{PLAN_TOOL}: nothing to correct - the TURN ROUTING section of your system \
+                     prompt already carries exactly this state, so restating it changed nothing. \
+                     Do not re-send routing; go straight to the drawing tool."
                 ),
                 is_error: true,
             };
@@ -3355,6 +3365,66 @@ mod tests {
             systems[1].contains("far, mid and near planes"),
             "场景的规则得跟着走，不然等于没纠正：{}",
             systems[1]
+        );
+    }
+
+    /// 模型重述一条已经生效的分流：这一发什么都没改，下一发请求必须原样不动。
+    /// 否则「先登记再画」被当成真纠正，模型白赚一个来回，还学着每次都先登记。
+    #[tokio::test]
+    async fn restating_the_routing_is_a_no_op() {
+        let s = session();
+        let watched = rewire_watch(
+            &s,
+            vec![
+                vec![
+                    Ok(LlmEvent::ToolUseStart {
+                        index: 0,
+                        id: "c1".into(),
+                        name: PLAN_TOOL.into(),
+                    }),
+                    Ok(LlmEvent::ToolInputDelta {
+                        index: 0,
+                        json_partial: r#"{"intent":"icon"}"#.into(),
+                    }),
+                    Ok(LlmEvent::Done {
+                        stop_reason: "tool_use".into(),
+                    }),
+                ],
+                vec![
+                    Ok(LlmEvent::ToolUseStart {
+                        index: 0,
+                        id: "c2".into(),
+                        name: "pixel_run_shader".into(),
+                    }),
+                    Ok(LlmEvent::ToolInputDelta {
+                        index: 0,
+                        json_partial: r#"{"script":"stamp({'..aa..','.a..a.'},{a=pal(1)},0,0)"}"#
+                            .into(),
+                    }),
+                    Ok(LlmEvent::Done {
+                        stop_reason: "tool_use".into(),
+                    }),
+                ],
+                done("画好了"),
+            ],
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("画个图标".into(), Vec::new(), tx).await;
+        let flow = drain(rx);
+
+        assert!(flow.completed, "{:?}", flow.error);
+        let systems = watched.systems.lock().unwrap();
+        assert!(systems.len() >= 2, "{:?}", systems.len());
+        assert_eq!(
+            systems[0], systems[1],
+            "重述一条已生效的分流，不该改动系统提示词"
+        );
+        // 空转被顶回去之后就该画：第二发带着真家伙。
+        assert!(
+            flow.tools.contains(&"pixel_run_shader".to_string()),
+            "被顶回去之后还是得画：{:?}",
+            flow.tools
         );
     }
 

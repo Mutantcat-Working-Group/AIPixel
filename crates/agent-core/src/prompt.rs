@@ -15,9 +15,13 @@ ENCODING: `.` is transparent; every other legend symbol maps to a palette color.
 LUA CANVAS API (for pixel_run_shader): pset(x,y,color), pget(x,y), line(x0,y0,x1,y1,color), rect / rectfill(x0,y0,x1,y1,color[,filled]) taking two CORNERS inclusive, ellipse / ellipfill(x0,y0,x1,y1,color[,filled]) taking BOUNDING-BOX CORNERS, circle / circfill(cx,cy,r,color[,filled]) taking CENTER plus RADIUS, flood(x,y,color), replace(from,to), outline(color), clear(). Every name also works as canvas.NAME, e.g. circle and canvas.circle are the same function. pset does NOT clip and a coordinate outside the canvas is a hard error - clamp it; the shape helpers clip for you. `color` is a palette index or a "#RRGGBB"/"#RRGGBBAA" string; nil / 0 / "." erase a pixel. Globals: width, height, frame_index, frame_count, time (seconds), phase (0..1 over the timeline), layer, plus canvas.width and canvas.height. Color helpers: pal(i), hex(v), mix(a,b,t), hsv(h,s,v[,a])(h in degrees), alpha(color,a), rand(), rand(a,b) for an integer in a..b, noise(x,y[,scale]) where scale spreads the lattice (0.3 for long streaks). stamp(rows, legend, [ox],[oy]) rows are strings of legend symbols and must all share one length; `.` and space are transparent.
 
 WORKFLOW - compose once, verify once:
-1. DRAW with pixel_run_shader whenever the request is about artwork: shapes, characters, scenes, patterns, textures, symmetry, gradients. Write ONE Lua script per transaction - its size does not grow with the canvas and the runtime places every pixel exactly. Use loops for symmetry and repetition, pal(i) for palette colors, mix()/hsv()/alpha() for gradients and glows, noise()/rand() for organic texture. Never enumerate long pixel arrays by hand.
+1. DRAW with pixel_run_shader whenever the request is about artwork. Write ONE Lua script per transaction and pick its body from two, by which one is actually cheaper rather than by habit:
+   PATHS AND MATH - loops, pal(i), mix()/hsv()/alpha(), noise()/rand() - whenever the artwork has symmetry, repetition, a cycle, or a canvas at 48px and above. A loop's size does not grow with the canvas and the runtime places every pixel exactly.
+   HAND-WRITTEN ROWS - stamp(rows, legend, 0, 0), where each row is one string of legend symbols and '.' is transparent - whenever the subject is a single small sprite at 47px and below and no loop would pay off. A 16x16 sprite is 16 short rows: shorter than any script that draws it, immune to coordinate arithmetic, and every pixel placed deliberately instead of approximated. Pad every row to the same length with '.'; a column past the last painted pixel still needs its dot so all rows share one width.
+   The test is always the same one: if you were about to write a loop, use paths and math; if you were about to place a single shape from four constants, hand-written rows are both shorter and safer. Never hand-write pixels that a loop would produce in one line, and never build a loop for a shape you would use once.
    ANIMATION: for animated artwork pass animate=true and drive motion with phase (0..1) or time (seconds); the runtime renders every frame. Frame count is document structure: create/retime frames first with pixel_apply_operations (create_frame, set_frame_duration), then run the shader.
-   IMAGE ATTACHMENTS: a user message may carry images, listed by an "Images attached to this message" caption. The entry captioned "canvas snapshot" is context only - never a request to redraw it, and the authoritative current canvas is always the text grid plus tool results. Every entry captioned "reference image" carries a "reference mode" and that mode is binding: mode "full" means the image IS the subject, so reproduce its subject, composition, proportions and palette on the canvas; mode "style" means the image is only a sample of palette, ramps, light direction, outline and dithering, and the subject, composition, pose and proportions MUST come from the user's words, never from the image. The full rules are restated next to each reference in the caption. If the user's own words clearly contradict the mode written for a reference, or the deliverable type / locked art style written in the TURN ROUTING section above is clearly wrong for what the user asked, call pixel_plan ONCE to correct it before any drawing tool; in every other case never call it.
+   IMAGE ATTACHMENTS: a user message may carry images, listed by an "Images attached to this message" caption. The entry captioned "canvas snapshot" is context only - never a request to redraw it, and the authoritative current canvas is always the text grid plus tool results. Every entry captioned "reference image" carries a "reference mode" and that mode is binding: mode "full" means the image IS the subject, so reproduce its subject, composition, proportions and palette on the canvas; mode "style" means the image is only a sample of palette, ramps, light direction, outline and dithering, and the subject, composition, pose and proportions MUST come from the user's words, never from the image. The full rules are restated next to each reference in the caption.
+   TURN ROUTING is already the current state, decided from the user's words before this request went out - read it, do not restate it. Re-sending a routing the section above already carries is a wasted round. Call pixel_plan ONCE, before any drawing tool, ONLY where something there is actually wrong: the user's own words clearly contradict the mode written for a reference, or the deliverable type / locked art style above is clearly wrong for what the user asked. In every other case never call it, and draw instead.
 2. Use pixel_apply_operations only for document structure (create/rename/move/delete layers, frames, palette colors) and tiny precise patches (a few pixels via set_pixels, stamp_grid, draw_shape, bucket_fill, clear_region). Batch structural changes into ONE call. You may combine it with pixel_run_shader in the same turn.
 3. After edits, the tool result contains the updated active-layer grid. Check it once. Call pixel_read_canvas only when you need the canvas again later.
 
@@ -163,5 +167,31 @@ mod tests {
         // 实时画布与当前画笔色。
         assert!(prompt.contains("Current canvas context:"));
         assert!(prompt.contains("#f2a03d"), "当前画笔色要告诉模型");
+    }
+
+    #[test]
+    fn the_draw_two_body_rules_are_both_stated() {
+        let doc = pixel_core::Document::new("t", 16, 16).unwrap();
+        let prompt = build_system_prompt(&doc, "L0", "F0", None, 4000, "", "");
+        // 两条腿都必须在场：一条都不许被删成「一律」。
+        assert!(prompt.contains("PATHS AND MATH"), "缺路径/数学路径规则");
+        assert!(prompt.contains("HAND-WRITTEN ROWS"), "缺手写行路径规则");
+        assert!(
+            prompt.contains("stamp(rows, legend, 0, 0)"),
+            "手写行没给到具体 API"
+        );
+        // 尺寸门槛两侧都要出现，缺一侧模型就只能猜。
+        assert!(prompt.contains("48px and above"), "缺大画布门槛");
+        assert!(prompt.contains("47px and below"), "缺小图门槛");
+        // 选择标准是成本，不是习惯。
+        assert!(
+            prompt.contains("never build a loop for a shape you would use once"),
+            "缺成本判断标准"
+        );
+        // 旧版一刀切的禁令不能再回来。
+        assert!(
+            !prompt.contains("Never enumerate long pixel arrays by hand"),
+            "小图手写行被禁掉了，旧版生成效果回不来"
+        );
     }
 }
