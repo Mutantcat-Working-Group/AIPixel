@@ -15,7 +15,7 @@ import { mockIPC } from "@tauri-apps/api/mocks";
 
 import { AGENT_EVENT_CHANNEL } from "./bridge";
 import { publishLocal } from "./local-bus";
-import { PALETTE_PRESETS, parseHex, rgbaToHex } from "./palette";
+import { PALETTE_PRESETS, nearestHex, parseHex, rgbaToHex } from "./palette";
 import { compositeFrame } from "./render";
 import type {
   LoopLimits,
@@ -163,9 +163,9 @@ const MCP_TRANSPORT = {
   header_keys: ["authorization"],
 };
 
-function makeSession(revision: number): SessionInfo {
-  // 浏览器预览只有一条会话，但 title / order 都要给：侧栏的改名和排序要靠它们。
-  const title = sessionTitle;
+function makeSession(id: string, revision: number): SessionInfo {
+  // 预览里摆两条会话，title 和 order 两项才都测得到：改名和拖动排序都指着它们。
+  const title = sessionTitles[id] ?? null;
   const roles = (["chat", "image_gen", "vision", "video"] as const).map((role) => ({
     role,
     model_id: MODEL.id,
@@ -173,7 +173,7 @@ function makeSession(revision: number): SessionInfo {
     detached: false,
   }));
   return {
-    id: "p1",
+    id,
     model_id: MODEL.id,
     model_label: MODEL.label,
     roles,
@@ -181,8 +181,34 @@ function makeSession(revision: number): SessionInfo {
     height: HEIGHT,
     revision,
     title,
-    order: 1,
+    // 排序位从 1 起排，和 Rust 一致；0 留给还没落位的。
+    order: sessionOrders[id] ?? 0,
   };
+}
+
+/** 预览的会话簿：改名、排序、新建、删除动的都是这本账。 */
+const previewSessions: string[] = ["p1", "p2"];
+const sessionTitles: Record<string, string | null> = {};
+const sessionOrders: Record<string, number> = { p1: 1, p2: 2 };
+let nextSessionSeq = 1;
+
+/** 按排序位列出会话，同值时拿 id 兜底：和 Rust 的 session_list 一个规矩。 */
+function listSessions(revision: number): SessionInfo[] {
+  return [...previewSessions]
+    .sort((a, b) => {
+      const byOrder = (sessionOrders[a] ?? 0) - (sessionOrders[b] ?? 0);
+      if (byOrder !== 0) return byOrder;
+      return a < b ? -1 : a > b ? 1 : 0;
+    })
+    .map((sessionId) => makeSession(sessionId, revision));
+}
+
+/** 删号连名带位一起清：留在簿里的空号会把侧栏拖成鬼影。 */
+function dropSession(id: string): void {
+  const at = previewSessions.indexOf(id);
+  if (at >= 0) previewSessions.splice(at, 1);
+  delete sessionTitles[id];
+  delete sessionOrders[id];
 }
 
 const CATALOG: Omit<WorkflowEntry, "readiness" | "served_by_label" | "served_by_detached">[] = [
@@ -257,6 +283,81 @@ const FETCHABLE = [
 ];
 
 let doc = makeDocument();
+
+/** cel 下标 0 是透明格，requantize 的重映射表要拿它当第一位。 */
+const TRANSPARENT_SLOT: Rgba = { r: 0, g: 0, b: 0, a: 0 };
+
+/** Rust 的 next_id：从 0 往上找第一个没占用的编号，同一个文档里 id 稳定可复现。 */
+function nextId(prefix: string, existing: string[]): string {
+  for (let i = 0; i < existing.length + 2; i += 1) {
+    const candidate = `${prefix}${i}`;
+    if (!existing.includes(candidate)) return candidate;
+  }
+  return `${prefix}${existing.length}`;
+}
+
+/** Rust 的 palettes::slugify：ascii 字母数字留下，中文空格标点一律折叠成连字符。 */
+function slugify(name: string): string {
+  let out = "";
+  let lastDash = false;
+  for (const ch of name.toLowerCase()) {
+    if ((ch >= "a" && ch <= "z") || (ch >= "0" && ch <= "9")) {
+      out += ch;
+      lastDash = false;
+    } else if (out !== "" && !lastDash) {
+      out += "-";
+      lastDash = true;
+    }
+  }
+  const trimmed = out.replace(/^-+|-+$/g, "");
+  return trimmed === "" ? "palette" : trimmed;
+}
+
+/** Rust 的 unique_palette_id：撞名从 -2 往后数，不用随机，导入导出才稳。 */
+function uniquePaletteId(base: string): string {
+  const taken = (id: string) => doc.palettes.some((item) => item.id === id);
+  if (!taken(base)) return base;
+  for (let suffix = 2; suffix <= 200; suffix += 1) {
+    const candidate = `${base}-${suffix}`;
+    if (!taken(candidate)) return candidate;
+  }
+  return `${base}-${doc.palettes.length + 1}`;
+}
+
+/** 色进文档调色板就复用下标，没有才追加。返回的是 cel 里的下标（比 palette 下标多 1）。 */
+function internColor(color: Rgba): number {
+  const hex = rgbaToHex(color);
+  const found = doc.palette.findIndex((item) => rgbaToHex(item) === hex);
+  if (found >= 0) return found + 1;
+  doc.palette.push(color);
+  return doc.palette.length;
+}
+
+/**
+ * 换配色范围时把这一层的像素就地收进新范围，行为对齐 Rust 的 requantize_layer：
+ * 每个旧色先在「旧调色板」里取到 RGB，再在新范围里找最近色，最后才把新色补进文档
+ * 调色板。顺序反了就会拿已经替换过的色当参照，一层比一层偏。
+ */
+function requantizeLayer(layerId: string, range: Rgba[]): void {
+  if (range.length === 0) return;
+  // 旧 RGB 快照必须先取，后面 internColor 会动 doc.palette。
+  const targets: Rgba[] = [TRANSPARENT_SLOT];
+  for (const color of doc.palette) {
+    const hex = rgbaToHex(color);
+    const snapped = nearestHex(range.map(rgbaToHex), hex) ?? hex;
+    targets.push(parseHex(snapped) ?? color);
+  }
+  const remap = targets.map((color) => internColor(color));
+  const frames = doc.cels[layerId];
+  if (!frames) return;
+  for (const cel of Object.values(frames)) {
+    if (!cel) continue;
+    for (let i = 0; i < cel.indices.length; i += 1) {
+      const next = remap[cel.indices[i]];
+      if (next !== undefined) cel.indices[i] = next;
+    }
+  }
+}
 let revision = 1;
 let LIMITS: LoopLimits = {
   max_continuations: 20,
@@ -266,8 +367,6 @@ let LIMITS: LoopLimits = {
 
 /** MCP 总开关在浏览器预览里的状态。默认开着，和 Rust 的默认值一致。 */
 let MCP_ON = true;
-// 预览里只有一条会话，但改名得能看见：显示名留住，重列时才带得上。
-let sessionTitle: string | null = null;
 
 function mcpList(): McpServersView {
   const server: McpServerView = {
@@ -372,29 +471,39 @@ function handler(cmd: string, raw?: unknown): unknown {
       demoTurn();
       return null;
     case "session_list":
-      return [makeSession(revision)];
+      return listSessions(revision);
     case "session_create": {
       const requested = payload.document as PixelDocument | null;
       if (requested) {
         doc = requested;
         revision += 1;
       }
-      return makeSession(revision);
+      const fresh = `s-${nextSessionSeq++}`;
+      previewSessions.push(fresh);
+      sessionOrders[fresh] = previewSessions.length;
+      return makeSession(fresh, revision);
     }
     case "session_bind_model":
     case "session_bind_role":
     case "session_clear_role":
-      return makeSession(revision);
+      return makeSession(String(payload.id ?? "p1"), revision);
     case "session_drop":
+      dropSession(String(payload.id ?? ""));
       return null;
     case "session_rename": {
+      const target = String(payload.id ?? "p1");
       // 空白名当取消：侧栏改回默认编号，别留一个空标题。
       const title = (payload.title as string | null) ?? "";
-      sessionTitle = title.trim() === "" ? null : title;
-      return makeSession(revision);
+      sessionTitles[target] = title.trim() === "" ? null : title;
+      return makeSession(target, revision);
     }
     case "session_reorder":
-      // 一条会话排不出花样，但顺序必须是确定地「没变」，侧栏才不会花屏。
+      // 按新次序整批改写排序位，id 不在簿里就当没发生过。
+      const ids = (payload.ids as string[] | undefined) ?? [];
+      ids.forEach((sessionId, index) => {
+        if (!previewSessions.includes(sessionId)) return;
+        sessionOrders[sessionId] = index + 1;
+      });
       return null;
     case "model_set_active":
     case "model_upsert":
@@ -448,11 +557,68 @@ function handler(cmd: string, raw?: unknown): unknown {
       broadcast();
       return revision;
     }
-    case "editor_apply_ops":
-      // 编辑器直接下的结构与帧操作。假后端不能整批吞掉：名字改了界面不动，
-      // 预览就成了「功能看着有、实际没接上」。只挑影响可视结果的几类真做。
-      for (const op of (payload.ops ?? []) as Record<string, unknown>[]) {
-        const id = op.id as string | undefined;
+   case "editor_apply_ops":
+      // 编辑器直接下的一整批结构操作。假后端不能整批吞掉：界面不动，预览就成了
+      //「功能看着有、实际没接上」。真机由 Rust 的 apply_batch 执行，这里逐条照它的
+      // 规矩演一遍：帧、图层、两套调色板（存储 palette 与命名范围 palettes）都做。
+     for (const op of (payload.ops ?? []) as Record<string, unknown>[]) {
+       const id = op.id as string | undefined;
+        if (op.op === "create_frame") {
+          const durationMs = typeof op.duration_ms === "number" ? op.duration_ms : 100;
+          if (durationMs < 1 || durationMs > 60000) continue;
+          const after = op.after as string | null | undefined;
+          // 点了名又找不到那一帧，Rust 整个批次回滚；预览里就近跳过这一条。
+          if (after != null && !doc.frames.some((frame) => frame.id === after)) continue;
+          const newId = nextId("F", doc.frames.map((frame) => frame.id));
+          const pos = after
+            ? doc.frames.findIndex((frame) => frame.id === after) + 1
+            : doc.frames.length;
+          doc.frames.splice(Math.min(pos, doc.frames.length), 0, {
+            id: newId,
+            duration_ms: durationMs,
+          });
+          for (const layer of doc.layers) {
+            const frames = doc.cels[layer.id] ?? {};
+            frames[newId] = { indices: new Array(doc.width * doc.height).fill(0) };
+            doc.cels[layer.id] = frames;
+          }
+        }
+        if (op.op === "delete_frame" && id) {
+          // 最后一帧是文档的骨头，删不得。
+          if (doc.frames.length <= 1) continue;
+          if (!doc.frames.some((frame) => frame.id === id)) continue;
+          doc.frames = doc.frames.filter((frame) => frame.id !== id);
+          for (const frames of Object.values(doc.cels)) delete frames[id];
+        }
+        if (op.op === "duplicate_frame" && id) {
+          const src = doc.frames.findIndex((frame) => frame.id === id);
+          if (src < 0) continue;
+          const newId = nextId("F", doc.frames.map((frame) => frame.id));
+          doc.frames.splice(src + 1, 0, { id: newId, duration_ms: doc.frames[src].duration_ms });
+          for (const layer of doc.layers) {
+            const frames = doc.cels[layer.id] ?? {};
+            // 深复制：共用一个数组的话，改一格会同时改两帧。
+            const copied = frames[id];
+            frames[newId] = {
+              indices: copied ? copied.indices.slice() : new Array(doc.width * doc.height).fill(0),
+            };
+            doc.cels[layer.id] = frames;
+          }
+        }
+        if (op.op === "move_frame" && id) {
+          const from = doc.frames.findIndex((frame) => frame.id === id);
+          if (from < 0) continue;
+          const to = Math.max(0, Math.min(Number(op.to_index ?? 0), doc.frames.length - 1));
+          const [frame] = doc.frames.splice(from, 1);
+          doc.frames.splice(to, 0, frame);
+        }
+        if (op.op === "move_layer" && id) {
+          const from = doc.layers.findIndex((item) => item.id === id);
+          if (from < 0) continue;
+          const to = Math.max(0, Math.min(Number(op.to_index ?? 0), doc.layers.length - 1));
+          const [layer] = doc.layers.splice(from, 1);
+          doc.layers.splice(to, 0, layer);
+        }
         if (op.op === "rename_layer" && id) {
           const layer = doc.layers.find((item) => item.id === id);
           if (layer && typeof op.name === "string") layer.name = op.name;
@@ -467,6 +633,167 @@ function handler(cmd: string, raw?: unknown): unknown {
         if (op.op === "set_frame_duration" && id) {
           const frame = doc.frames.find((item) => item.id === id);
           if (frame && typeof op.duration_ms === "number") frame.duration_ms = op.duration_ms;
+        }
+        if (op.op === "create_layer") {
+          // 位置、名字、id 都按 Rust 的规矩来：插在 after 之后，没点名就落栈顶；
+          // id 取第一个没占用的编号。配色范围和锁跟新邻居继承，行为对齐。
+          const after = op.after as string | null | undefined;
+          if (after != null && !doc.layers.some((l) => l.id === after)) continue;
+          const pos = after
+            ? doc.layers.findIndex((l) => l.id === after) + 1
+            : doc.layers.length;
+          const neighbor = doc.layers[Math.max(0, pos - 1)];
+          // 邻居的配色得真在库里，指向一个不存在的 id 会开天窗。
+          const inherit = doc.palettes.some((p) => p.id === neighbor?.palette_id)
+            ? neighbor.palette_id
+            : (doc.palettes[0]?.id ?? "sweetie16");
+          const newId = nextId("L", doc.layers.map((l) => l.id));
+          doc.layers.splice(Math.min(pos, doc.layers.length), 0, {
+            id: newId,
+            name: typeof op.name === "string" ? op.name : `Layer ${doc.layers.length + 1}`,
+            visible: true,
+            opacity: 255,
+            palette_id: inherit,
+            locked: neighbor?.locked ?? false,
+          });
+          const cels: Record<string, { indices: number[] }> = {};
+          for (const frame of doc.frames) {
+            cels[frame.id] = { indices: new Array(doc.width * doc.height).fill(0) };
+          }
+          doc.cels[newId] = cels;
+        }
+        if (op.op === "delete_layer" && id) {
+          // 最后一层不删：Rust 直接报错，预览里也照样端着。
+          if (doc.layers.length > 1) {
+            doc.layers = doc.layers.filter((l) => l.id !== id);
+            delete doc.cels[id];
+          }
+        }
+        // ---- 文档调色板（像素实际存的那种）----
+        if (op.op === "add_palette_colors") {
+          for (const hex of (op.colors as string[] | undefined) ?? []) {
+            const color = parseHex(hex);
+            if (color) internColor(color);
+          }
+        }
+        if (op.op === "set_palette") {
+          const next = ((op.colors as string[] | undefined) ?? [])
+            .map(parseHex)
+            .filter((color): color is Rgba => color !== null);
+          // 空配色等于把整幅擦透明，那是毁画面不是换风格，跟 Rust 一样端着。
+          if (next.length === 0) continue;
+          // 旧下标 -> 新下标：透明与归不进新色板的都回透明格。
+          const remap = doc.palette.map((old) => {
+            const snapped = nearestHex(
+              next.map(rgbaToHex),
+              rgbaToHex(old),
+            );
+            const index =
+              snapped === null ? -1 : next.findIndex((item) => rgbaToHex(item) === snapped);
+            return index + 1;
+          });
+          for (const frames of Object.values(doc.cels)) {
+            for (const cel of Object.values(frames)) {
+              if (!cel) continue;
+              for (let i = 0; i < cel.indices.length; i += 1) {
+                const nextIndex = remap[cel.indices[i] - 1];
+                cel.indices[i] = typeof nextIndex === "number" ? nextIndex : 0;
+              }
+            }
+          }
+          doc.palette = next;
+        }
+        // ---- 命名配色范围（每层各认领的那套边界）----
+        if (op.op === "create_palette") {
+          const name = typeof op.name === "string" ? op.name : "";
+          const from = typeof op.from === "string" ? op.from : undefined;
+          const explicit = typeof op.id === "string" ? op.id : undefined;
+          if (explicit && doc.palettes.some((p) => p.id === explicit)) continue;
+          // 点名了 id 就以它为准：Rust 在 fork 与新建两条支路上都会盖掉自动命名。
+          const idOf = (fallback: string) => explicit ?? fallback;
+          let palette: NamedPalette;
+          if (from) {
+            const src = doc.palettes.find((p) => p.id === from);
+            if (!src) continue;
+            if (src.builtin) {
+              // 内置预设走副本：原套一个色都不动，副本 id 照 Rust 的命名来。
+              palette = {
+                id: idOf(uniquePaletteId(`${slugify(src.name)}-copy`)),
+                name: `${src.name} copy`,
+                colors: src.colors.map((color) => ({ ...color })),
+                builtin: false,
+              };
+            } else {
+              palette = {
+                id: idOf(uniquePaletteId(slugify(name || src.name))),
+                name: name || src.name,
+                colors: src.colors.map((color) => ({ ...color })),
+                builtin: false,
+              };
+            }
+          } else {
+            palette = {
+              id: idOf(uniquePaletteId(slugify(name || "palette"))),
+              name: name || "palette",
+              colors: [],
+              builtin: false,
+            };
+          }
+          for (const hex of (op.colors as string[] | undefined) ?? []) {
+            const color = parseHex(hex);
+            if (!color) continue;
+            if (palette.colors.some((item) => rgbaToHex(item) === rgbaToHex(color))) continue;
+            palette.colors.push(color);
+          }
+          doc.palettes.push(palette);
+          // 指名的那层跟着换过去，换范围要把像素就地收进新范围。
+          if (typeof op.layer === "string" && op.layer !== "") {
+            const target = doc.layers.find((l) => l.id === op.layer);
+            if (target && palette.colors.length > 0) {
+              target.palette_id = palette.id;
+              requantizeLayer(target.id, palette.colors);
+            }
+          }
+        }
+        if (op.op === "delete_palette" && id) {
+          const target = doc.palettes.find((p) => p.id === id);
+          // 内置的删不得，还被某层指着的也删不得：静默改指会让人莫名换色板。
+          if (!target || target.builtin || doc.layers.some((l) => l.palette_id === id)) continue;
+          doc.palettes = doc.palettes.filter((p) => p.id !== id);
+        }
+        if (op.op === "rename_palette" && id) {
+          const target = doc.palettes.find((p) => p.id === id);
+          const name = typeof op.name === "string" ? op.name.trim() : "";
+          if (!target || target.builtin || name === "") continue;
+          target.name = name;
+        }
+        if (op.op === "add_palette_color" && id) {
+          const target = doc.palettes.find((p) => p.id === id);
+          const color = parseHex(typeof op.color === "string" ? op.color : "");
+          if (!target || target.builtin || !color) continue;
+          if (target.colors.some((item) => rgbaToHex(item) === rgbaToHex(color))) continue;
+          target.colors.push(color);
+        }
+        if (op.op === "remove_palette_color" && id) {
+          const target = doc.palettes.find((p) => p.id === id);
+          const index = Number(op.index ?? -1);
+          if (!target || target.builtin) continue;
+          // 范围里总得留一个色，最后一个是不让删的。
+          if (index < 0 || index >= target.colors.length || target.colors.length <= 1) continue;
+          target.colors.splice(index, 1);
+        }
+        if (op.op === "set_layer_palette") {
+          const palette = doc.palettes.find((p) => p.id === op.palette_id);
+          const target =
+            typeof op.layer === "string" ? doc.layers.find((l) => l.id === op.layer) : undefined;
+          if (!target || !palette || palette.colors.length === 0) continue;
+          target.palette_id = palette.id;
+          requantizeLayer(target.id, palette.colors);
+        }
+        if (op.op === "set_layer_locked") {
+          const target =
+            typeof op.layer === "string" ? doc.layers.find((l) => l.id === op.layer) : undefined;
+          if (target && typeof op.locked === "boolean") target.locked = op.locked;
         }
       }
       revision += 1;

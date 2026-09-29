@@ -1179,6 +1179,20 @@ body {
   flex: none;
 }
 
+/* 手输十六进制：输入框吃掉剩余宽度，按钮按内容撑开，侧栏再窄也不折行。 */
+.palette-hex-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.palette-hex-input {
+  flex: 1;
+  min-width: 0;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
 /* 「已锁 / 开放」：一句话交给 tooltip，行里只留一个词。 */
 .scope-state {
   flex: none;
@@ -1844,6 +1858,11 @@ body {
   color: var(--accent);
   font-size: 11px;
   font-family: var(--mono);
+}
+
+/* 收尾之后的最终耗时：静态的数字，别再拿高亮色嚷嚷。 */
+.chat-running.done {
+  color: var(--text-faint);
 }
 
 .chat-empty {

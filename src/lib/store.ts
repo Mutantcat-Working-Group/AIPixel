@@ -6,7 +6,7 @@ import { create } from "zustand";
 import { renderUiText, translate, type Lang, type TVARS, type TKey } from "./i18n";
 import * as bridge from "./bridge";
 import type { ExportFormat } from "./bridge";
-import { PALETTE_PRESETS, hexesOf, nearestHex, parseHex } from "./palette";
+import { PALETTE_PRESETS, hexesOf, nearestHex, parseHex, rgbaToHex } from "./palette";
 import {
   emptyTranscript,
   historyToTranscript,
@@ -165,6 +165,8 @@ interface StoreState extends DocumentSnapshot, WorkflowState, BatchState {
   running: boolean;
   /** 本轮对话开始的时间戳（ms）。运行中给聊天面板当计时起点，停下来就清。 */
   runStartedAt: number | null;
+  /** 上一轮收尾时一共花了多久（ms）。停火了也不擦，好让用户回看这一圈的代价。 */
+  runElapsedMs: number | null;
   /** 主循环还在跑，但很久没有新事件了。只是提醒，不动数据、不替你中断。 */
   stalled: boolean;
   usage: Usage | null;
@@ -267,6 +269,8 @@ export interface StoreActions {
   ) => Promise<void>;
   readAipText: () => Promise<string | null>;
   clearNotice: () => void;
+  /** 一条不打断流程的小警告：措辞跟着界面语言走，不带 fail 那一堆副作用。 */
+  warnKey: (key: TKey, vars?: TVARS) => void;
   openSettings: () => void;
   closeSettings: () => void;
   refreshWorkflows: () => Promise<void>;
@@ -330,6 +334,10 @@ export interface StoreActions {
   setLayerVisible: (layerId: string, visible: boolean) => Promise<void>;
   /** 图层不透明度 0..255，与 Rust Layer::opacity 同一量纲。 */
   setLayerOpacity: (layerId: string, opacity: number) => Promise<void>;
+  /** 新建图层：插在当前层之后，配色范围和锁都跟新邻居走（Rust 的继承规则）。 */
+  addLayer: () => Promise<void>;
+  /** 删图层：只剩一层时 Rust 会拒，这是最后一道人情关。 */
+  deleteLayer: (layerId?: string) => Promise<void>;
   /** 图层名：空名字等于没改，交给 Rust 的原名顶着。 */
   renameLayer: (layerId: string, name: string) => Promise<void>;
   /** 沿绘制顺序挪一格：delta +1 = 后绘制，盖在更多图层之上。 */
@@ -422,6 +430,45 @@ function dataUrl(mediaType: string, dataBase64: string): string {
   return `data:${mediaType};base64,${dataBase64}`;
 }
 
+/** 某一层的配色范围（面板里摆出来的那一排 swatch）落成 hex 表。 */
+function layerScopeColors(document: PixelDocument | null, layerId: string): string[] {
+  if (!document) return [];
+  const layer =
+    document.layers.find((item) => item.id === layerId) ?? document.layers[0] ?? null;
+  if (!layer) return [];
+  const scope = document.palettes.find((item) => item.id === layer.palette_id);
+  return (scope ? scope.colors : document.palette).map(rgbaToHex);
+}
+
+/**
+ * 当前层配色范围的第一个色，给「从没选过色」的情况当默认墨。
+ * 画笔的 ink 是 active.color ?? null，而 null 在绘制链里就是「擦成透明」：
+ * 不选色直接下笔会静默擦背景，用户只觉得「点了没反应」，还以为是画布坏了。
+ */
+function defaultInkHex(document: PixelDocument | null, layerId: string): string | null {
+  const scope = layerScopeColors(document, layerId);
+  return scope.length > 0 ? scope[0] : null;
+}
+
+/**
+ * 换层/换文档之后手里那支笔该是什么色：原色还在新范围里就留着，
+ * 不在就近归队；本来空着、或者压根归不进去，就用新范围的第一个色顶上。
+ */
+function inkForLayer(
+  document: PixelDocument | null,
+  layerId: string,
+  // color 是可选的：没选过是 undefined，工具里显式清空是 null，两者一回事。
+  current: string | null | undefined,
+): string | null {
+  // 「没选过」和「没色可用」都归一成 null，后面只跟一种空值打交道。
+  const held = current ?? null;
+  const scope = layerScopeColors(document, layerId);
+  if (scope.length === 0) return held;
+  if (held !== null && scope.includes(held)) return held;
+  const snapped = held === null ? null : nearestHex(scope, held);
+  return snapped ?? scope[0];
+}
+
 function stripDataUrl(url: string): { mediaType: string; data: string } {
   const match = /^data:([^;]+);base64,(.*)$/s.exec(url);
   if (!match) return { mediaType: "image/png", data: "" };
@@ -494,6 +541,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       notice: { text: translate(getState().lang, key, vars), isError: true },
       running: false,
       runStartedAt: null,
+      runElapsedMs: null,
     });
   }
 
@@ -544,6 +592,9 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     if (active.color != null) {
       const snapped = nearestHex(hexesOf(document), active.color);
       if (snapped !== null && snapped !== active.color) active = { ...active, color: snapped };
+    } else {
+      // 从没选过色：给笔尖顶上第一个色，别让画笔以「擦除」的形态开工。
+      active = { ...active, color: defaultInkHex(document, active.layer) };
     }
     if (frameHint !== null) {
       // 结构操作后帧表已变：按预期位置选帧，越界夹到末帧。
@@ -587,10 +638,15 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       }
       if (raw.kind === "completed" || raw.kind === "error" || raw.kind === "interrupted") {
         clearStallWatch();
+        // 收尾时把这一圈总共花了多久冻住：runStartedAt 一清，界面上就没得可看了。
+        // 三种结局（跑完/报错/打断）都记，失败的那几圈往往才是要盯的那几圈。
+        const elapsed =
+          state.runStartedAt === null ? state.runElapsedMs : Date.now() - state.runStartedAt;
         setState({
           entries: sealTranscript(reduceEvent(state.entries, raw, state.lang)),
           running: false,
           runStartedAt: null,
+          runElapsedMs: elapsed,
           stalled: false,
           // 一轮收尾，挂着没批的调用跟着作废——别让下一轮还看见这张票。
           pendingApproval: null,
@@ -662,7 +718,8 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     const active: ActiveContext = {
       layer: firstLayer,
       frame: firstFrame,
-      color: getState().active.color ?? null,
+      // 上一条会话挑过的色留着；没挑过就落到本层配色范围的第一个色上。
+      color: getState().active.color ?? defaultInkHex(snapshot.document, firstLayer),
     };
     setState({ active });
     await bridge.setActive(id, active);
@@ -683,6 +740,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     entries: emptyTranscript(),
     running: false,
     runStartedAt: null,
+    runElapsedMs: null,
     stalled: false,
     usage: null,
     lastQuery: null,
@@ -777,18 +835,19 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       if (getState().running) await getState().interrupt();
       setState({
         activeId: id,
-        entries: emptyTranscript(),
-        running: false,
-        runStartedAt: null,
-        stalled: false,
-        usage: null,
-        lastQuery: null,
-        attachments: [],
-        frameIndex: 0,
-      });
-      await loadDocument(id);
-      await getState().refreshSessions();
-    },
+      entries: emptyTranscript(),
+      running: false,
+      runStartedAt: null,
+      runElapsedMs: null,
+      stalled: false,
+      usage: null,
+      lastQuery: null,
+      attachments: [],
+      frameIndex: 0,
+    });
+    await loadDocument(id);
+    await getState().refreshSessions();
+  },
 
     createSession: async (width, height) => {
       const document = width && height ? blankDocument(width, height) : undefined;
@@ -800,6 +859,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         entries: emptyTranscript(),
         running: false,
         runStartedAt: null,
+        runElapsedMs: null,
         stalled: false,
         usage: null,
         lastQuery: null,
@@ -888,6 +948,8 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         attachments: [],
         running: true,
         runStartedAt: Date.now(),
+        // 新一轮开跑，上一圈的耗时就别赖在界面上挡事了。
+        runElapsedMs: null,
         stalled: false,
         lastQuery: { text: trimmed, attachments },
         notice: null,
@@ -1136,7 +1198,14 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     setActiveLayer: (layerId) => {
       const id = getState().activeId;
       if (!id) return;
-      const active = { ...getState().active, layer: layerId };
+      // 配色范围跟着层走：换层之后手里那个色不一定还在新层的范围里，
+      // 就近归队；空着就顶上第一个色。不然画笔会按字面量把色 intern 进
+      // 调色板，用户锁好的范围悄悄失守。
+      const active = {
+        ...getState().active,
+        layer: layerId,
+        color: inkForLayer(getState().document, layerId, getState().active.color),
+      };
       setState({ active });
       void bridge.setActive(id, active);
     },
@@ -1241,6 +1310,8 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     },
 
     clearNotice: () => setState({ notice: null }),
+    warnKey: (key, vars) =>
+      setState({ notice: { text: translate(getState().lang, key, vars), isError: true } }),
 
     setLang: (lang) => {
       try {
@@ -1634,6 +1705,34 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     setLayerOpacity: async (layerId, opacity) => {
       const next = Math.max(0, Math.min(255, Math.round(opacity)));
       await getState().runEditorOps([{ op: "set_layer_properties", id: layerId, opacity: next }]);
+    },
+
+    addLayer: async () => {
+      const document = getState().document;
+      const activeLayerId = getState().active.layer;
+      if (!document) return;
+      // 插在当前层之后：新画的玩意儿多半就是要在眼前这层的上面。
+      // after 传 null 时 Rust 落在栈顶，行为和这里一致，但显式贴在当前层后面，
+      // 才能保证「新层挨着我刚画的那层」——图层排序时尤其疼。
+      const activeIndex = document.layers.findIndex((layer) => layer.id === activeLayerId);
+      const after = activeIndex >= 0 ? document.layers[activeIndex].id : null;
+      await getState().runEditorOps([{ op: "create_layer", after }]);
+    },
+
+    deleteLayer: async (layerId) => {
+      const document = getState().document;
+      if (!document) return;
+      // 没点名就删当前层；只剩一层时谁也删不动，Rust 那边也会拒。
+      const target = layerId ?? getState().active.layer;
+      if (document.layers.length <= 1 || !target) return;
+      const index = document.layers.findIndex((layer) => layer.id === target);
+      if (index < 0) return;
+      // 删的是当前层，选中得挪走：Rust 会重排，前端不跟上就会指着一个不存在的层。
+      const fallback = document.layers[index === 0 ? 1 : index - 1];
+      await getState().runEditorOps([{ op: "delete_layer", id: target }]);
+      if (target === getState().active.layer && fallback) {
+        getState().setActiveLayer(fallback.id);
+      }
     },
 
     renameLayer: async (layerId, name) => {

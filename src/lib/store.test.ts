@@ -222,6 +222,46 @@ describe("编辑器结构动作（store -> bridge）", () => {
       frame: 2,
     });
   });
+
+  it("inserts a new layer right after the active one", async () => {
+    useStore.setState({
+      activeId: "doc-01",
+      document: seedDocument(),
+      active: { layer: "L0", frame: "F0", color: null },
+    });
+    invokeCalls.length = 0;
+
+    await useStore.getState().addLayer();
+    expect(lastOps()).toEqual([{ op: "create_layer", after: "L0" }]);
+  });
+
+  it("deletes the named layer, or the active one when none is named", async () => {
+    useStore.setState({
+      activeId: "doc-01",
+      document: seedDocument(),
+      active: { layer: "L1", frame: "F0", color: null },
+    });
+    invokeCalls.length = 0;
+
+    await useStore.getState().deleteLayer("L0");
+    expect(lastOps()).toEqual([{ op: "delete_layer", id: "L0" }]);
+
+    invokeCalls.length = 0;
+    await useStore.getState().deleteLayer();
+    expect(lastOps()).toEqual([{ op: "delete_layer", id: "L1" }]);
+  });
+
+  it("keeps the last layer: no delete op leaves the document", async () => {
+    useStore.setState({
+      activeId: "doc-01",
+      document: blankDocument(8, 8),
+      active: { layer: "L0", frame: "F0", color: null },
+    });
+    invokeCalls.length = 0;
+
+    await useStore.getState().deleteLayer();
+    expect(lastOps()).toEqual([]);
+  });
 });
 
 describe("blankDocument", () => {

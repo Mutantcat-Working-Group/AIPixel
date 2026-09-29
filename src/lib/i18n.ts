@@ -94,6 +94,7 @@ export const zh = {
   "chat.stall":
     "已经 {secs} 秒没有新动静，可能卡住了。可以重发，也可以先中断。",
   "chat.elapsed": "本轮已用 {mm}:{ss}",
+  "chat.elapsed_final": "本轮耗时 {mm}:{ss}",
   "agent.interrupted": "已中断这一轮",
   "agent.continuing": "回答到了输出上限，正在接着写（第 {done}/{max} 次）",
   "agent.lowering_tokens":
@@ -141,6 +142,8 @@ export const zh = {
   "doc.move_earlier": "把这一帧前移",
   "doc.move_later": "把这一帧后移",
   "doc.frame_duration": "这一帧停留",
+  "doc.new_layer": "在当前图层之后新建一层",
+  "doc.delete_layer": "删除这一图层，只剩最后一层时不让删",
   "doc.layer_up": "上移这一图层，盖在更多图层之上",
   "doc.layer_down": "下移这一图层，被更多图层盖住",
   "doc.layer_visible": "显示或隐藏这一图层。隐藏只为看清底下，内容不丢。",
@@ -179,6 +182,9 @@ export const zh = {
   "palette.delete_used": "还有图层在用，删不掉",
   "palette.swatch": "{hex} · 索引 {index}",
   "palette.swatch_current": "{hex} · 当前墨色",
+  "palette.hex_label": "手输十六进制",
+  "palette.hex_add": "加进范围",
+  "palette.hex_bad": "色值不对，写成 #RRGGBB 才认",
   "palette.duplicated": "范围里已经有这个颜色了",
   "palette.one_left": "范围里至少要留一个颜色",
 
@@ -774,6 +780,7 @@ export const en: Record<TKey, string> = {
   "chat.stall":
     "No new output for {secs}s. It may be stuck - resend, or interrupt this round.",
   "chat.elapsed": "this round has been running for {mm}:{ss}",
+  "chat.elapsed_final": "this round took {mm}:{ss}",
   "agent.interrupted": "This round was interrupted",
   "agent.continuing":
     "The reply hit the output limit, continuing ({done} of {max})",
@@ -824,6 +831,8 @@ export const en: Record<TKey, string> = {
   "doc.move_earlier": "Move this frame earlier",
   "doc.move_later": "Move this frame later",
   "doc.frame_duration": "Hold on this frame",
+  "doc.new_layer": "Add a layer after the current one",
+  "doc.delete_layer": "Delete this layer. The last remaining layer cannot go",
   "doc.layer_up": "Move this layer up so it covers more layers",
   "doc.layer_down": "Move this layer down so more layers cover it",
   "doc.layer_visible":
@@ -863,6 +872,9 @@ export const en: Record<TKey, string> = {
   "palette.delete_used": "Still used by a layer, cannot delete",
   "palette.swatch": "{hex} · index {index}",
   "palette.swatch_current": "{hex} · current ink",
+  "palette.hex_label": "Hex code",
+  "palette.hex_add": "Add to scope",
+  "palette.hex_bad": "Not a color, use #RRGGBB form",
   "palette.duplicated": "That color is already in the scope",
   "palette.one_left": "A scope keeps at least one color",
 

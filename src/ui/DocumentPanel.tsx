@@ -44,7 +44,7 @@ import { useStore } from "../lib/store";
 import { useT } from "../lib/t";
 import { appendStroke, lineCells } from "../lib/stroke";
 import { compositeFrame } from "../lib/render";
-import { rgbaToHex } from "../lib/palette";
+import { parseHex, rgbaToHex } from "../lib/palette";
 import { NAMED_COLORS, colorName } from "../lib/colornames";
 import FrameThumb from "./FrameThumb";
 import { openContextMenu, type ContextMenuItem } from "./ContextMenu";
@@ -104,8 +104,10 @@ export default function DocumentPanel() {
   // 配色区正在伺候哪一层。null = 跟着激活层走；用户在色板区分区里另挑过
   // 一层时钉住，方便不切激活层也能给底层换范围。
   const [scopeLayerId, setScopeLayerId] = useState<string | null>(null);
- // 取色盘正在挑的草稿值：拖动过程中只预览，落文档等松手（onChangeComplete）。
- const [swatchDraft, setSwatchDraft] = useState<string | null>(null);
+// 取色盘正在挑的草稿值：拖动过程中只预览，落文档等松手（onChangeComplete）。
+const [swatchDraft, setSwatchDraft] = useState<string | null>(null);
+// 手输十六进制的草稿。取色盘拖不出「我就要这个 #hex」，而像素行当里 hex 是通行证。
+const [hexDraft, setHexDraft] = useState("");
   // 配色区的行内输入：null = 收起，"new" = 新建一套，"rename" = 给当前套改名。
   // 和图层/会话改名同一套：ref 是权威，失焦提交时 state 已经清了。
   const [scopeEditing, setScopeEditing] = useState<"new" | "rename" | null>(null);
@@ -212,11 +214,16 @@ export default function DocumentPanel() {
   // 高亮、缩略图和主画布三者对不上，用户看到的就是「选帧之后画布空了」。
   // 帧层本就是覆盖层，唯一正确的动作是按当前帧号重绘：洋葱皮要就带上
   // 一帧，不要就自己画自己，永远别留一块没人写的画布。
+  //
+  // revision 也必须是触发条件：document 引用不变而内容改了（后端原地改的
+  // 文档对象、或者同一快照被复用）时，useStore((s) => s.document) 认不出
+  // 变化，重绘就整段跳过。revision 每次 document_updated 都涨，拿它当
+  // 第二把钥匙，画布才一定跟得上后端。
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (playing || !document) return;
     paintFrame(frameIndex, onion && frameIndex > 0 ? frameIndex - 1 : null);
-  }, [playing, onion, frameIndex, document]);
+  }, [playing, onion, frameIndex, document, revision]);
 
   // 预览区可用宽度决定放大倍率，侧栏变窄（<1180px）时倍率要跟着缩。
   useEffect(() => {
@@ -426,6 +433,21 @@ export default function DocumentPanel() {
     await useStore.getState().addPaletteColor(paletteId, hex);
     // 挑完即用：新颜色不当当前墨，这一下就白挑了。
     pickColor(hex);
+    setHexDraft("");
+  }
+
+  /** 手输的十六进制入表。加色那一步（含内置预设 fork）addScopeColor 里已经办了。 */
+  function commitHex() {
+    const text = hexDraft.trim();
+    if (text === "") return;
+    // 少了井号也认：从截图、博客、别人色板里抠出来的 hex 常常不带。
+    const parsed = parseHex(text.startsWith("#") ? text : `#${text}`);
+    if (!parsed) {
+      useStore.getState().warnKey("palette.hex_bad");
+      return;
+    }
+    void addScopeColor(rgbaToHex(parsed));
+    setHexDraft("");
   }
 
   /** 从范围里去掉一个颜色，画面上的像素由 Rust 就近归队。 */
@@ -792,6 +814,24 @@ export default function DocumentPanel() {
             <Layers size={12} />
             {t("doc.layers")}
             <span className="grow" />
+            <Tooltip title={t("doc.new_layer")}>
+              <Button
+                size="small"
+                type="text"
+                icon={<Plus size={13} />}
+                disabled={!document}
+                onClick={() => void useStore.getState().addLayer()}
+              />
+            </Tooltip>
+            <Tooltip title={t("doc.delete_layer")}>
+              <Button
+                size="small"
+                type="text"
+                icon={<Trash2 size={13} />}
+                disabled={layerCount <= 1}
+                onClick={() => void useStore.getState().deleteLayer(active.layer)}
+              />
+            </Tooltip>
             <Tooltip title={t("doc.layer_up")}>
               <Button
                 size="small"
@@ -1162,9 +1202,30 @@ export default function DocumentPanel() {
                     void addScopeColor(hex);
                   }}
                   onClear={() => setSwatchDraft(null)}
-                />
-              </div>
-            </Tooltip>
+               />
+             </div>
+           </Tooltip>
+         </div>
+          {/* 手输十六进制：拖拽取色应对不了「我要的就是这一串 hex」，
+              配色行当里这个通行证必须留。回车即加，加完顺手当当前墨。 */}
+          <div className="palette-hex-row">
+            <Input
+              size="small"
+              className="palette-hex-input"
+              placeholder="#RRGGBB"
+              maxLength={8}
+              value={hexDraft}
+              onChange={(event) => setHexDraft(event.target.value)}
+              onPressEnter={() => void commitHex()}
+            />
+            <Button
+              size="small"
+              type="primary"
+              disabled={hexDraft.trim() === ""}
+              onClick={() => void commitHex()}
+            >
+              {t("palette.hex_add")}
+            </Button>
           </div>
         </div>
 

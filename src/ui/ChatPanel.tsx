@@ -46,11 +46,12 @@ const PLAN_LABEL_FALLBACK: Record<string, string> = {
   "plan.knowledge": "Craft notes",
 };
 
-/** 本轮对话的计时器：跑起来之后每秒走一格，停下来归零。 */
+/** 本轮对话的计时器：跑着的时候每秒走一格，收尾后把这一圈的最终耗时冻在那儿。 */
 function TurnTimer() {
   const t = useT();
   const startedAt = useStore((s) => s.runStartedAt);
   const running = useStore((s) => s.running);
+  const elapsedMs = useStore((s) => s.runElapsedMs);
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
@@ -60,11 +61,18 @@ function TurnTimer() {
     return () => clearInterval(timer);
   }, [running, startedAt]);
 
-  if (!running || startedAt === null) return null;
-  const total = Math.max(0, Math.floor((now - startedAt) / 1000));
+  // 跑着就实时报；停下来就报上一圈冻住的总耗时。换会话之类的一来两头都空，那就不出声。
+  const live = running && startedAt !== null;
+  const source = live ? now - startedAt : elapsedMs;
+  if (source === null || source === undefined) return null;
+  const total = Math.max(0, Math.floor(source / 1000));
   const mm = String(Math.floor(total / 60)).padStart(2, "0");
   const ss = String(total % 60).padStart(2, "0");
-  return <span className="chat-running">{t("chat.elapsed", { mm, ss })}</span>;
+  return (
+    <span className={`chat-running ${live ? "" : "done"}`}>
+      {live ? t("chat.elapsed", { mm, ss }) : t("chat.elapsed_final", { mm, ss })}
+    </span>
+  );
 }
 
 function AttachChip({ item }: { item: PendingAttachment }) {
