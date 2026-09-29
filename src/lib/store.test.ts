@@ -2,7 +2,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { briefToText, probeSummary, videoBriefToText } from "./dock-format";
 import { DEFAULT_BATCH_RECIPE, EMPTY_BATCH_RUN } from "./batch";
+import { AGENT_EVENT_CHANNEL } from "./bridge";
 import { STALL_SECONDS, blankDocument, useStore, type WorkflowParams } from "./store";
+import { publishLocal } from "./local-bus";
 import type {
   BatchRecipe,
   BatchRecipeEntry,
@@ -261,6 +263,66 @@ describe("编辑器结构动作（store -> bridge）", () => {
 
     await useStore.getState().deleteLayer();
     expect(lastOps()).toEqual([]);
+  });
+});
+
+describe("撤销栈只记编辑器自己那一下", () => {
+  it("落笔失败就缴械，紧跟着模型那次改动不该被塞进撤销栈", async () => {
+    const doc = seedDocument();
+    // boot 是 store 唯一挂事件监听的地方（真实进程里开机就挂）。它一路上要读
+    // 六七样东西，这里把可能抛的那几样预制好，别让它在半路炸掉。
+    const stubs = {
+      agent_list_models: { active_id: "", entries: [] },
+      agent_history: [],
+      batch_recipes_list: [],
+      session_list: [],
+      session_create: {
+        id: "s1",
+        model_id: "m1",
+        model_label: "test",
+        roles: [],
+        width: 8,
+        height: 8,
+        revision: 1,
+        title: null,
+        order: 0,
+      },
+      agent_document: { id: "s1", revision: 1, document: doc },
+    };
+    Object.assign(invokeResults, stubs);
+    try {
+      await useStore.getState().boot();
+    } finally {
+      for (const key of Object.keys(stubs)) delete invokeResults[key];
+    }
+
+    useStore.setState({
+      activeId: "doc-01",
+      document: doc,
+      revision: 4,
+      pngRevision: 4,
+      undoStack: [],
+      frameIndex: 0,
+      active: { layer: "L0", frame: "F0", color: "#ffffff" },
+    });
+
+    // 正面例子先立规矩：成功的那一笔，撤销栈吃到的是改前的快照。
+    await useStore.getState().paintStroke([{ x: 1, y: 1 }]);
+    publishLocal(AGENT_EVENT_CHANNEL, { kind: "document_updated", revision: 5, document: doc });
+    expect(useStore.getState().undoStack).toEqual([doc]);
+
+    // 失败的那一笔不产新文档，旗子却还悬着：下一个到达的 document_updated
+    // 会把它当成编辑器笔触吃掉，用户自己随后那一下笔反而没了撤销。
+    invokeErrors["editor_paint_stroke"] = "stroke rejected";
+    try {
+      await useStore.getState().paintStroke([{ x: 2, y: 2 }]);
+      expect(useStore.getState().undoStack).toEqual([doc]);
+      // 模型自己的一次改动（跑完 Lua 脚本）：现在不该再进撤销栈。
+      publishLocal(AGENT_EVENT_CHANNEL, { kind: "document_updated", revision: 6, document: doc });
+      expect(useStore.getState().undoStack).toEqual([doc]);
+    } finally {
+      delete invokeErrors["editor_paint_stroke"];
+    }
   });
 });
 
@@ -849,5 +911,28 @@ describe("静默提醒（模型半天不吭声）", () => {
 
     vi.advanceTimersByTime(STALL_SECONDS * 1000 + 5);
     expect(useStore.getState().stalled).toBe(false);
+  });
+
+  it("发不出去就把占位节点收掉，别留一枚一直闪的光标", async () => {
+    invokeErrors["agent_send_message"] = "connection refused";
+    try {
+      useStore.setState({
+        activeId: "doc-01",
+        lang: "zh",
+        entries: [],
+        lastQuery: null,
+        attachments: [],
+        notice: null,
+        models: { active_id: "", entries: [] },
+      });
+
+      await useStore.getState().send("画一只八帧橘猫行走图");
+      expect(useStore.getState().running).toBe(false);
+      expect(useStore.getState().entries.some((e) => e.kind === "pending")).toBe(false);
+      // 用户那句话还得在：失败的是发送，不是他说过的话。
+      expect(useStore.getState().entries.map((e) => e.kind)).toEqual(["user"]);
+    } finally {
+      delete invokeErrors["agent_send_message"];
+    }
   });
 });

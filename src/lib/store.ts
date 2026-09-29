@@ -517,6 +517,15 @@ const UNDO_LIMIT = 40;
  * 为什么不让模型改动也进栈：一轮 agent 跑下来事件几十条，会把这些笔触挤没。
  */
 let undoCapture = false;
+/**
+ * 松手失败就缴械。armed 是「下一次 document_updated 属于编辑器」的约定，
+ * 可这一步没成功（Rust 拒了 ops、链路断了）时 document_updated 永远不会来，
+ * 旗子就一直悬着：下一个到达的 document_updated 会把它当成编辑器改动吃掉，
+ * 把模型的改动塞进撤销栈，用户自己随后那一下笔反而没了撤销。
+ */
+function disarmUndoCapture() {
+  undoCapture = false;
+}
 
 /**
  * 多久收不到任何 agent 事件就当「卡住了」提醒用户。
@@ -537,11 +546,22 @@ function pushUndo(stack: PixelDocument[], doc: PixelDocument): PixelDocument[] {
 export const useStore = create<StoreState & StoreActions>()((setState, getState) => {
   /** 键控失败：措辞跟着当前界面语言走，Rust 的原文当 {error} 追在后面。 */
   function failKey(key: TKey, vars?: TVARS) {
+    // 发出去的那一句可能还挂着占位节点（思考节点 / 「在处理」）。收尾时
+    // 不封口的话，一个跑不起来的回合会在对话里留一枚一直闪的光标，
+    // 用户会以为它还在等模型。
+    // runStartedAt 只读一次：连着三次 getState() 拿不到同一个快照的类型窄化。
+    const now = Date.now();
+    const live = getState();
+    const elapsed =
+      live.running && live.runStartedAt !== null
+        ? live.runElapsedMs ?? now - live.runStartedAt
+        : live.runElapsedMs;
     setState({
+      entries: sealTranscript(getState().entries),
       notice: { text: translate(getState().lang, key, vars), isError: true },
       running: false,
       runStartedAt: null,
-      runElapsedMs: null,
+      runElapsedMs: elapsed,
     });
   }
 
@@ -1545,6 +1565,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
           color: inkOverride !== undefined ? inkOverride : (active.color ?? null),
         });
       } catch (error) {
+        disarmUndoCapture();
         failKey("store.paint_failed", { error: String(error) });
       }
     },
@@ -1564,6 +1585,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
           inkOverride !== undefined ? inkOverride : (active.color ?? null),
         );
       } catch (error) {
+        disarmUndoCapture();
         failKey("store.fill_failed", { error: String(error) });
       }
     },
@@ -1578,6 +1600,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         return await bridge.applyEditorOps(id, ops);
       } catch (error) {
         setState({ pendingFrameIndex: null });
+        disarmUndoCapture();
         failKey("store.edit_failed", { error: String(error) });
         return null;
       }
