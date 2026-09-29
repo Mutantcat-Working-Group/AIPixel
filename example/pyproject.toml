@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aipixel"
-version = "1.0.20261003"
+version = "1.0.20261004"
 description = "AIP pixel art converter toolkit"
 requires-python = ">=3.9"
 dependencies = ["Pillow"]
