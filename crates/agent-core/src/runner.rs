@@ -2196,7 +2196,7 @@ mod tests {
 
     /// 换一把钉死关思考的会话：用户要的是「别想，直接画」。
     fn session_with_thinking_off() -> AgentSession {
-        let mut s = session();
+        let s = session();
         let mut config = s.engine.lock().unwrap().config.clone();
         config.disable_thinking = Some(true);
         let provider = s.engine.lock().unwrap().provider.clone();
@@ -2278,7 +2278,7 @@ mod tests {
     /// 反过来：用户想看思考过程，就别替他关。撞上限也走续写那条老路。
     #[tokio::test]
     async fn a_thinking_on_choice_is_never_overridden() {
-        let mut s = session();
+        let s = session();
         s.engine.lock().unwrap().config.disable_thinking = Some(false);
         let watched = rewire_watch(
             &s,
