@@ -146,7 +146,10 @@ mod tests {
         );
 
         // 静态规则：turn order、Lua API、像素工艺。
-        assert!(prompt.contains("OUTPUT BUDGET AND TURN ORDER"), "缺行动顺序约束");
+        assert!(
+            prompt.contains("OUTPUT BUDGET AND TURN ORDER"),
+            "缺行动顺序约束"
+        );
         assert!(prompt.contains("LUA CANVAS API"), "缺 Lua 接口说明");
         assert!(prompt.contains("PIXEL ART CRAFT"), "缺像素工艺规则");
         // 推理预算：这轮加的那句得在里面。

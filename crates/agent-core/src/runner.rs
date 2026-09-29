@@ -3179,7 +3179,8 @@ mod tests {
             watched.seen.lock().unwrap(),
         );
         assert!(
-            !flow.statuses
+            !flow
+                .statuses
                 .contains(&"agent.thinking_off_retry".to_string()),
             "没烧预算就不该翻盘：{:?}",
             flow.statuses,
