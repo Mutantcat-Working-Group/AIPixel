@@ -269,31 +269,38 @@ impl Sandbox {
                 }
                 Some(c) => Ok(Value::String(lua.create_string(c.to_hex().as_bytes())?)),
                 None => Err(mlua::Error::RuntimeError(format!(
-                    "palette index {i} out of range"
+                    "palette index {i} out of range (0..{}, 0 is transparent) - \
+                     add colors first with pixel_apply_operations add_palette_colors, \
+                     or use a \"#RRGGBB\" string, which every drawing call also takes",
+                    doc.palette.len()
                 ))),
             }
         })?;
         globals.set("pal", pal)?;
 
-        // hex(value) -> index（#hex 先 intern；transparent -> 0）
+        // hex(value) -> "#rrggbb"（#hex 先 intern 进当前层；transparent -> 0）
         // 层 id 一起带进去：锁着的层在 hex() 里就要归队，
         // 不然模型以为写进去的颜色生效了，实际落在另一个色上。
         let layer_cell = self.layer.clone();
-        let hex_fn = self.lua.create_function(move |_lua, v: Value| {
+        let hex_fn = self.lua.create_function(move |lua, v: Value| {
             let doc = unsafe { &mut *(doc_ptr as *mut Document) };
             let layer = layer_cell.borrow().clone();
-            resolve_color_for_layer(doc, &layer, v)
+            let idx = resolve_color_for_layer(doc, &layer, v)?;
+            let color = doc.color_of(idx).unwrap_or(Rgba::TRANSPARENT);
+            // 交出去的是 hex 串而不是索引：pal / mix / hsv / alpha / pget 全说 hex，
+            // 只有 hex() 说索引的话 `mix(hex('#e74c3c'), '#000', .35)` 必然炸，
+            // 白烧模型一个来回。颜色在 Lua 侧就该是一种能到处传的值。
+            Ok(Value::String(lua.create_string(color.to_hex().as_bytes())?))
         })?;
         globals.set("hex", hex_fn)?;
 
         // mix(a, b, t) -> "#hex"
         let mix_fn = self
             .lua
-            .create_function(|lua, (a, b, t): (String, String, f64)| {
-                let ca = Rgba::parse_hex(&a)
-                    .ok_or_else(|| mlua::Error::RuntimeError(format!("bad color {a}")))?;
-                let cb = Rgba::parse_hex(&b)
-                    .ok_or_else(|| mlua::Error::RuntimeError(format!("bad color {b}")))?;
+            .create_function(move |lua, (a, b, t): (Value, Value, f64)| {
+                let doc = unsafe { &*(doc_ptr as *const Document) };
+                let ca = value_to_rgba(&a, doc)?;
+                let cb = value_to_rgba(&b, doc)?;
                 let t = t.clamp(0.0, 1.0);
                 let out = Rgba {
                     r: lerp(ca.r, cb.r, t),
@@ -315,19 +322,21 @@ impl Sandbox {
         globals.set("hsv", hsv_fn)?;
 
         // alpha(color, a) -> "#rrggbbaa"（a 接受 0..1 或 0..255）
-        let alpha_fn = self.lua.create_function(|lua, (color, a): (String, f64)| {
-            let base = Rgba::parse_hex(&color)
-                .ok_or_else(|| mlua::Error::RuntimeError(format!("bad color {color}")))?;
-            let alpha = if a <= 1.0 {
-                (a * 255.0).round() as u8
-            } else {
-                a.round() as u8
-            };
-            let out = Rgba { a: alpha, ..base };
-            Ok(Value::String(
-                lua.create_string(out.to_rgba_hex().as_bytes())?,
-            ))
-        })?;
+        let alpha_fn = self
+            .lua
+            .create_function(move |lua, (color, a): (Value, f64)| {
+                let doc = unsafe { &*(doc_ptr as *const Document) };
+                let base = value_to_rgba(&color, doc)?;
+                let alpha = if a <= 1.0 {
+                    (a * 255.0).round() as u8
+                } else {
+                    a.round() as u8
+                };
+                let out = Rgba { a: alpha, ..base };
+                Ok(Value::String(
+                    lua.create_string(out.to_rgba_hex().as_bytes())?,
+                ))
+            })?;
         globals.set("alpha", alpha_fn)?;
 
         // rand() -> 0..1 确定性；rand(a, b) -> [a, b] 整数
@@ -752,6 +761,45 @@ fn index_from(v: &Value) -> u16 {
         Value::Number(n) => n.round() as u16,
         Value::String(s) => s.to_str().map(|t| t.parse().unwrap_or(0)).unwrap_or(0),
         _ => 0,
+    }
+}
+
+/// 颜色助手共用的入口：把 Lua 侧的颜色值解析成绝对颜色。
+/// 「#hex」串与调色板索引两条都认——颜色在 Lua 侧是一种能到处传的值，
+/// `mix(pal(1), hex('#000000'), 0.3)`、`alpha(1, 0.5)` 这样的串法都得成立。
+/// 认不出来的报错要点明它收到了什么，模型才好改下一行。
+fn value_to_rgba(v: &Value, doc: &Document) -> mlua::Result<Rgba> {
+    match v {
+        Value::String(s) => {
+            let text = s.to_str()?.to_string();
+            match text.as_str() {
+                "transparent" | "nil" | "." | "" => Ok(Rgba::TRANSPARENT),
+                _ => Rgba::parse_hex(&text).ok_or_else(|| {
+                    mlua::Error::RuntimeError(format!(
+                        "bad color \"{text}\" - want \"#RRGGBB\" / \"#RRGGBBAA\", \
+                         a palette index, or transparent"
+                    ))
+                }),
+            }
+        }
+        Value::Integer(i) => {
+            if *i <= 0 {
+                return Ok(Rgba::TRANSPARENT);
+            }
+            doc.color_of(*i as u16).ok_or_else(|| {
+                mlua::Error::RuntimeError(format!(
+                    "palette index {i} out of range (0..{}, 0 is transparent) - \
+                     add colors first with pixel_apply_operations add_palette_colors, \
+                     or use a \"#RRGGBB\" string, which every drawing call also takes",
+                    doc.palette.len()
+                ))
+            })
+        }
+        Value::Number(n) => value_to_rgba(&Value::Integer(n.round() as i64), doc),
+        Value::Nil => Ok(Rgba::TRANSPARENT),
+        other => Err(mlua::Error::RuntimeError(format!(
+            "color must be a \"#RRGGBB\" string or a palette index, got {other:?}"
+        ))),
     }
 }
 

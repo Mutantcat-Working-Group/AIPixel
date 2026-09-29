@@ -153,6 +153,105 @@ fn shader_draws_with_loops_and_palette_helpers() {
 }
 
 #[test]
+fn color_helpers_compose_in_every_direction() {
+    // 真模型踩过这个坑：先 `local red = hex('#e74c3c')` 再 `mix(red, '#000000', .35)`
+    // 直接报 bad color 1 —— hex() 是唯一交索引的助手，别的全说 hex 串，白烧一个来回。
+    // 颜色在 Lua 侧必须是一种能到处传的值，怎么串都行。
+    let mut doc = blank();
+    let (layer, frame) = (doc.layers[0].id.clone(), doc.frames[0].id.clone());
+    let script = r##"
+    local red    = hex('#e74c3c')
+    local redDk  = mix(red, '#000000', 0.35)
+    local redLt  = mix(red, '#ffffff', 0.3)
+    local stem   = hex('#6e2c00')
+    local leaf   = hex('#27ae60')
+    local leafDk = mix(leaf, '#000000', 0.3)
+    local ghost  = alpha(red, 0.5)
+    canvas.clear(nil)
+    for x = 0, 15 do
+      canvas.pset(x, 1, redDk)
+      canvas.pset(x, 2, redLt)
+      canvas.pset(x, 3, stem)
+      canvas.pset(x, 4, leafDk)
+      canvas.pset(x, 5, ghost)
+      canvas.pset(x, 6, red)
+    end
+    canvas.pset(0, 8, 'transparent')
+    "##;
+    shader::run_shader(&mut doc, &layer, script, false, &ShaderBudget::default())
+        .expect("颜色助手要能随便串");
+    let cel = doc.cel(&layer, &frame).unwrap();
+    let mut seen = Vec::new();
+    for x in 0..16 {
+        for y in 1..7 {
+            let idx = cel.get(doc.width, x, y).unwrap();
+            assert_ne!(idx, 0, "({x},{y}) 该着色");
+            let color = doc.color_of(idx).unwrap();
+            if !seen.contains(&color) {
+                seen.push(color);
+            }
+        }
+        assert_eq!(cel.get(doc.width, x, 8).unwrap(), 0, "'transparent' 该擦除");
+    }
+    // hex() 现在交 hex 串，吃进 mix 之后逐个都还得是不同色号。
+    assert_eq!(
+        seen.len(),
+        6,
+        "六个助手结果各是一个色号，实际 {}：{seen:?}",
+        seen.len()
+    );
+}
+
+#[test]
+fn stamp_legend_takes_a_color_helper_result() {
+    // legend 收 "#hex" 串；hex() 以前交索引，写进 legend 就废了。
+    let mut doc = blank();
+    let (layer, frame) = (doc.layers[0].id.clone(), doc.frames[0].id.clone());
+    shader::run_shader(
+        &mut doc,
+        &layer,
+        r##"
+        stamp({
+            'aab',
+            'abb',
+        }, {a = hex('#FF004D'), b = hex(mix('#FF004D', '#000000', 0.5))}, 0, 0)
+        "##,
+        false,
+        &ShaderBudget::default(),
+    )
+    .expect("legend 里放颜色助手的结果要能跑");
+    let cel = doc.cel(&layer, &frame).unwrap();
+    let a = cel.get(doc.width, 0, 0).unwrap();
+    let b = cel.get(doc.width, 2, 0).unwrap();
+    assert_ne!(a, 0);
+    assert_ne!(b, 0);
+    assert_ne!(a, b, "混过的那一格得是另一个色号");
+}
+
+#[test]
+fn pal_out_of_range_names_what_to_do() {
+    // 新文档一个色都没有，模型顺手就写 pal(1) 然后死在这儿。
+    // 报错必须自己说清出路，不然它只会换一个数字再撞一次墙。
+    let mut doc = blank();
+    let layer = doc.layers[0].id.clone();
+    let err = shader::run_shader(
+        &mut doc,
+        &layer,
+        "canvas.pset(1, 1, pal(1))",
+        false,
+        &ShaderBudget::default(),
+    )
+    .expect_err("空调色板上 pal(1) 必须报错");
+    let msg = err.to_string();
+    assert!(msg.contains("out of range"), "报错要说越界：{msg}");
+    assert!(
+        msg.contains("add_palette_colors"),
+        "报错要指一条出路：{msg}"
+    );
+    assert!(msg.contains("#RRGGBB"), "报错要指出字符串也收：{msg}");
+}
+
+#[test]
 fn shader_animate_clears_each_frame_and_moves_with_phase() {
     let mut doc = blank();
     let layer = doc.layers[0].id.clone();
