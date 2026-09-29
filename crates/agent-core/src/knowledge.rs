@@ -215,6 +215,27 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         keywords: &["界面", "面板", "按钮", "边框", "血条", "进度条", "panel", "button", "frame", "border"],
         body: "Pixel UI works on nine-slice logic: four corners unchanged, edges stretched, middle filled. Keep a 1px inner highlight top-left and a 1px dark line bottom-right, one flat fill between them, and leave one transparent pixel of padding so neighbouring frames do not touch.",
     },
+    KnowledgeEntry {
+        id: "refine",
+        title: "Refinement and realism",
+        keywords: &[
+            "细节",
+            "写实",
+            "细腻",
+            "丰富",
+            "润色",
+            "优化",
+            "细化",
+            "detail",
+            "detailed",
+            "refine",
+            "refinement",
+            "polish",
+            "realistic",
+            "richer",
+        ],
+        body: "A refinement request means add to what is already on the canvas, never redraw it from scratch. Read the current grid first, keep the approved silhouette and pose, and never open a refinement script with clear(). Add information inside the existing structures: sub-divide a ramp step with a dither band, add a rim light on the shadow side, deepen contact shadows, tighten the cluster rhythm. Keep the palette the same unless the user asks for more colors, and end by reading the canvas back - a script that changes nothing is skipped as a replay, so change the script or finish.",
+    },
 ];
 
 /// 检出这一轮用得上的知识条目。明文命中加权：词越长越算数，
@@ -321,6 +342,15 @@ mod tests {
 
     #[test]
     fn ids_are_unique_and_every_entry_is_usable() {
+        // 「优化一下细节」是这个工具里最高频的追问：用户看完第一版就让改细节、
+        // 写实一点。这类话里一个画种名词都没有，检索不到东西就等于每轮细化
+        // 都在裸画——而细化恰恰是最不能从 clear() 开始的轮次。
+        assert_eq!(retrieve("优化一下细节", 4)[0].id, "refine");
+        assert_eq!(retrieve("细节再写实一点", 4)[0].id, "refine");
+        assert!(retrieve("把颜色再丰富一些", 4)
+            .iter()
+            .any(|e| e.id == "refine"));
+
         let mut ids: Vec<&str> = ENTRIES.iter().map(|e| e.id).collect();
         ids.sort_unstable();
         let before = ids.len();

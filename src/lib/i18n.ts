@@ -677,6 +677,7 @@ export const zh = {
   "knowledge.pixel-font": "像素文字与字形",
   "knowledge.texture": "噪点、扫描线与复古质感",
   "knowledge.ui-kit": "像素界面面板与边框",
+  "knowledge.refine": "细化与写实",
 
   // ---------- 本轮分流节点 ----------
   "plan.reference_one": "第 {n} 张参照",
@@ -1376,6 +1377,7 @@ export const en: Record<TKey, string> = {
   "knowledge.pixel-font": "Pixel text and glyphs",
   "knowledge.texture": "Noise, scanlines and retro texture",
   "knowledge.ui-kit": "Pixel UI panels and frames",
+  "knowledge.refine": "Refinement and realism",
 
   "plan.reference_one": "Reference {n}",
   "plan.mode.style": "Style only",
