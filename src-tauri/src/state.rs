@@ -593,7 +593,10 @@ mod tests {
         let mut off = model_def("m1", "一号");
         off.disable_thinking = Some(true);
         state.upsert_model(off, Some("test-key".into()));
-        assert_eq!(state.model_config("m1").unwrap().disable_thinking, Some(true));
+        assert_eq!(
+            state.model_config("m1").unwrap().disable_thinking,
+            Some(true)
+        );
 
         // 之后只改地址再存一次：思考的意愿不能丢。
         let mut moved = model_def("m1", "一号");

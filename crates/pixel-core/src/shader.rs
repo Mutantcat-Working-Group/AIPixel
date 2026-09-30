@@ -400,32 +400,34 @@ impl Sandbox {
         // 提示词里那个 `[, a]` 曾经只是装饰：mlua 的元组解构对多出来的实参
         // 只字不提地丢掉，模型写 hsv(30, .8, .9, .5) 拿回一个完全不透明的
         // 颜色，不报错也不提示，半透明一整层就这么凭空消失。
-        let hsv_fn = self
-            .lua
-            .create_function(|lua, args: mlua::MultiValue| {
-                let mut it = args.into_iter();
-                let (h, s, v) = (num_arg(it.next())?, num_arg(it.next())?, num_arg(it.next())?);
-                // 给错类型要喊出来，别像元组解构那样一声不响地丢掉。
-                let a = match it.next().unwrap_or(Value::Nil) {
-                    Value::Nil => None,
-                    other => Some(num_arg(Some(other))?),
-                };
-                let mut color = hsv_to_rgb(h / 360.0, s, v);
-                if let Some(a) = a {
-                    color.a = if a <= 1.0 {
-                        (a * 255.0).round().clamp(0.0, 255.0) as u8
-                    } else {
-                        a.round().clamp(0.0, 255.0) as u8
-                    };
-                }
-                // 带 alpha 时必须走 rgba 表示，否则 to_hex 会把那 8 个位丢掉。
-                let text = if color.a == 255 {
-                    color.to_hex()
+        let hsv_fn = self.lua.create_function(|lua, args: mlua::MultiValue| {
+            let mut it = args.into_iter();
+            let (h, s, v) = (
+                num_arg(it.next())?,
+                num_arg(it.next())?,
+                num_arg(it.next())?,
+            );
+            // 给错类型要喊出来，别像元组解构那样一声不响地丢掉。
+            let a = match it.next().unwrap_or(Value::Nil) {
+                Value::Nil => None,
+                other => Some(num_arg(Some(other))?),
+            };
+            let mut color = hsv_to_rgb(h / 360.0, s, v);
+            if let Some(a) = a {
+                color.a = if a <= 1.0 {
+                    (a * 255.0).round().clamp(0.0, 255.0) as u8
                 } else {
-                    color.to_rgba_hex()
+                    a.round().clamp(0.0, 255.0) as u8
                 };
-                Ok(Value::String(lua.create_string(text.as_bytes())?))
-            })?;
+            }
+            // 带 alpha 时必须走 rgba 表示，否则 to_hex 会把那 8 个位丢掉。
+            let text = if color.a == 255 {
+                color.to_hex()
+            } else {
+                color.to_rgba_hex()
+            };
+            Ok(Value::String(lua.create_string(text.as_bytes())?))
+        })?;
         globals.set("hsv", hsv_fn)?;
 
         // alpha(color, a) -> "#rrggbbaa"（a 接受 0..1 或 0..255）
@@ -1206,7 +1208,11 @@ mod tests {
         assert_eq!(half.a, 128, "0.5 的 alpha 要落成 128：{half:?}");
         assert_eq!(full.a, 255, "不传 alpha 仍是实色：{full:?}");
         // 带 alpha 的颜色必须走 rgba 表示，rgb 表示会把那 8 位丢掉。
-        assert_eq!((half.r, half.g, half.b), (full.r, full.g, full.b), "同一色相只有 alpha 不同");
+        assert_eq!(
+            (half.r, half.g, half.b),
+            (full.r, full.g, full.b),
+            "同一色相只有 alpha 不同"
+        );
     }
 
     /// 提示词写着「erase the cel, or fill it with one color」。
@@ -1226,7 +1232,11 @@ mod tests {
         let cel = doc.cel(&layer, &frame).unwrap();
         let bg = doc.palette_index_of(Rgba::rgb(0x0b, 0x10, 0x26)).unwrap();
         assert_eq!(cel.get(doc.width, 15, 15).unwrap(), bg, "整格都该是底色");
-        assert_ne!(cel.get(doc.width, 0, 0).unwrap(), bg, "pset 之后左上角是前景");
+        assert_ne!(
+            cel.get(doc.width, 0, 0).unwrap(),
+            bg,
+            "pset 之后左上角是前景"
+        );
     }
 
     /// clear() 不带参数仍是擦除：宽度铺满色、下一句再 erase 要能回头。
