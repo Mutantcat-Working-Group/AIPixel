@@ -3,7 +3,9 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_core::{
     AgentSession, Capabilities, LoopLimits, McpRegistry, McpServerConfig, ModelConfig, Protocol,
@@ -103,10 +105,27 @@ impl Default for AppState {
             limits: Mutex::new(LoopLimits::DEFAULT),
             mcp_enabled: Mutex::new(true),
             mcp: Arc::new(McpRegistry::new()),
-            config_dir: Mutex::new(PathBuf::new()),
+            // 还没 bootstrap 也要有个站得住的配置目录：空路径会让 save_models()
+            // 落到「当前工作目录/models.json」，跑一遍单测就等于往仓库里写一份
+            // 含 api_key 的模型配置。setup 里的 bootstrap 会立刻把它换成真目录。
+            config_dir: Mutex::new(scratch_config_dir()),
             counter: Mutex::new(0),
         }
     }
+}
+
+/// 给每个实例一个临时目录，免得并行单测互相盖同一份文件。
+fn scratch_config_dir() -> PathBuf {
+    static SEQ: AtomicU32 = AtomicU32::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    std::env::temp_dir().join(format!(
+        "aipixel-scratch-{}-{nanos}-{n}",
+        std::process::id()
+    ))
 }
 
 impl AppState {
@@ -288,6 +307,7 @@ impl AppState {
     pub fn upsert_model(&self, incoming: ModelConfig, previous_key: Option<String>) {
         let mut file = self.models.lock().unwrap();
         let mut entry = incoming;
+        let changed_id = entry.id.clone();
         if let Some(existing) = file.entries.iter_mut().find(|m| m.id == entry.id) {
             // 前端不一定是密钥的来源：留空表示沿用旧 key，避免密钥在 webview 里反复流转。
             if entry.api_key.trim().is_empty() {
@@ -317,6 +337,9 @@ impl AppState {
         }
         drop(file);
         self.save_models();
+        // 改完要把还挂在这个定义上的会话重刷一遍：会话里的配置是创建时的一份快照，
+        // 只写文件的话侧栏还显示旧名字，下一轮请求也照样用旧的 label / max_tokens。
+        self.rebind_sessions_for(&changed_id);
     }
 
     pub fn remove_model(&self, id: &str) {
@@ -331,6 +354,7 @@ impl AppState {
         }
         drop(file);
         self.save_models();
+        self.rebind_sessions_for(id);
     }
 
     pub fn set_active_model(&self, id: &str) -> Result<(), String> {
@@ -341,7 +365,41 @@ impl AppState {
         file.active_id = id.to_string();
         drop(file);
         self.save_models();
+        self.rebind_sessions_for(id);
         Ok(())
+    }
+
+    /// 模型定义被改动之后，把还牵在上面的会话重绑到新配置上。
+    ///
+    /// 会话拿的是创建时的配置快照：用户在设置里改了名字、换了 max_tokens、改了能力，
+    /// 不刷这一下的后果是侧栏显示旧名字（用户以为自己白改了），而下一轮请求用的还是
+    /// 旧参数。provider 一起重建，所以不用重启、也不丢消息历史。
+    ///
+    /// 顺带收编两路「无主」会话：绑在一个已经不在表里的模型上（定义被删了），或者从
+    /// 来没绑过（app 首次启动、一个模型都还没配时开出来的会话）。它们跟着当前生效的
+    /// 模型走，不然侧栏永远挂着「未绑定」，用户存的第一个模型谁也用不上。
+    fn rebind_sessions_for(&self, target: &str) {
+        // 目标被删了就跟着当前生效模型走；一个都不剩时 active_config() 会给空壳，
+        // 由 provider 去解释「还没配模型」，这里不自己编错误。
+        let fresh = self
+            .model_config(target)
+            .unwrap_or_else(|_| self.active_config());
+        let sessions: Vec<Arc<AgentSession>> =
+            self.sessions.lock().unwrap().values().cloned().collect();
+        for session in sessions {
+            let current = session.model_config();
+            if current.id == target || self.model_config(&current.id).is_err() {
+                session.rebind_provider(fresh.clone());
+                continue;
+            }
+            // 主模型没动，但某个角色散绑在这个刚改过的定义上（生图、识图、读视频
+            // 各自另绑的模型）：替身不跟着刷，那一格能力用的还是旧参数。
+            for binding in session.role_bindings() {
+                if binding.detached && binding.model_id == target {
+                    session.rebind_role(binding.role, fresh.clone());
+                }
+            }
+        }
     }
 
     pub fn session(&self, id: &str) -> Result<Arc<AgentSession>, String> {
@@ -463,5 +521,62 @@ mod tests {
         state.set_mcp_enabled(true);
         assert!(first.mcp_attached(), "重新打开要装回同一个共享注册表");
         assert!(state.create_session(default_document()).mcp_attached());
+    }
+
+    /// 一条最小可用的模型定义：字段要全填，命令层就是这么校验的。
+    fn model_def(id: &str, label: &str) -> ModelConfig {
+        ModelConfig {
+            id: id.into(),
+            label: label.into(),
+            protocol: Protocol::OpenAiCompat,
+            base_url: "https://example.invalid/v1".into(),
+            api_key: "test-key".into(),
+            model: "test-model".into(),
+            max_tokens: None,
+            temperature: None,
+            disable_thinking: None,
+            capabilities: Capabilities::default(),
+        }
+    }
+
+    /// 侧栏显示的名字来自会话里那份配置快照。不跟着设置刷新的后果是用户改了名
+    /// 却看不出变化，下一轮请求也还在用旧的 label 与 max_tokens。
+    #[test]
+    fn renaming_a_model_refreshes_the_sessions_bound_to_it() {
+        let state = AppState::default();
+        let session = state.create_session(default_document());
+
+        // 一个模型都还没配时开出来的会话：存下第一个定义就该被收编，
+        // 不然侧栏一直挂着「未绑定」，用户存的模型谁也用不上。
+        state.upsert_model(model_def("m1", "旧名字"), None);
+        assert_eq!(session.model_config().label, "旧名字");
+
+        let mut renamed = model_def("m1", "新名字");
+        renamed.max_tokens = Some(4096);
+        state.upsert_model(renamed, Some("test-key".into()));
+
+        let live = session.model_config();
+        assert_eq!(live.label, "新名字", "侧栏显示的名字要跟着设置走");
+        assert_eq!(live.max_tokens, Some(4096), "参数也要换成新存的那份");
+    }
+
+    /// 会话正绑着的定义被删掉：落到当前生效模型上，而不是赖在「未绑定」。
+    #[test]
+    fn dropping_a_model_falls_its_sessions_back_to_the_active_one() {
+        let state = AppState::default();
+        state.upsert_model(model_def("m1", "一号"), None);
+        state.upsert_model(model_def("m2", "二号"), None);
+        state.set_active_model("m2").unwrap();
+        let session = state.create_session(default_document());
+        session.rebind_provider(state.model_config("m1").unwrap());
+        assert_eq!(session.model_config().id, "m1");
+
+        state.remove_model("m1");
+
+        assert_eq!(
+            session.model_config().id,
+            "m2",
+            "被删的定义不能再挂在会话上"
+        );
     }
 }

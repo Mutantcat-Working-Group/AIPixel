@@ -14,6 +14,8 @@ import type {
   RoleBinding,
   SessionInfo,
   Layer,
+  ModelConfig,
+  ModelView,
   PixelDocument,
   VideoBrief,
   VideoProbe,
@@ -1073,5 +1075,107 @@ describe("切走之后，上一个会话残着的事件不能落到这一轮", (
     expect(state.running).toBe(true);
     expect(state.entries.some((entry) => entry.kind === "pending")).toBe(true);
     expect(state.runStartedAt).not.toBeNull();
+  });
+});
+
+describe("新建会话与模型定义改动", () => {
+  /** 一条会话概览：侧栏摆的名字和画布尺寸都从它身上读。 */
+  function sessionOf(width: number, height: number, label = "一号模型"): SessionInfo {
+    return {
+      id: "s-2",
+      model_id: "m1",
+      model_label: label,
+      roles: [],
+      width,
+      height,
+      revision: 0,
+      title: null,
+      order: 2,
+    };
+  }
+
+  /** 设置表单保存下来的一条模型定义；密钥留空，本机已存那把由 Rust 合并。 */
+  function modelConfig(label: string): ModelConfig {
+    return {
+      id: "m1",
+      label,
+      protocol: "open_ai_compat",
+      base_url: "https://example.invalid/v1",
+      api_key: "",
+      model: "test-model",
+      max_tokens: 4096,
+      temperature: null,
+      disable_thinking: null,
+      capabilities: { vision: false, image_gen: false, video: false, reasoning: false },
+    };
+  }
+
+  function modelView(label: string): ModelView {
+    // disable_thinking 在视图里是必填：表单那份是可选的，这里补成「不干预」。
+    return { ...modelConfig(label), disable_thinking: null, has_api_key: true };
+  }
+
+  it("新建会话把用户选的宽高交给 Rust，并告知左上角 WxH 能改尺寸", async () => {
+    const created = sessionOf(48, 96);
+    invokeResults["session_create"] = created;
+    invokeResults["agent_document"] = { id: "s-2", revision: 0, document: blankDocument(48, 96) };
+    invokeResults["session_list"] = [created];
+    invokeResults["workflow_catalog"] = [];
+    useStore.setState({ activeId: null, sessions: [] });
+    invokeCalls.length = 0;
+
+    await useStore.getState().createSession(48, 96);
+
+    const document = invokeCalls.find((call) => call.cmd === "session_create")?.args
+      .document as { width: number; height: number } | undefined;
+    expect(document?.width).toBe(48);
+    expect(document?.height).toBe(96);
+    const notice = useStore.getState().notice;
+    expect(notice?.isError).toBe(false);
+    expect(notice?.text).toContain("48");
+    expect(notice?.text).toContain("96");
+    expect(notice?.text).toContain("WxH");
+  });
+
+  it("没选宽高的自动补建不弹通知：删掉最后一个会话时不该吵用户", async () => {
+    const created = sessionOf(64, 64);
+    invokeResults["session_create"] = created;
+    invokeResults["agent_document"] = { id: "s-2", revision: 0, document: blankDocument(64, 64) };
+    invokeResults["session_list"] = [created];
+    invokeResults["workflow_catalog"] = [];
+    useStore.setState({ activeId: null, sessions: [], notice: null });
+    invokeCalls.length = 0;
+
+    await useStore.getState().createSession();
+
+    expect(useStore.getState().notice).toBeNull();
+  });
+
+  it("改完模型定义要重拉会话列表，侧栏名字才跟着设置走", async () => {
+    const renamed = sessionOf(64, 64, "新名字");
+    invokeResults["model_upsert"] = { active_id: "m1", entries: [modelView("新名字")] };
+    invokeResults["session_list"] = [renamed];
+    invokeResults["workflow_catalog"] = [];
+    useStore.setState({ activeId: "s-2", sessions: [sessionOf(64, 64)] });
+    invokeCalls.length = 0;
+
+    await useStore.getState().upsertModel(modelConfig("新名字"));
+
+    expect(invokeCalls.some((call) => call.cmd === "session_list")).toBe(true);
+    expect(useStore.getState().sessions.map((s) => s.model_label)).toEqual(["新名字"]);
+  });
+
+  it("删掉正绑着的模型定义也要重拉会话列表", async () => {
+    const fallenBack = sessionOf(64, 64, "二号模型");
+    invokeResults["model_remove"] = { active_id: "m2", entries: [modelView("二号模型")] };
+    invokeResults["session_list"] = [fallenBack];
+    invokeResults["workflow_catalog"] = [];
+    useStore.setState({ activeId: "s-2", sessions: [sessionOf(64, 64)] });
+    invokeCalls.length = 0;
+
+    await useStore.getState().removeModel("m1");
+
+    expect(invokeCalls.some((call) => call.cmd === "session_list")).toBe(true);
+    expect(useStore.getState().sessions.map((s) => s.model_label)).toEqual(["二号模型"]);
   });
 });

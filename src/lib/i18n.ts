@@ -49,8 +49,7 @@ export const zh = {
 
   // ---------- 会话侧栏 ----------
   "sidebar.sessions": "会话",
-  "sidebar.new": "新建空白会话",
-  "sidebar.new_sized": "指定画布尺寸新建",
+  "sidebar.new": "新建会话",
   "sidebar.delete": "删除会话",
   "sidebar.unbound": "未绑定",
   "sidebar.rev": "版本 {rev}",
@@ -61,8 +60,9 @@ export const zh = {
   "sidebar.width": "宽",
   "sidebar.height": "高",
   "sidebar.presets": "常用尺寸",
-  "sidebar.size_hint": "像素画从 16 或 32 起步最稳；尺寸之后随时能改。",
+  "sidebar.size_hint": "像素画从 16 或 32 起步最稳；建好之后左上角 WxH 随时能改宽高。",
   "sidebar.size_readout": "{width} × {height} 像素，共 {cells} 格",
+  "sidebar.created_hint": "画布已创建：{width} × {height}。左上角 WxH 随时能改宽高。",
   "sidebar.rename": "重命名会话",
   "sidebar.rename_hint": "双击名字或点铅笔直接改；回车落库、Esc 收手",
   "sidebar.reorder_hint": "按住拖动可调整顺序",
@@ -735,8 +735,7 @@ export const en: Record<TKey, string> = {
   "gate.add_first": "Add your first model",
 
   "sidebar.sessions": "Sessions",
-  "sidebar.new": "New blank session",
-  "sidebar.new_sized": "New session with a chosen canvas size",
+  "sidebar.new": "New session",
   "sidebar.delete": "Delete session",
   "sidebar.unbound": "unbound",
   "sidebar.rev": "rev {rev}",
@@ -744,8 +743,10 @@ export const en: Record<TKey, string> = {
   "sidebar.modal_title": "New canvas",
   "sidebar.presets": "Common sizes",
   "sidebar.size_hint":
-    "16 or 32 is the safest start for pixel art; the size can change later.",
+    "16 or 32 is the safest start for pixel art; after creating it, WxH in the top-left corner changes the size anytime.",
   "sidebar.size_readout": "{width} x {height} px, {cells} cells",
+  "sidebar.created_hint":
+    "Canvas created: {width} x {height}. WxH in the top-left corner changes the size anytime.",
   "sidebar.rename": "Rename session",
   "sidebar.rename_hint": "Double-click the name or use the pencil; Enter saves, Esc cancels",
   "sidebar.reorder_hint": "Drag to reorder",

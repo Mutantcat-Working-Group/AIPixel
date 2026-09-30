@@ -271,6 +271,8 @@ export interface StoreActions {
   clearNotice: () => void;
   /** 一条不打断流程的小警告：措辞跟着界面语言走，不带 fail 那一堆副作用。 */
   warnKey: (key: TKey, vars?: TVARS) => void;
+  /** 一条本机成功提示（画布建好了、盘存完了）。同样不带 fail 那一堆副作用。 */
+  noteKey: (key: TKey, vars?: TVARS) => void;
   openSettings: () => void;
   closeSettings: () => void;
   refreshWorkflows: () => Promise<void>;
@@ -928,9 +930,13 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         usage: null,
         lastQuery: null,
         attachments: [],
-        frameIndex: 0,
-      });
+      frameIndex: 0,
+    });
       await loadDocument(info.id);
+      // 只有从尺寸弹窗进来的才告知：删掉最后一个会话时那次自动补建不该吵用户。
+      if (width && height) {
+        noteKey("sidebar.created_hint", { width: info.width, height: info.height });
+      }
     },
 
     removeSession: async (id) => {
@@ -1049,6 +1055,9 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     upsertModel: async (config) => {
       const models = await bridge.upsertModel(config);
       setState({ models });
+      // Rust 已经把活着的会话重绑到这份新配置上，侧栏的模型名就是从那读的：
+      // 不重新拉一遍，用户在设置里改完名字看到的还是旧的那串。
+      await getState().refreshSessions();
       const bound = getState().sessions.find((s) => s.id === getState().activeId);
       // 会话还挂在「未设置」上（没配模型就开了会话，或者模型被删了）：补绑到刚存好的定义，
       // 不然用户存完还得回顶栏手动挑一次，而挑之前发消息只会拿到 provider 的报错。
@@ -1065,11 +1074,21 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     removeModel: async (id) => {
       const models = await bridge.removeModel(id);
       setState({ models });
+      // 删掉的若正是会话正绑着的定义，Rust 会让它落到当前生效模型上：侧栏要刷新，
+      // 能力勾选也跟着变（换了个模型就等于换了一套能跑的流程）。
+      await getState().refreshSessions();
+      const bound = getState().sessions.find((s) => s.id === getState().activeId);
+      if (bound && !models.entries.some((m) => m.id === bound.model_id)) {
+        await getState().refreshWorkflows();
+      }
     },
 
     activateModel: async (id) => {
       const models = await bridge.setActiveModel(id);
       setState({ models });
+      // 切默认模型会把还没绑过模型的会话一起带过去：侧栏模型名与流程可用性都跟着变。
+      await getState().refreshSessions();
+      await getState().refreshWorkflows();
     },
 
     refreshLoopLimits: async () => {
@@ -1375,6 +1394,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
 
     clearNotice: () => setState({ notice: null }),
     warnKey: flagKey,
+    noteKey,
 
     setLang: (lang) => {
       try {

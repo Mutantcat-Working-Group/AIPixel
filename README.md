@@ -21,7 +21,7 @@ AIPixel 把生图路径收窄成六条类型化工具（结构 ops、脚本、�
 
 Agent 会话与工作台都已落地：会话负责产出，工作台负责盯着它、以及在画布上直接动手。
 
-左侧 `src/ui/SessionSidebar.tsx` 是会话列表，支持空白新建和带 WxH 的新建；中间 `src/ui/ChatPanel.tsx` 是对话流：
+左侧 `src/ui/SessionSidebar.tsx` 是会话列表，新建时先选画布宽高（支持改名与拖动排序）；中间 `src/ui/ChatPanel.tsx` 是对话流：
 用户气泡带附件条、助手消息带流式光标、工具调用可展开看 JSON 入参、推理片段折叠在 `<details>` 里；右侧 `src/ui/DocumentPanel.tsx` 把
 document 渲染成画布，图层 / 帧 / 配色范围各一行，还能切到 `.aip` 原文。
 

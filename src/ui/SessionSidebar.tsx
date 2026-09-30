@@ -43,10 +43,6 @@ export default function SessionSidebar() {
   const [dragId, setDragId] = useState<string | null>(null);
   const [overId, setOverId] = useState<string | null>(null);
 
-  async function createDefault() {
-    await createSession();
-  }
-
   const beginRename = (id: string, current: string) => {
     renamingRef.current = id;
     setRenamingId(id);
@@ -83,12 +79,12 @@ export default function SessionSidebar() {
         <strong>{t("sidebar.sessions")}</strong>
         <span className="grow" />
         <Tooltip title={t("sidebar.new")}>
-          <Button size="small" type="text" icon={<Plus size={14} />} onClick={createDefault} />
-        </Tooltip>
-        <Tooltip title={t("sidebar.new_sized")}>
-          <Button size="small" type="text" onClick={() => setSizedOpen(true)}>
-            WxH
-          </Button>
+          <Button
+            size="small"
+            type="text"
+            icon={<Plus size={14} />}
+            onClick={() => setSizedOpen(true)}
+          />
         </Tooltip>
       </div>
 

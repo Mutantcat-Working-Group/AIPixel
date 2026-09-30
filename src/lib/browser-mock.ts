@@ -95,16 +95,25 @@ const HEART = [
   ".....121..",
 ];
 
-function makeCel(dropY: number, sparkle: boolean): { indices: number[] } {
-  const indices = new Array<number>(WIDTH * HEIGHT).fill(0);
+function makeCel(
+  dropY: number,
+  sparkle: boolean,
+  width: number,
+  height: number,
+): { indices: number[] } {
+  const indices = new Array<number>(width * height).fill(0);
   const put = (x: number, y: number, ch: string) => {
-    if (x < 0 || y < 0 || x >= WIDTH || y >= HEIGHT) return;
-    indices[y * WIDTH + x] = SLOT.indexOf(ch) + 1;
+    if (x < 0 || y < 0 || x >= width || y >= height) return;
+    indices[y * width + x] = SLOT.indexOf(ch) + 1;
   };
+  // 图案按画布尺寸居中：预览里换成 64x64 也不能让它缩在左上角。
+  const heartWidth = Math.max(...HEART.map((row) => row.length));
+  const originX = Math.max(0, Math.floor((width - heartWidth) / 2));
+  const originY = Math.max(0, Math.floor((height - HEART.length) / 2));
   HEART.forEach((row, ry) => {
     for (let rx = 0; rx < row.length; rx += 1) {
       const ch = row[rx];
-      if (ch !== ".") put(rx + 5, ry + 2 + dropY, ch);
+      if (ch !== ".") put(rx + originX, ry + originY + dropY, ch);
     }
   });
   if (sparkle) {
@@ -132,12 +141,33 @@ function makeDocument(): PixelDocument {
     ],
     cels: {
       L0: {
-        F0: makeCel(0, false),
-        F1: makeCel(1, false),
-        F2: makeCel(2, true),
+        F0: makeCel(0, false, WIDTH, HEIGHT),
+        F1: makeCel(1, false, WIDTH, HEIGHT),
+        F2: makeCel(2, true, WIDTH, HEIGHT),
       },
     },
     revision: 1,
+  };
+}
+
+/**
+ * 用户在新建弹窗里选了尺寸，预览要有一份对应的画布。
+ * 预览里只维护一份文档：换尺寸就按新宽高重画一份，侧栏显示和画布渲染才一致。
+ */
+function makeDocumentSized(width: number, height: number): PixelDocument {
+  const w = Math.max(8, width);
+  const h = Math.max(8, height);
+  return {
+    ...makeDocument(),
+    width: w,
+    height: h,
+    cels: {
+      L0: {
+        F0: makeCel(0, false, w, h),
+        F1: makeCel(1, false, w, h),
+        F2: makeCel(2, true, w, h),
+      },
+    },
   };
 }
 
@@ -177,8 +207,9 @@ function makeSession(id: string, revision: number): SessionInfo {
     model_id: MODEL.id,
     model_label: MODEL.label,
     roles,
-    width: WIDTH,
-    height: HEIGHT,
+    // 宽高跟着当前画布走：新建会话选了别的大小，侧栏那一行要如实报出来。
+    width: doc.width,
+    height: doc.height,
     revision,
     title,
     // 排序位从 1 起排，和 Rust 一致；0 留给还没落位的。
@@ -544,7 +575,9 @@ function handler(cmd: string, raw?: unknown): unknown {
     case "session_create": {
       const requested = payload.document as PixelDocument | null;
       if (requested) {
-        doc = requested;
+        // 用户选了尺寸：按新宽高重画一份，别把请求文档原样塞进来——那份只有一层一帧，
+        // 直接换上会把预览里的三帧动画冲掉，看着像新建会话把内容弄丢了。
+        doc = makeDocumentSized(requested.width, requested.height);
         revision += 1;
       }
       const fresh = `s-${nextSessionSeq++}`;
