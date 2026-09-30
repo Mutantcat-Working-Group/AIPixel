@@ -46,7 +46,15 @@ PIXEL ART CRAFT - apply whenever you draw:
 - Build 3-5 step light-to-dark ramps per material, hue-shifted (cooler shadows, warmer highlights); generate them with hsv()/mix() instead of guessing hex.
 - Keep the palette tight: reuse existing palette colors; for large smooth transitions prefer ordered dithering between two ramp steps (checkerboard or a noise() threshold) over piling up in-between colors.
 - Outline deliberately: one strategy per drawing - solid dark outline, darker selective outline on shadowed edges only, or none - kept consistent; hue-shifted outlines read softer than pure black.
-- Anti-alias sparingly: at most one intermediate color where a curve meets a contrasting background; skip it on tiny sprites and along outlines.
+PIXELS ARE PLACED, NOT APPROXIMATED - the rules that separate a finished sprite from a smudge:
+- BUILD THE SUBJECT AS HELPERS, NOT AS A STORY: define small local Lua functions (drawBody, drawLeg, drawEar, drawTail) and call them with parameters. One place to get the geometry right, no copy-paste drift, and a whole limb can be re-derived from phase in one line.
+- DEPTH LAYERING: when a subject has limbs, tails or wings, paint the FAR ones first, then the body, then the NEAR ones last. A limb drawn after the body must not cover the torso silhouette, and a joint never crosses the body outline.
+- SHADE BY RE-WRITING, NOT BY OVERPAINTING: after a filled shape is final, pass over it again with a pget test (if pget(x,y)==body then pset(x,y,dark) end) for rim, shadow and contact bands. Overpainting with a second filled shape deletes the first one's detail.
+- 5-STEP LIGHTING: one base, one highlight, one mid shadow, one core shadow, one rim light. Compute the band per pixel from the form (the dy of the ellipse, a distance from the light, a dot with a normal) instead of blanket-filling a shape in one value.
+- FEATHER AN ANTI-ALIASED EDGE: where a curve meets a contrasting background, place one pixel of mix(curve, background, coverage) from the partial coverage - never a jagged step and never a third ramp color. Skip it on sprites under 32px and along any outline.
+- CONTACT SHADOW grounds a subject on the floor: a tight 1-2px dark band where the feet touch, then a wider dithered falloff that thins to nothing. Keep it on its own pass so the outline never eats it.
+- THE SIGNATURE DETAILS ARE THE PICTURE: eyes take a 2x2 pupil with a one-pixel highlight on the lit side; ears get a pink inner ear; paws get a lighter pad; a tail is 6-12 points along a curve, tapering, with rings based on the arc position. Two or three of these read as craft; ten read as noise.
+PIXEL ANIMATION CRAFT - apply whenever the artwork animates:
 
 PIXEL ANIMATION CRAFT - apply whenever the artwork animates:
 - Timing: default to ~12 FPS (about 83ms per frame via set_frame_duration; new frames start at 100ms) unless the user asks otherwise. Keep frame counts lean: 2-4 idle, 4-8 walk, 6-12 run, 3-6 attack. Stutter means too few frames or timing too fast; mushy motion means too many similar frames - sharpen the key poses.
@@ -198,5 +206,30 @@ mod tests {
             !prompt.contains("Never enumerate long pixel arrays by hand"),
             "小图手写行被禁掉了，旧版生成效果回不来"
         );
+    }
+
+    /// 成品质量的几条硬规则必须在场。这些是从实践里提炼出来的落地技法：
+    /// 少了哪一条，模型给出的就是「一坨同色填充」而不是画。
+    #[test]
+    fn the_finishing_rules_are_all_present() {
+        let doc = pixel_core::Document::new("t", 32, 32).unwrap();
+        let prompt = build_system_prompt(&doc, "L0", "F0", None, 4000, "", "");
+        for rule in [
+            "PIXELS ARE PLACED, NOT APPROXIMATED",
+            // 肢体/尾巴的前后关系：画错顺序细节就被身体盖掉。
+            "DEPTH LAYERING",
+            // 定型的形状用 pget 重写上色，不能用第二个大填充盖回去。
+            "SHADE BY RE-WRITING",
+            // 5 级光照分层：一档底、一档高光、一档暗、一档核心阴影、一档轮廓光。
+            "5-STEP LIGHTING",
+            // 抗锯齿羽化只落在曲线与背景交界的一个像素上。
+            "FEATHER AN ANTI-ALIASED EDGE",
+            // 落地接触阴影：紧贴的一两条暗带 + 抖开的余量。
+            "CONTACT SHADOW",
+            // 标志性细节是画面的重点，不是越多越好。
+            "THE SIGNATURE DETAILS ARE THE PICTURE",
+        ] {
+            assert!(prompt.contains(rule), "缺成品规则 {rule}");
+        }
     }
 }

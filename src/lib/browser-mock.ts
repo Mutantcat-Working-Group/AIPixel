@@ -314,6 +314,8 @@ const FETCHABLE = [
 ];
 
 let doc = makeDocument();
+/** 编辑器当前停在哪一帧：`document_png_url` 不点名帧时要合成它，跟真机一致。 */
+let activeFrameId = doc.frames[0]?.id ?? "F0";
 
 /** cel 下标 0 是透明格，requantize 的重映射表要拿它当第一位。 */
 const TRANSPARENT_SLOT: Rgba = { r: 0, g: 0, b: 0, a: 0 };
@@ -540,6 +542,12 @@ let ownerSession = "p1";
 function handler(cmd: string, raw?: unknown): unknown {
   const payload: Args = (raw ?? {}) as Args;
   const id = String(payload.id ?? "p1");
+  // 真机那边 agent_set_active 会同步编辑器停住的帧号，mock 也记一份：
+  // document_png_url 不点名帧时才知道该合成哪一帧。
+  if (cmd === "agent_set_active") {
+    const active = payload.active as { frame?: unknown } | undefined;
+    if (typeof active?.frame === "string") activeFrameId = active.frame;
+  }
   // model_* 的 id 是模型 id 不是会话 id，拿它盖归属会把事件发到一个不存在的
   // 会话上去，画面就再也不更新了。
   if (!cmd.startsWith("model_")) ownerSession = id;
@@ -578,6 +586,7 @@ function handler(cmd: string, raw?: unknown): unknown {
         // 用户选了尺寸：按新宽高重画一份，别把请求文档原样塞进来——那份只有一层一帧，
         // 直接换上会把预览里的三帧动画冲掉，看着像新建会话把内容弄丢了。
         doc = makeDocumentSized(requested.width, requested.height);
+        activeFrameId = doc.frames[0]?.id ?? "F0";
         revision += 1;
       }
       const fresh = `s-${nextSessionSeq++}`;
@@ -913,7 +922,10 @@ function handler(cmd: string, raw?: unknown): unknown {
     case "workflow_catalog":
       return catalog();
     case "document_png_url":
-      return pngFor(Number(payload.frame ?? 0));
+      // 真机那边：点名帧合那一帧，没点名合活跃帧（不是把所有帧横铺开）。
+      // mock 照同一套语义来，不然浏览器里验不出「切帧后画布对不上」这类问题。
+      if (typeof payload.frame === "number") return pngFor(payload.frame);
+      return pngFor(Math.max(0, doc.frames.findIndex((f) => f.id === activeFrameId)));
     case "batch_recipes_list":
       return [];
     case "batch_recipe_save":

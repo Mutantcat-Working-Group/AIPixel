@@ -185,7 +185,14 @@ const [hexDraft, setHexDraft] = useState("");
   // 单行注释放这儿盖不住依赖数组上的告警，用块级注释把整个 effect 罩住。
   /* eslint-disable react-hooks/exhaustive-deps */
   useEffect(() => {
-    if (!playing || !document || document.frames.length < 2) return;
+    if (!playing || !document) return;
+    if (document.frames.length < 2) {
+      // 单帧文档没什么可播，但「播放中」这个状态仍会把权威 png 藏掉
+      // （.canvas-stack[data-playing="true"] .canvas-img）。没人接管帧层的
+      // 话，画布就只剩一块透明——删帧删到只剩一格时正是这条路。补画当前帧。
+      paintFrame(Math.min(playFrame, document.frames.length - 1), null);
+      return;
+    }
     const frames = document.frames;
     let index = playFrame < frames.length ? playFrame : 0;
     let timer = 0;

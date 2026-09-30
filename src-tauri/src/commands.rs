@@ -405,13 +405,29 @@ pub fn document_png_url(
     let doc = session.document();
     let img = match frame {
         Some(index) => pixel_core::png::composite_frame(&doc, index),
-        None => pixel_core::png::flatten(&doc),
+        None => {
+            // 没点名帧就合成编辑器当前的活跃帧。铺开多帧是导出 sheet 的
+            // 专属语义，画布预览要的是「此刻看到的那一帧」，否则多帧文档
+            // 会在画布里拉成一条长图。
+            let active_frame = session.active().frame;
+            let index = fallback_frame_index(&doc, &active_frame);
+            pixel_core::png::composite_frame(&doc, index)
+        }
     };
     let bytes = pixel_core::png::encode_png(&img)?;
     Ok(format!(
         "data:image/png;base64,{}",
         pixel_core::png::base64_encode(&bytes)
     ))
+}
+
+/// 不点名帧时该合成哪一帧：编辑器当前停住的那一帧，对不上就第一帧。
+/// 多帧横铺（`png::flatten`）是导出 sheet 的语义，画布预览永远不该看到它。
+fn fallback_frame_index(doc: &pixel_core::document::Document, active_frame: &str) -> u32 {
+    doc.frames
+        .iter()
+        .position(|f| f.id == active_frame)
+        .unwrap_or(0) as u32
 }
 
 /// 把整个动画导出到磁盘：`gif` 走无限循环动画，`sheet` 走 PNG spritesheet。
@@ -537,5 +553,45 @@ mod tests {
                 .expect("task must run"),
             "tauri::async_runtime::spawn ran"
         );
+    }
+
+    /// 回归：画布预览不点名帧时合成的是活跃帧，不是把所有帧横铺成一张长图。
+    /// 以前 None 分支直接走 `png::flatten`，多帧文档会在画布里拉成一条，
+    /// 用户看到的就是「选第一帧却显示所有帧连在一起」。
+    #[test]
+    fn png_preview_falls_back_to_the_active_frame() {
+        use super::fallback_frame_index;
+        use pixel_core::ops::{apply_batch, PixelOperation};
+
+        let mut doc = pixel_core::document::Document::new("preview", 4, 3).unwrap();
+        apply_batch(
+            &mut doc,
+            &[
+                PixelOperation::CreateFrame {
+                    after: None,
+                    duration_ms: 100,
+                    id: None,
+                },
+                PixelOperation::CreateFrame {
+                    after: None,
+                    duration_ms: 100,
+                    id: None,
+                },
+            ],
+        )
+        .unwrap();
+        assert_eq!(doc.frames.len(), 3);
+
+        assert_eq!(fallback_frame_index(&doc, "F2"), 2);
+        assert_eq!(fallback_frame_index(&doc, "F0"), 0);
+        // 活跃帧已被删掉（改名、删帧、串了会话）时退回第一帧，仍不是横铺。
+        assert_eq!(fallback_frame_index(&doc, "F99"), 0);
+
+        // 活跃帧合出来的宽度就是画布宽度；横铺会是宽度的三倍。
+        let img = pixel_core::png::composite_frame(&doc, fallback_frame_index(&doc, "F2"));
+        assert_eq!(img.width(), 4);
+        assert_eq!(img.height(), 3);
+        // 对照：横铺确实是三倍宽，所以预览这条路要是走了 flatten 一眼就能看出来。
+        assert_eq!(pixel_core::png::flatten(&doc).width(), 12);
     }
 }
