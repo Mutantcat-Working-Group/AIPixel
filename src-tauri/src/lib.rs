@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! AIPixel 的 Tauri 外壳：应用状态托管、命令注册与事件桥。
 //! 主循环在 agent-core，文档模型在 pixel-core，这里只做桌面端装配。
 

@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! 美术概念/专有名词表：中英双语 + 别称 + 一句白话解释。
 //!
 //! 用户嘴里的「色阶」「节奏」「剪影」和模型训练语料里的叫法常常对不上，

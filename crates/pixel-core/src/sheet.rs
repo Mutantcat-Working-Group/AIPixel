@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! 动画导出：GIF 与 spritesheet，和 PNG 导出同级。
 //!
 //! 逐帧工具如果交不出动画文件，画出来的帧就永远出不了这个软件，所以这里不是附属功能。

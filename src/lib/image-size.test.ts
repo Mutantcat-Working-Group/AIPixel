@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 // 尺寸口径的规矩：预设原样透传，自定义与跟随画布都要 snap 到 32 的倍数，
 // 且夹在 256..1536 之间——不少兼容实现不认这个粒度之外的尺寸，直接 400。
 

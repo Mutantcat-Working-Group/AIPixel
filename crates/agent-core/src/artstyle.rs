@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! 风格预设：一句「按 Game Boy 那样画」，其实是把色数和技法一起钉死了。
 //!
 //! 这类约束看着像口味，其实是硬指标：1-bit 只剩一个色加透明，Game Boy 只剩四级绿，

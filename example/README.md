@@ -1,3 +1,5 @@
+> Copyright (C) 2026 Mutantcat Working Group · GPL-3.0-only · 完整条款见 [../LICENSE](../LICENSE)
+
 # example：最初那套 Pillow 工具链与样例数据
 
 仓库根目录是桌面端（Tauri 2 + Rust 主循环 + React 前端），这一层是它之前的东西：

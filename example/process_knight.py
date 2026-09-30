@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Mutantcat Working Group
+# SPDX-License-Identifier: GPL-3.0-only
 # 由异猫工作群（mutantcat.org）发行 · GitHub: https://github.com/Mutantcat-Working-Group
 
 from PIL import Image

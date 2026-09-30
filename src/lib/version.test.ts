@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 import agentToml from "../../crates/agent-core/Cargo.toml?raw";
 import pixelToml from "../../crates/pixel-core/Cargo.toml?raw";
 import shellToml from "../../src-tauri/Cargo.toml?raw";

@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 // 把 Rust 主循环广播的 AgentEvent 流折叠成可渲染的对话条目。
 // 纯函数、零依赖，方便单测；副作用（刷新画布、读 PNG）由 store 处理。
 

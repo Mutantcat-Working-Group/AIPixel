@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 import { useEffect, useState } from "react";
 import { Alert, Button, Checkbox, Input, Modal, Segmented, Tag, Tooltip } from "antd";
 import { Plus, Trash2 } from "lucide-react";

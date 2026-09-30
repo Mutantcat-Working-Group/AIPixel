@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 /** 页面内事件总线：Tauri 事件桥不可用时的兜底通道。
  *
  * 为什么需要它：`listen()` 内部读 `window.__TAURI_INTERNALS__.transformCallback`，

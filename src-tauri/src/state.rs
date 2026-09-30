@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! Tauri 托管状态：会话表 + 用户自带模型配置。
 //! 没有内置服务器、没有登录、没有计费；模型完全来自用户在本机填的 Provider。
 

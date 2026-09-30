@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! 本轮分流：把「这句话到底要什么」一次说清楚，只说一次。
 //!
 //! 分流由四件事合成，每件都是用户一句话就能钉死、模型却最容易猜错的方向：

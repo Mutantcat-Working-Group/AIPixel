@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! 常见颜色名表：hex + 中英文名 + 别称。
 //!
 //! 解决的是「用户说蓝，模型不知道该填哪个 hex」这件事。表按人眼能叫出名字的

@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! 批量工作台：纯本机、确定性的批处理引擎，是 agent 会话的能力补充。
 //!
 //! 分工的道理：agent 主循环是「一个会话 + 一个模型 + 一个活文档」，一次一两张；

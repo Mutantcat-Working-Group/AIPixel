@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! PNG 导出：文档拼接后的 RGBA 位图（帧顺序横向铺开多帧时纵向堆叠）。
 
 use super::document::Document;

@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! 会话里的模型分工。
 //!
 //! 「只用用户自带模型」经常意味着用户手上不止一个模型：一个会聊天、一个会出图、

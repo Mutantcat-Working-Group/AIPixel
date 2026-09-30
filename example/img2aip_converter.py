@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Mutantcat Working Group
+# SPDX-License-Identifier: GPL-3.0-only
 #!/usr/bin/env python3
 """
 AIP 像素画反向转换器

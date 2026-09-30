@@ -219,7 +219,9 @@ python3 example/img2aip_converter.py             # refer_img/ -> refer_aip/
 
 ### 开源协议
 
+- 著作权归 **异猫工作群（Mutantcat Working Group · mutantcat.org）** 所有，Copyright (C) 2026
 - 本项目采用 **GNU General Public License v3.0（GPL-3.0）**，完整条款见仓库根目录 [LICENSE](./LICENSE)
+- 每个源文件顶部都有两行许可头：`Copyright (C) 2026 Mutantcat Working Group` 加 `SPDX-License-Identifier: GPL-3.0-only`，看单文件就能确认授权归属
 - 使用、修改、二次分发都自由，但衍生作品必须以 GPL-3.0 同协议继续开源，并保留原版权与许可声明
 - 分发二进制或安装包时，须同时提供对应的完整源码；本仓库的发布产物与源码始终一一对应
 - `example/` 里的示例、随附脚本与本 README 同样适用本协议

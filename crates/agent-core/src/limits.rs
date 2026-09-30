@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! 常用模型的输出上限对照表。
 //!
 //! 「Max tokens」填得太小是像素画 agent 最隐蔽的坑：一段分镜 Lua 动辄五六百行，

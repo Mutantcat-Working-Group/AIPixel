@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! 一次性联调探针：拿用户在设置里配的那套模型真跑一轮，看 agent 主循环
 //! 到底调没调工具、画没画出东西。凭据只从环境变量读，不落任何文件。
 //!

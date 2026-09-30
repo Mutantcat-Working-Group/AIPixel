@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! Tauri 命令层：把 agent-core 的主循环与 pixel-core 的文档能力暴露给前端。
 //! 事件统一走 `agent-event` 通道，载荷是带 session_id 的 `AgentEventEnvelope`，
 //! 里面的 `AgentEvent` 自带 kind tag，前端按 kind 分派。

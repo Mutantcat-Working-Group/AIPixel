@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 // 帧合成：把 cels 里的调色板索引压成一帧 RGBA。
 // 语义逐位对齐 Rust 的 `pixel-core/src/png.rs::composite_pixel`——播放预览和
 // 洋葱皮看到的必须和权威渲染同一个东西，否则用户预览的动画不是他导出的动画。

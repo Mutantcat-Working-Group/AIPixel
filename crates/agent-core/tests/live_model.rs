@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! 真模型端到端自检。默认跳过，只有把 Provider 变量配齐才会真的发出请求。
 //!
 //! ```text

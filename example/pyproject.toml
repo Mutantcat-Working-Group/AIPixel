@@ -8,7 +8,7 @@ version = "1.0.20261006"
 description = "AIP pixel art converter toolkit"
 requires-python = ">=3.9"
 dependencies = ["Pillow"]
-license = { text = "GPL-3.0-or-later" }
+license = { text = "GPL-3.0-only" }
 
 [tool.setuptools]
 py-modules = [

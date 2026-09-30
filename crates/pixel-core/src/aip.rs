@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! .aip 格式：v1 遗留纯文本矩阵 + v2 增强文本格式。
 //!
 //! v2 参照 PixTXT 的单字符调色板符号 + RLE 思路并做了针对性改进：

@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! 用户意图：这一句话要的是哪一类成品。
 //!
 //! 「画一只猫」和「做一套草地瓦片」要的东西根本不是一回事：前者是单张立绘，

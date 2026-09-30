@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! 位图解码：把 PNG / JPEG / GIF / WebP 字节转成 RGBA 字节串，喂给 pixelize。
 //! 生图模型与用户参考图都可能是这四种之一，格式嗅探放在这里统一收口。
 

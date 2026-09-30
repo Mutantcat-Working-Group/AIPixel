@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! agent 画布上下文构建：把文档当前状态渲染成提示词里的 RLE 文本块。
 //! 核心约定：文本网格是权威状态，图像只是上下文。
 

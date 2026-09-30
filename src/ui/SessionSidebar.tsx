@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 import { useRef, useState } from "react";
 import { Button, Input, Tooltip } from "antd";
 import { Github, Pencil, Plus, Trash2 } from "lucide-react";

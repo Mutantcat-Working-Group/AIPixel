@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 // 本轮分流节点（`pixel_plan`）的入参解析：把模型送来的那团 JSON 摆成几行字。
 
 // 一个节点要回答四件事：参照图怎么参照、要的是哪类成品、风格预设锁没锁、

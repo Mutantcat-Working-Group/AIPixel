@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { ConfigProvider, theme } from "antd";

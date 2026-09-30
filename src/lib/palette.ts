@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 // 配色范围：调色板在这里就是「允许用哪些颜色」的边界。
 // 换预设不是换着玩——Rust 的 set_palette 会按就近色把已有像素重映射进新范围，
 // 画面留住，颜色归队。所以预设收的是几套人名级别的经典色板，取色也得跟眼睛站一起。

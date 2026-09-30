@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 import { useEffect, useState } from "react";
 import { Button, Dropdown, Segmented, Select, Spin, Tooltip } from "antd";
 import { Download, FolderOpen, ImagePlus, Plug, Save, Settings2, X } from "lucide-react";

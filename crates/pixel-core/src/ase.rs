@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! Aseprite .ase / .aseprite 导出。字段布局逐字节对齐官方规范
 //! (`ase-file-specs.md`)：RGBA 位深、唯一图层、每帧一张 zlib 压缩 cel。
 //! 逐帧工具如果导不出 .ase，图层/帧语义就断在门外，所以这里和 GIF /

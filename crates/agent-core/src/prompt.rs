@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! 系统提示词：静态 craft 规则 + 动态 canvas 上下文。
 //! 规则按本项目自己的 craft 约束组织，编码约定对齐我们自己的 RLE（`<count><symbol>`，`.` 透明）。
 

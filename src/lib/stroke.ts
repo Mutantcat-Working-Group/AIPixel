@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 // 一笔笔画的几何：把指针采样的格子连成连续的格子链。
 // 纯函数、零依赖，方便单测；采样在组件里做（pointermove），这里只管连线。
 //

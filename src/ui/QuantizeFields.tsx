@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 // 量化选项控件：工作流坞的量化面板、批量工作台的量化参数共用这一套。
 // 抽出来是为了让两处的调色板 / 抖动 / 适配手感完全一致，而不是各写一份。
 

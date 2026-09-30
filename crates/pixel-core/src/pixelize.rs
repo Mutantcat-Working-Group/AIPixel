@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! 位图 -> 像素文档：把模型生成的位图降采样、量化成 .aip 的调色板索引网格。
 //! 这是「生图模型」工作流的落点：位图只是原料，权威状态永远是文本网格。
 //!

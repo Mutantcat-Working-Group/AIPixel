@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 // 批量工作台：一个文件夹进、一个文件夹出，纯本机批处理，和 agent 会话互补那一半。
 // 会话是「一次一两张、一个模型盯着」，这里是「一个 token 都不花」的确定性重复劳动，
 // 所以面板里没有任何模型控件：两个文件夹、一遍扫描、一个开始，就是全部。

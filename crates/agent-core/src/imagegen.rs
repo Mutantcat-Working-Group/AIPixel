@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! 生图模型：让模型直接产出一张位图，再由 pixelize 量化到画布网格。
 //!
 //! 这条路径和 agent 主循环是两套完全不同的接法：agent 让模型写 Lua 脚本落像素，

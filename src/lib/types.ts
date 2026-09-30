@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 // 与 Rust 侧 models.rs / document.rs 一一对应的前端类型。
 // serde 的 rename_all = "snake_case" 决定这里的字面量拼写，改 Rust 要同步。
 

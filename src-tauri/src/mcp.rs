@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! MCP 工具服务器的配置与命令层。配置（含 env / headers）只写本机 mcp.json，
 //! 回前端的视图只透出键名，凭据明文永远不离开 Rust 这一侧。
 

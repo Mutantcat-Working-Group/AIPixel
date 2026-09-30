@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 // 工作流坞：目录里的七条 + 一条纯本机的量化。
 // 目录跟着会话绑的模型算 readiness；被能力挡住的条目照样列出来，只是禁用并写清缺什么，
 // 不然用户只看到灰按钮，不知道为什么。

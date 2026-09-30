@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 // 界面语言字典。zh 是唯一的键源：en 必须逐键对齐，漏一个键编译期就红。
 // 主语言中文；Rust 只回「键 + 变量 + 一句英文后备」，措辞始终由这一层说话。
 

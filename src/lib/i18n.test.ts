@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 // 字典的三条硬规矩：zh/en 逐键对齐、源码里 t("...") 出现过的键都有家、插值与后备不翻车。
 // 界面中文化是一次全仓替换，漏一个键就是界面上裸一句英文，所以这里按源码扫，不靠人眼。
 

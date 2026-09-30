@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! 核心流程集成测试：文档 -> 类型化操作 -> Lua 着色器 -> RLE 读回 -> .aip 往返。
 //! 这些用例锁住 agent 主循环依赖的几条契约，改动底层时先跑这里。
 

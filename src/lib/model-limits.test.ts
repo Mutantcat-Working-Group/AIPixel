@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 // 三条硬规矩：表里点名的模型必须命中；厂商前缀 / 日期后缀不能挡住匹配；
 // 认不出来的模型回落 MAX_TOKENS_FALLBACK，而不是留空或者瞎猜一个数。
 // `gpt-4.1` 不能被 `gpt-4` 抢走这条是重点——分隔符规则错了就会静默填成小了一截的数。

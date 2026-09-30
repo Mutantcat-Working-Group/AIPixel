@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! 命名配色范围：图层调色板的一等公民来源。
 //!
 //! 这里放「内置的那几套」，色值与界面历史上那批预设逐字一致——

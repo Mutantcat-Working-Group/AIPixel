@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! RLE 网格 + legend：agent 读回画布上下文时使用的紧凑文本编码。
 //! 这是「权威状态是文本网格」约定的落地格式。
 

@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! 工作流命令层：把 agent-core 的七条工作流接到 Tauri 上。
 //!
 //! 分成三类的道理：生图类要等模型回图，只能异步跑；本机类（插帧、量化）是纯计算，

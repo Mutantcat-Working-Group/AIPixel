@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! 插帧（in-between）：在两个已有帧之间生成过渡帧。
 //!
 //! 像素画不能像矢量那样插值坐标，所以三种模式各有分工：

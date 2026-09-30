@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! 参照模式：用户贴进来的参考图，是「只借画风」还是「照着实临摹」。
 //!
 //! 这两件事对提示词的约束完全相反：风格参照下，主体必须听用户的话，

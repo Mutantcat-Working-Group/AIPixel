@@ -1,3 +1,4 @@
+; Copyright (C) 2026 Mutantcat Working Group
 ; ============================================================================
 ;   AIPixel Windows NSIS 安装程序脚本（挂到 tauri.conf.json 的 nsis.template）
 ;   基线是 Tauri 官方默认模板 crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi

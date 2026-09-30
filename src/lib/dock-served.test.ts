@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 // 坞里「由谁跑」那句的两条硬规矩：
 // 单绑了模型说「由 X 跑」，没绑、主模型兜底必须说「用主模型 X 跑」；
 // 拿主模型冒充专属模型，是用户最反感的误导，这里钉死。

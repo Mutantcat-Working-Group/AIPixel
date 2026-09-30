@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 // 轻量 Markdown 解析：只覆盖助手真正会写的那一小类语法，
 // 换来「零依赖 + 流式中途也能渲染」。输出是纯 AST，渲染交给 React。
 

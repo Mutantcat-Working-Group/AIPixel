@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! 提示词微调：把一句大白话改写成可以用来生图或画像素的结构化提示词。
 //!
 //! 这是唯一一条「先出文本、由用户过目、再决定跑不跑」的工作流。其他流程都是

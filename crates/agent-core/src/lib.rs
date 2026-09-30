@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! agent-core: 像素画 agent 的 Rust 执行主循环。
 //!
 //! 面向开源与「只用用户自带模型」重做的像素画 agent 主循环：

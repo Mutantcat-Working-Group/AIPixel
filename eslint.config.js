@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 // @ts-check
 import js from "@eslint/js";
 import tseslint from "typescript-eslint";

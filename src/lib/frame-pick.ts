@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 // 坞里帧选择的取值：选中的帧还合法就留着，否则退回兜底，再不行退回第一帧。
 // 帧 id 属于文档，换文档、删帧都会让旧选择失效；与其用同步 effect 回写，
 // 不如在读取时推导一个必然合法的值，渲染永远不落空、draft 不被悄悄改写。

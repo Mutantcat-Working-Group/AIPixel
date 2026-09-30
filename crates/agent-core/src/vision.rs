@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! 参考图简报：让读图模型先把参考图「读」成结构化文字，再交给 agent 主循环落笔。
 //!
 //! 为什么不是直接把参考图随消息发给画图 agent：

@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 /** 常用模型的 Max tokens 对照表。
  *
  * 设置界面靠它给「Max tokens」一个像样的初值：用户填好模型名，两秒之内字段自己就位，

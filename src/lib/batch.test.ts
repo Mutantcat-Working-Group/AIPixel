@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 // 批量工作台的纯函数：事件流怎么折成快照、什么情况下才放行开始。
 // 这里不碰 Tauri，所以流的每一步都能在原地断言。
 

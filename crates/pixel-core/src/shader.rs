@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! 沙箱 Lua 绘制：LLM 的生图主通道。
 //! 「不让模型手写矩阵」——脚本体量与画布尺寸无关，循环/噪声/插值由 runtime 执行。
 //!

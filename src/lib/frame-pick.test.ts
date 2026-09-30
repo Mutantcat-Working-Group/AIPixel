@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 // 帧选择兜底的规矩：选中的帧还合法必须原样留着，用户的选择不能被动；
 // 失效了退回兜底，兜底也失效退回第一帧；空文档返回空串不崩。
 // 回归重点是「picked 合法时绝不被 fallback / 第一帧顶掉」——最容易被悄悄改错。

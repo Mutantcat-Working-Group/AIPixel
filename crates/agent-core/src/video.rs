@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! 视频 -> 帧序列：把一段视频读成几张静帧，交给量化器落进文档。
 //!
 //! 两条来源：

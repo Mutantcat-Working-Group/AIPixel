@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! 工作台编辑器命令层：画笔、油漆桶、帧与图层的直接操作。
 //!
 //! 和主循环共用 `AgentSession::with_document_mut` 的同一把锁，不会出现

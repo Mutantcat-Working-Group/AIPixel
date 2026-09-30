@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 // 工作流坞里「给人看 / 给模型看」的几段纯文本。
 // 抽出来单测：坞组件只管渲染，这里的措辞错了会直接误导用户或模型。
 

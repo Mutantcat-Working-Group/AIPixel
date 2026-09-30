@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 // 常见颜色名表：hex + 中英文名。给界面把 hex 翻成色名当 tooltip，也给取色器当建议色。
 // 与 Rust 的 `crates/agent-core/src/colornames.rs` 同源：那边喂模型，这边喂眼睛，
 // 两张表必须指同样的色，否则「模型说红」和「界面上那颗红」会对不上。

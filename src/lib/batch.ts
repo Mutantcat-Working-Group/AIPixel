@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 // 批量工作台的纯逻辑：recipe 默认值、事件流折叠成可渲染快照。
 // 这些函数不碰 Tauri、不碰 React，方便单测；副作用都收到 store 的 action 里。
 

@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 import { describe, expect, it, vi } from "vitest";
 
 import { hasLocalSubscribers, publishLocal, subscribeLocal } from "./local-bus";

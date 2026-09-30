@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! 一次性非流式对话：POST 一个 chat 请求，拿回整段文本。
 //!
 //! `providers.rs` 的 `LlmProvider` 是流式的，因为 agent 主循环要边出字边打断。

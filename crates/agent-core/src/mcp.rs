@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! MCP（Model Context Protocol）客户端：把用户自己配的 MCP 工具服务器接进 agent 主循环。
 //!
 //! 设计要点：

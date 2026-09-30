@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! 视频运动简报：让读视频的模型先把一段视频「读」成结构化文字，再交给 agent 主循环落笔。
 //!
 //! 与 `vision.rs` 的分工：读图简报回答「画的是什么」，这里回答「怎么动」。

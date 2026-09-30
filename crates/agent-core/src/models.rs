@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! agent 数据模型：会话消息、Provider 配置、工具规格、运行事件。
 //! 全部可序列化，方便跨 Tauri 命令边界与未来的持久化层。
 

@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! 自带知识库：明文检索，把这一轮真用得上的那几条摆进系统提示词。
 //!
 //! 做法是「关键词命中加权」而不是向量检索：每条知识自带中英触发词，命中越多、

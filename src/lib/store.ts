@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 // 应用状态：会话表、模型配置、对话条目、权威文档与画布预览。
 // Rust 主循环只通过 agent-event 说话；所有副作用都收敛成 bridge 调用。
 

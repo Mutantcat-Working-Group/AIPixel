@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! 工作流目录与能力模型。
 //!
 //! 「只用用户自带模型」意味着不同模型能做的事差别很大：有的只会聊天，有的能读图，

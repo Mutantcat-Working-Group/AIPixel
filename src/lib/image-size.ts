@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 // 生图尺寸：模型只会给一整张位图，而画布常常是 64x48 这类小规格。
 // 尺寸给得跟画布同比例，像素才不浪费在「反正要被裁掉的边」上。
 
