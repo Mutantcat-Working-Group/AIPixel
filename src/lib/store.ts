@@ -11,7 +11,7 @@ import {
   emptyTranscript,
   historyToTranscript,
   pushPendingAssistant,
-  pushNotice,
+  pushSideNotice,
   pushUserMessage,
   reduceEvent,
   sealTranscript,
@@ -257,6 +257,7 @@ export interface StoreActions {
   setActiveFrame: (index: number) => void;
   setActiveColor: (color: string | null) => void;
   refreshDocument: () => Promise<void>;
+  syncSelection: () => Promise<void>;
   refreshPng: () => Promise<void>;
   refreshSessions: () => Promise<void>;
   openAip: (path: string) => Promise<void>;
@@ -536,11 +537,20 @@ function disarmUndoCapture() {
  * 思考模型静默一分钟以上很常见（长推理、大图），所以门槛比那更宽：
  * 只在真的很久没动静时打扰，而且只是提醒，替用户做不了主。
  */
-export const STALL_SECONDS = 90;
+export const STALL_SECONDS = 1800;
 
 const STALL_MS = STALL_SECONDS * 1000;
 
 let stallTimer: ReturnType<typeof setTimeout> | null = null;
+/**
+ * 第几趟 loadDocument 了。同一时刻只认最后一次。
+ *
+ * 用户连点两个会话、或者在画布上连着改两下的时候，先发起的那趟往返可能
+ * 后到。它一落地就把晚那一趟的结果盖掉：画布上出现的是一张不属于当前会话
+ * 的「幽灵画布」，帧条、缩略图、授权栈也全都跟着错位。用一个自增序号把过期
+ * 的结果挡在门外，比在每个调用点加旗子可靠——调用点多，旗子一定会漏。
+ */
+let loadSeq = 0;
 
 function pushUndo(stack: PixelDocument[], doc: PixelDocument): PixelDocument[] {
   const next = [...stack, doc];
@@ -745,7 +755,15 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     });
   }
 
-  async function loadDocument(id: string) {
+  /**
+   * 把某条会话的文档拉进界面。switching 表示「换会话」，不只是刷新当前这条。
+   *
+   * 换会话和不换会话的区别只有一个，但正是幽灵画布的来处：换会话时旧画面
+   * 必须在等新文档之前就撤掉。不撤的话，新文档还在半路上，画布里挂的仍是
+   * 上一条会话的像素——用户点进来先看见一幅画，再看着它变成另一幅。
+   */
+  async function loadDocument(id: string, switching = false) {
+    const seq = (loadSeq += 1);
     // 换会话就把工作流面板的中间产物倒掉：上一条会话的提示词不属于这一条。
     setState({
       refined: null,
@@ -761,13 +779,20 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       pendingApproval: null,
       pendingFrameIndex: null,
     });
+    if (switching) {
+      // revision 一起归零：会话之间的 revision 没有可比性，带着旧值会让
+      // 后续 document_updated 被 `revision < pngRevision` 误判成过期事件。
+      setState({ document: null, revision: 0, pngRevision: -1, pngUrl: null });
+    }
     try {
       const messages = await bridge.agentHistory(id);
+      if (seq !== loadSeq) return;
       setState({ entries: historyToTranscript(messages, getState().lang) });
     } catch {
       // 历史读不到就从空对话开始，不阻塞文档加载
     }
     const snapshot = await bridge.documentSnapshot(id);
+    if (seq !== loadSeq) return;
     setState({
       document: snapshot.document,
       revision: snapshot.revision,
@@ -913,7 +938,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       attachments: [],
       frameIndex: 0,
     });
-    await loadDocument(id);
+    await loadDocument(id, true);
     await getState().refreshSessions();
   },
 
@@ -934,7 +959,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         attachments: [],
       frameIndex: 0,
     });
-      await loadDocument(info.id);
+      await loadDocument(info.id, true);
       // 只有从尺寸弹窗进来的才告知：删掉最后一个会话时那次自动补建不该吵用户。
       if (width && height) {
         noteKey("sidebar.created_hint", { width: info.width, height: info.height });
@@ -1322,6 +1347,43 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       await getState().refreshSessions();
     },
 
+    /**
+     * 落图之后把选中对齐到后端。
+     *
+     * 生图、抽帧、量化都可能在文档里添一帧，Rust 顺手把 active.frame 挪到那一帧
+     * ——不挪的话它自己下一步的编辑还留在旧帧。可这条消息只顺着 document_updated
+     * 过来，事件里没有帧号，前端那份选中就还指着旧帧：新帧明明画好了，帧条高亮、
+     * 主画布和「接下来改哪儿」三样全对不上，用户以为没生效。
+     * 拉一趟快照按 active 里的帧 id 反查下标，权和 Rust 只留一份。
+     */
+    syncSelection: async () => {
+      const id = getState().activeId;
+      if (!id) return;
+      try {
+        const snapshot = await bridge.documentSnapshot(id);
+        const active = snapshot.active;
+        if (!active) return;
+        const index = snapshot.document?.frames.findIndex((f) => f.id === active.frame) ?? -1;
+        if (index < 0) return;
+        const state = getState();
+        if (
+          state.frameIndex === index &&
+          state.active.layer === active.layer &&
+          state.active.frame === active.frame
+        ) {
+          return;
+        }
+        setState({
+          frameIndex: index,
+          active: { ...state.active, layer: active.layer, frame: active.frame },
+        });
+        await getState().refreshPng();
+      } catch {
+        // 拉不到就维持原样：画布已经由 document_updated 刷新过了，这一步只是让
+        // 选中跟得上，失败不该把一次成功的落图说成失败。
+      }
+    },
+
     refreshPng: async () => {
       const id = getState().activeId;
       if (!id) return;
@@ -1445,15 +1507,20 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         setState({
           outcome,
           outcomeError: null,
-          entries: pushNotice(getState().entries, renderUiText(getState().lang, outcome.summary), false),
+          entries: pushSideNotice(getState().entries, renderUiText(getState().lang, outcome.summary), false),
         });
+        // 三条会改画布的链路（生图、插帧、抽帧）跑完对齐一次选中：
+        // 添了新帧的话帧条高亮和下一次落点都得跟上，不然用户以为没生效。
+        if (kind === "image_gen" || kind === "frame_tween" || kind === "video_frames") {
+          await getState().syncSelection();
+        }
         return outcome;
       } catch (error) {
         const message = workflowError(error);
         setState({
           outcome: null,
           outcomeError: message,
-          entries: pushNotice(getState().entries, message, true),
+          entries: pushSideNotice(getState().entries, message, true),
         });
         return null;
       } finally {
@@ -1473,15 +1540,16 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         setState({
           outcome,
           outcomeError: null,
-          entries: pushNotice(getState().entries, renderUiText(getState().lang, outcome.summary), false),
+          entries: pushSideNotice(getState().entries, renderUiText(getState().lang, outcome.summary), false),
         });
+        await getState().syncSelection();
         return outcome;
       } catch (error) {
         const message = workflowError(error);
         setState({
           outcome: null,
           outcomeError: message,
-          entries: pushNotice(getState().entries, message, true),
+          entries: pushSideNotice(getState().entries, message, true),
         });
         return null;
       } finally {
@@ -1581,7 +1649,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     surfaceError: (message) =>
       setState({
         outcomeError: message,
-        entries: pushNotice(getState().entries, message, true),
+        entries: pushSideNotice(getState().entries, message, true),
       }),
 
     requestCompose: (text) =>

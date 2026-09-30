@@ -9,6 +9,7 @@ import {
   ChevronRight,
   CircleStop,
   ImagePlus,
+  GitBranch,
   MessageSquare,
   RefreshCcw,
   Send,
@@ -286,7 +287,10 @@ function EntryRow({ entry }: { entry: TranscriptEntry }) {
     );
   }
   return (
-    <div className={`entry-notice ${entry.isError ? "error" : ""}`}>
+    <div className={`entry-notice ${entry.side ? "side" : ""} ${entry.isError ? "error" : ""}`}>
+      {/* 旁支回执摆在思考块之后，用一个小分岔角标说明它出自工作流坞，
+          不是这一段回合里模型自己讲的话。 */}
+      {entry.side ? <GitBranch size={12} /> : null}
       <span>{entry.text}</span>
       {entry.retry ? (
         <Tooltip title={t("chat.retry_tip")}>

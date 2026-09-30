@@ -275,7 +275,16 @@ export type TranscriptEntry =
       isError: boolean;
       live: boolean;
     }
-  | { key: string; kind: "notice"; text: string; isError: boolean; retry?: boolean };
+/** side：这条 notice 来自主回合之外的旁支（工作流坞），不是模型自己的话。
+ * 渲染上跟模型的 notice 分开，用户才不会把它当成回合内的失败。 */
+| {
+    key: string;
+    kind: "notice";
+    text: string;
+    isError: boolean;
+    retry?: boolean;
+    side?: boolean;
+  };
 
 export type ToolName =
   | "pixel_apply_operations"

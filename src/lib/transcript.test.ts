@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   historyToTranscript,
   pushPendingAssistant,
+  pushSideNotice,
   pushUserMessage,
   reduceEvent,
   sealTranscript,
@@ -290,5 +291,32 @@ describe("pushUserMessage", () => {
     expect(user.kind).toBe("user");
     if (user.kind !== "user") return;
     expect(user.attachments[0].role).toBe("reference");
+  });
+});
+
+describe("pushSideNotice", () => {
+  // 旁支是主回合之外的动作：用户在工作流坞点了抽帧，不能把模型那段还没写完的
+  // 思考过程合上。合上了用户就只看到折叠的一块，以为模型自己断了。
+  it("keeps a live reasoning block open", () => {
+    let entries = pushPendingAssistant([], true);
+    entries = reduceEvent(entries, { kind: "reasoning", text: "先想一下腿怎么摆" } as AgentEvent);
+    entries = pushSideNotice(entries, "参考图简报已生成", false);
+
+    const reasoning = entries.find((entry) => entry.kind === "reasoning");
+    expect(reasoning?.kind === "reasoning" && reasoning.live).toBe(true);
+    const notice = entries[entries.length - 1];
+    expect(notice.kind).toBe("notice");
+    if (notice.kind !== "notice") return;
+    expect(notice.text).toBe("参考图简报已生成");
+    expect(notice.side).toBe(true);
+  });
+
+  it("still seals a streaming assistant bubble", () => {
+    let entries = pushPendingAssistant([], false);
+    entries = reduceEvent(entries, { kind: "token", text: "我这就画" } as AgentEvent);
+    entries = pushSideNotice(entries, "量化完成", false);
+
+    const assistant = entries.find((entry) => entry.kind === "assistant");
+    expect(assistant?.kind === "assistant" && assistant.live).toBe(false);
   });
 });

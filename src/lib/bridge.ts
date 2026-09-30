@@ -211,6 +211,7 @@ export function documentSnapshot(id: string): Promise<{
   id: string;
   revision: number;
   document: PixelDocument;
+  active?: ActiveContext | null;
 }> {
   return invoke("agent_document", { id });
 }

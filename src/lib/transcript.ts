@@ -123,16 +123,19 @@ export function pushPendingAssistant(
 }
 
 /**
- * 追加一条系统提示（工作流跑完的结果、失败原因）。
- * 先封口 live 条目：直接 append 会把 notice 塞进正在流式输出的气泡后面，
- * 下一个 token 就会另起一个气泡，把一轮对话撕成两半。
+ * 追加一条旁支回执：工作流坞跑出来的结果、失败原因。
+ *
+ * 关键在只封 assistant 气泡、不封思考块：旁支是主回合之外的动作，用户让坞去
+ * 抽帧、量化、生图，跟模型这一段思路没关系。旁支一落地就把思考块合上，用户
+ * 盯着的那段推理就没了下文，后面还长的思考只能另起一块，读起来像模型自己
+ * 断过。回执追加在列表末尾，也就是这一轮思考块之后，不插到它中间。
  */
-export function pushNotice(
+export function pushSideNotice(
   entries: TranscriptEntry[],
   text: string,
   isError: boolean,
 ): TranscriptEntry[] {
-  return [...sealTranscript(entries), { key: key(), kind: "notice", text, isError }];
+  return [...sealLiveAssistant(entries), { key: key(), kind: "notice", text, isError, side: true }];
 }
 
 function sealLiveAssistant(entries: TranscriptEntry[]): TranscriptEntry[] {

@@ -661,6 +661,21 @@ body {
   color: var(--danger);
 }
 
+/* 旁支回执：主回合之外的动作。靠左、贴着整条宽度，读起来是「另开的一条
+   支线跑完了」，而不是回合中间插进来的一句不咸不淡的话。 */
+.entry-notice.side {
+  align-self: stretch;
+  text-align: left;
+  justify-content: flex-start;
+  padding: 3px 4px;
+  font-size: 12px;
+}
+
+.entry-notice.side svg {
+  flex: 0 0 auto;
+  opacity: 0.75;
+}
+
 /* 贴在流式气泡底部的一行小字：续写进度、重试原因。
    挂在气泡内部而不是单独一条 notice，才不会把一轮回复撕成两截。 */
 .stream-caption {

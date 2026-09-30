@@ -391,6 +391,9 @@ pub fn agent_document(state: State<'_, AppState>, id: String) -> Result<Value, S
         "id": session.id(),
         "revision": session.revision(),
         "document": session.document_json(),
+        // 后端自己的选中。落图（生图、抽帧、量化）可能添一帧并把 active 挪过去，
+        // document_updated 里没有帧号，前端只能按这个对齐帧条高亮和下一次落点。
+        "active": session.active(),
     }))
 }
 

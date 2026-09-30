@@ -733,6 +733,14 @@ describe("runWorkflow / runPixelize 派发（kind -> Rust 命令 -> params）", 
     summary: { key: "_test.summary", fallback: "done" },
   };
 
+  /**
+   * 只看派发了哪条工作流命令。落图成功后 store 会补一发 agent_document 去对齐
+   * 选中——那是落地的收尾，不是派发，混在一起这几条用例就读不出来了。
+   */
+  function dispatched() {
+    return invokeCalls.filter((call) => call.cmd !== "agent_document");
+  }
+
   /** 每条用例都从同一起点出发：有会话、空对话流、四个命令都回 okOutcome。 */
   function reset(overrides: Record<string, unknown> = {}): void {
     for (const cmd of ["workflow_image_gen", "workflow_tween", "workflow_video_frames", "workflow_pixelize"]) {
@@ -766,7 +774,7 @@ describe("runWorkflow / runPixelize 派发（kind -> Rust 命令 -> params）", 
 
     const outcome = await useStore.getState().runWorkflow("image_gen", params);
 
-    expect(invokeCalls).toEqual([
+    expect(dispatched()).toEqual([
       { cmd: "workflow_image_gen", args: { id: "doc-01", params } },
     ]);
     expect(outcome).toEqual(okOutcome);
@@ -787,7 +795,7 @@ describe("runWorkflow / runPixelize 派发（kind -> Rust 命令 -> params）", 
 
     await useStore.getState().runWorkflow("frame_tween", params);
 
-    expect(invokeCalls).toEqual([{ cmd: "workflow_tween", args: { id: "doc-01", params } }]);
+    expect(dispatched()).toEqual([{ cmd: "workflow_tween", args: { id: "doc-01", params } }]);
   });
 
   it("video_frames 落到 workflow_video_frames，路径与抽帧数原样传", async () => {
@@ -796,7 +804,7 @@ describe("runWorkflow / runPixelize 派发（kind -> Rust 命令 -> params）", 
 
     await useStore.getState().runWorkflow("video_frames", params);
 
-    expect(invokeCalls).toEqual([
+    expect(dispatched()).toEqual([
       { cmd: "workflow_video_frames", args: { id: "doc-01", params } },
     ]);
   });
@@ -818,7 +826,7 @@ describe("runWorkflow / runPixelize 派发（kind -> Rust 命令 -> params）", 
 
     const outcome = await useStore.getState().runPixelize(params);
 
-    expect(invokeCalls).toEqual([
+    expect(dispatched()).toEqual([
       { cmd: "workflow_pixelize", args: { id: "doc-01", params } },
     ]);
     expect(outcome).toEqual(okOutcome);
@@ -1305,5 +1313,68 @@ describe("画布刷新靠 revision 翻倍", () => {
     const state = useStore.getState();
     expect(state.revision).toBe(5);
     expect(state.document).toEqual(painted);
+  });
+});
+
+describe("syncSelection 把选中对齐到后端", () => {
+  // 生图 / 抽帧在文档末尾添了一帧，Rust 顺手把 active.frame 挪过去。前端不跟的话
+  // 新帧画好了，帧条高亮和「接下来改哪儿」还留在上一格，用户会以为没生效。
+  it("follows the frame the backend just moved to", async () => {
+    const doc = blankDocument(4, 4);
+    const grown = {
+      ...doc,
+      frames: [{ id: "F0", duration_ms: 100 }, { id: "F1", duration_ms: 100 }],
+      cels: { L0: { F0: doc.cels.L0.F0, F1: doc.cels.L0.F0 } },
+    };
+    invokeCalls.length = 0;
+    invokeResults["agent_document"] = {
+      id: "doc-01",
+      revision: 9,
+      document: grown,
+      active: { layer: "L0", frame: "F1", color: null },
+    };
+    useStore.setState({
+      activeId: "doc-01",
+      document: grown,
+      frameIndex: 0,
+      active: { layer: "L0", frame: "F0", color: "#111111" },
+    });
+
+    await useStore.getState().syncSelection();
+
+    const state = useStore.getState();
+    expect(state.frameIndex).toBe(1);
+    expect(state.active.frame).toBe("F1");
+    // 用户挑的颜色不能因为对齐选中被抹掉。
+    expect(state.active.color).toBe("#111111");
+    // 拉的是会话自己的快照，不是重新读一遍历史；选中动过才补一张新 png。
+    expect(invokeCalls.map((call) => call.cmd)).toEqual(["agent_document", "document_png_url"]);
+    delete invokeResults["agent_document"];
+  });
+
+  it("stays put when the backend says the same frame", async () => {
+    const doc = blankDocument(4, 4);
+    invokeCalls.length = 0;
+    invokeResults["agent_document"] = {
+      id: "doc-01",
+      revision: 9,
+      document: doc,
+      active: { layer: "L0", frame: "F0", color: null },
+    };
+    const pngBefore = useStore.getState().pngUrl;
+    useStore.setState({
+      activeId: "doc-01",
+      document: doc,
+      frameIndex: 0,
+      active: { layer: "L0", frame: "F0", color: null },
+    });
+
+    await useStore.getState().syncSelection();
+
+    const state = useStore.getState();
+    expect(state.frameIndex).toBe(0);
+    expect(state.active.frame).toBe("F0");
+    expect(state.pngUrl).toBe(pngBefore);
+    delete invokeResults["agent_document"];
   });
 });

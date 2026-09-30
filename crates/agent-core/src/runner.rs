@@ -69,7 +69,7 @@ struct LastShader {
 /// 想得久一点没关系——推理增量、心跳、工具入参分段都会带来字节；
 /// 这么久一个字节都没有，基本就是连接假死（代理把流吞了、对端不吭声挂了）。
 /// 不设这条线的话 `stream.next()` 会永远挂住，前端只剩一个思考节点空转。
-const STREAM_IDLE_LIMIT: Duration = Duration::from_secs(180);
+const STREAM_IDLE_LIMIT: Duration = Duration::from_secs(1800);
 
 /// 「整轮一个工具都没调」时最多催几次。
 ///
