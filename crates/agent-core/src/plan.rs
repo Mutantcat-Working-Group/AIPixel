@@ -35,12 +35,20 @@ pub struct TurnPlan {
     pub intent_hit: Option<String>,
     pub style: Option<artstyle::ArtStyle>,
     pub style_hit: Option<String>,
+    /// 这一轮是在已经画好的画布上动刀。与成品意图平级的另一根轴：
+    /// 「把这只猫的动作改一下」要的成品仍是 sprite，操作却是改。
+    pub editing: bool,
+    /// 判「改」时命中的那个说法，和 intent_hit 一个用法。
+    pub editing_hit: Option<String>,
     pub knowledge_ids: Vec<String>,
 }
 
 impl TurnPlan {
     /// 按用户原话定这一轮的分流。`text` 同时用于参照定性、意图、风格和知识检索。
-    pub fn from_text(text: &str, attachments: &[Attachment]) -> Self {
+    /// `canvas_has_pixels` 为假时改画轴整条不发：空画布上「改」没有落点，
+    /// 「画只猫，加个项圈」词面上是改、实际得从零画，那时候带着
+    /// 「不许 clear()、不许重画」的禁令上路，只会让模型对着一张空网格犯难。
+    pub fn from_text(text: &str, attachments: &[Attachment], canvas_has_pixels: bool) -> Self {
         let base_mode = references::classify_text(text).0;
         let (intent, intent_hit) = match intent::classify_text(text) {
             Some((intent, hit)) => (Some(intent), Some(hit)),
@@ -50,6 +58,18 @@ impl TurnPlan {
             Some((style, hit)) => (Some(style), Some(hit)),
             None => (None, None),
         };
+        let (editing, editing_hit) = if canvas_has_pixels {
+            match intent::classify_edit(text) {
+                Some(hit) => (true, Some(hit)),
+                None => (false, None),
+            }
+        } else {
+            (false, None)
+        };
+        let mut knowledge_ids = knowledge::matched_ids(text, knowledge::DEFAULT_LIMIT);
+        if editing {
+            knowledge_ids = collapse_to_refine(knowledge_ids);
+        }
         TurnPlan {
             reference_modes: attachments
                 .iter()
@@ -59,7 +79,9 @@ impl TurnPlan {
             intent_hit,
             style,
             style_hit,
-            knowledge_ids: knowledge::matched_ids(text, knowledge::DEFAULT_LIMIT),
+            editing,
+            editing_hit,
+            knowledge_ids,
         }
     }
 
@@ -89,6 +111,9 @@ impl TurnPlan {
         }
         if !self.knowledge_ids.is_empty() {
             input["knowledge"] = json!(self.knowledge_ids);
+        }
+        if self.editing {
+            input["edit"] = json!({ "mode": "refine", "because": self.editing_hit });
         }
         input
     }
@@ -123,6 +148,15 @@ impl TurnPlan {
             }
             out.push_str("The per-image rules are restated in the attachment list below; obey them as written.\n");
         }
+        if self.editing {
+            // 改画是本轮的元规则，排在 deliverable 之前：它决定「动还是不动手」，
+            // 而成品类型只决定「画成什么样」。少了这一条，模型会照 intent 那一句
+            // 把主体从头再画一遍，用户在编辑器里的手笔和已确认的姿态一起被吃掉。
+            out.push_str(&format!(
+                "- operation: EDIT what is already on the canvas (the prompt says \"{}\"). Read the current grid first and keep the approved silhouette, pose, proportions, pixel positions and palette. Never open the script with clear() and never redraw the whole subject: change information inside the existing pixels, one small pass at a time, and only add new structure where the user named something that is not there yet. If you were about to start over, stop and edit instead.\n",
+                self.editing_hit.as_deref().unwrap_or("")
+            ));
+        }
         if out.is_empty() {
             return out;
         }
@@ -134,6 +168,12 @@ impl TurnPlan {
     /// 回灌给模型的结论。第一行就是界面上那条摘要，所以保持一行说完。
     pub fn outcome_text(&self) -> String {
         let mut out = String::from("turn routing for this turn:\n");
+        if self.editing {
+            out.push_str(&format!(
+                "- operation: edit existing pixels (the prompt says \"{}\")\n",
+                self.editing_hit.as_deref().unwrap_or("")
+            ));
+        }
         match (self.intent, &self.intent_hit) {
             (Some(intent), Some(hit)) => out.push_str(&format!(
                 "- deliverable: {} (the prompt says \"{hit}\")\n",
@@ -180,6 +220,8 @@ pub struct PlanUpdates {
     pub references: Vec<ReferenceUpdate>,
     pub intent: Option<Option<intent::Intent>>,
     pub style: Option<Option<artstyle::ArtStyle>>,
+    /// 这一轮是改还是重画。`Some(true)` 改、`Some(false)` 重画。
+    pub edit: Option<bool>,
     pub because: Vec<String>,
 }
 
@@ -215,6 +257,26 @@ pub fn parse_updates(input: &Value) -> Result<PlanUpdates, String> {
             let (style, because) = artstyle::parse_value(value)?;
             out.style = Some(Some(style));
             if let Some(because) = because {
+                out.because.push(because);
+            }
+        }
+    }
+    if let Some(value) = input.get("edit") {
+        // 布尔、字符串、{"mode": ...} 都由 intent 那边认——同一套入参形状，
+        // 不该在两处定义两种语义。认不出的值直接报错：猜反了就是
+        // 「该改的时候重画、该重画的时候改」，两种都是不可逆的损失。
+        let edit = intent::parse_edit(value)?;
+        out.edit = Some(edit);
+        // because 可能是兄弟键（{"edit": true, "because": "..."}）也可能是内嵌的
+        // （{"edit": {"mode": "refine", "because": "..."}}），两种都读得到：
+        // 用户看着节点才知道「改」是被模型按哪句话定的。
+        let because = value
+            .get("because")
+            .or_else(|| input.get("because"))
+            .and_then(Value::as_str);
+        if let Some(because) = because {
+            let because = because.trim().to_string();
+            if !because.is_empty() {
                 out.because.push(because);
             }
         }
@@ -255,7 +317,7 @@ fn talks_about_references(input: &Value) -> bool {
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: PLAN_TOOL.into(),
-        description: "Correct how this turn's request has been read, when the routing written for it is clearly wrong for what the user asked. Call it ONCE, before any drawing tool, and never otherwise. references: style = borrow ONLY that image's palette, ramps, light direction, outline and dithering technique and draw the subject the user described; full = reproduce that image's subject, composition, proportions and palette. intent: what the deliverable is - tilemap, sprite, scene, icon, pattern or prop. style: a locked palette preset - mono1, gameboy, nes, pico8, cga, dither, pastel or hibit; send \"none\" to release a preset. Reference numbers are the 1-based positions in the attachment list.".into(),
+        description: "Correct how this turn's request has been read, when the routing written for it is clearly wrong for what the user asked. Call it ONCE, before any drawing tool, and never otherwise. references: style = borrow ONLY that image's palette, ramps, light direction, outline and dithering technique and draw the subject the user described; full = reproduce that image's subject, composition, proportions and palette. intent: what the deliverable is - tilemap, sprite, scene, icon, pattern or prop. style: a locked palette preset - mono1, gameboy, nes, pico8, cga, dither, pastel or hibit; send \"none\" to release a preset. edit: true = this turn edits the pixels already on the canvas (keep the approved silhouette, pose and palette, then add information inside them), false = the user wants a fresh drawing from scratch. Reference numbers are the 1-based positions in the attachment list.".into(),
         schema: json!({
             "type": "object",
             "properties": {
@@ -298,10 +360,40 @@ pub fn spec() -> ToolSpec {
                             "required": ["id"]
                         }
                     ]
+                },
+                "edit": {
+                    "description": "whether this turn edits the pixels already on the canvas, or draws from scratch; or the string none to release it",
+                    "oneOf": [
+                        {"type": "boolean"},
+                        {"type": "string", "enum": ["refine", "keep", "edit", "fresh", "redraw", "none"]},
+                        {
+                            "type": "object",
+                            "properties": {
+                                "mode": {"type": "string", "enum": ["refine", "edit", "keep", "fresh", "redraw"]},
+                                "because": {"type": "string", "description": "the words in the user's prompt that decided this"}
+                            },
+                            "required": ["mode"]
+                        }
+                    ]
                 }
             }
         }),
     }
+}
+
+/// 改画的一轮把知识条目收敛成「refine 打头 + 检索命中的前 3 条」。
+/// 三条都要读：refine 讲「怎么保留已有像素」，对象词（cat、tilemap）讲「画的是什么」，
+/// 只留 refine 的话「优化一下这只猫」会丢掉猫该长什么样。
+/// refine 占首位的理由是它是全库最长的一条，排到后面会被字符预算整段切掉。
+fn collapse_to_refine(ids: Vec<String>) -> Vec<String> {
+    let mut out = vec!["refine".to_string()];
+    for id in ids.into_iter().filter(|id| id != "refine") {
+        if out.len() >= 4 {
+            break;
+        }
+        out.push(id);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -320,7 +412,11 @@ mod tests {
     #[test]
     fn one_turn_routes_everything_at_once() {
         let attachments = vec![attachment(AttachmentRole::Reference)];
-        let plan = TurnPlan::from_text("照这个画风做一个 1-bit 的草地瓦片行走图", &attachments);
+        let plan = TurnPlan::from_text(
+            "照这个画风做一个 1-bit 的草地瓦片行走图",
+            &attachments,
+            true,
+        );
         assert_eq!(plan.reference_modes[0], Some(ReferenceMode::Style));
         assert_eq!(plan.intent.map(|i| i.id()), Some("tilemap"));
         assert_eq!(plan.style.map(|s| s.id()), Some("mono1"));
@@ -330,7 +426,7 @@ mod tests {
 
     #[test]
     fn the_routing_section_only_answers_what_was_recognized() {
-        let plan = TurnPlan::from_text("画一只猫", &[]);
+        let plan = TurnPlan::from_text("画一只猫", &[], true);
         assert!(plan.prompt_sections().is_empty(), "没定出东西就别占标题");
         assert!(plan.intent.is_none());
     }
@@ -341,6 +437,7 @@ mod tests {
         let plan = TurnPlan::from_text(
             "按 GameBoy 风格换色",
             &[attachment(AttachmentRole::Snapshot)],
+            true,
         );
         assert!(!plan.has_references());
         assert!(plan.prompt_sections().contains("art style"));
@@ -349,7 +446,7 @@ mod tests {
 
     #[test]
     fn the_node_shows_the_hit_words() {
-        let plan = TurnPlan::from_text("按 GameBoy 风格画个图标", &[]);
+        let plan = TurnPlan::from_text("按 GameBoy 风格画个图标", &[], true);
         let input = plan.node_input();
         assert_eq!(input["style"]["id"], "gameboy");
         assert_eq!(input["style"]["because"], "gameboy");
@@ -400,10 +497,71 @@ mod tests {
     #[test]
     fn the_outcome_mentions_all_four_kinds() {
         let attachments = vec![attachment(AttachmentRole::Reference)];
-        let plan = TurnPlan::from_text("照这个画风做一个 1-bit 行走图", &attachments);
+        let plan = TurnPlan::from_text("照这个画风做一个 1-bit 行走图", &attachments, true);
         let text = plan.outcome_text();
         assert!(text.contains("reference image 1 = style"), "{text}");
         assert!(text.contains("art style: mono1"), "{text}");
         assert!(text.contains("knowledge notes:"), "{text}");
+    }
+
+    #[test]
+    fn an_edit_request_carries_the_keep_rule() {
+        let plan = TurnPlan::from_text("优化一下细节", &[], true);
+        assert!(plan.editing);
+        assert_eq!(plan.editing_hit.as_deref(), Some("优化"));
+        let sections = plan.prompt_sections();
+        assert!(
+            sections.contains("EDIT what is already on the canvas"),
+            "{sections}"
+        );
+        assert!(
+            sections.contains("Never open the script with clear()"),
+            "改画不许以清屏开局，这条是保命用的"
+        );
+        // refine 被硬塞进知识条目，并且占首位——它最长，靠后会被字符预算整段切掉。
+        assert_eq!(
+            plan.knowledge_ids.first().map(String::as_str),
+            Some("refine")
+        );
+        let input = plan.node_input();
+        assert_eq!(input["edit"]["mode"], "refine");
+        assert_eq!(input["edit"]["because"], "优化");
+        assert!(plan
+            .outcome_text()
+            .contains("operation: edit existing pixels"));
+    }
+
+    #[test]
+    fn a_redraw_request_is_not_an_edit() {
+        // 「重画」要的就是覆盖，收进改画轴正好和愿望相反。
+        let plan = TurnPlan::from_text("重新画一只猫", &[], true);
+        assert!(!plan.editing);
+        assert!(plan.editing_hit.is_none());
+        assert!(!plan.prompt_sections().contains("EDIT what is already"));
+    }
+
+    #[test]
+    fn an_empty_canvas_never_routes_as_an_edit() {
+        // 「画只猫，加个项圈」词面上是改，可空画布上没东西可改。
+        // 少了这个门，提示词会带着「不许从头画」的禁令上路，而禁令的对象不存在。
+        let plan = TurnPlan::from_text("画一只橘猫，加一个项圈", &[], false);
+        assert!(
+            !plan.editing,
+            "空画布上不该出现改画轴：{}",
+            plan.prompt_sections()
+        );
+    }
+
+    #[test]
+    fn an_edit_correction_reads_back() {
+        let updates = parse_updates(&json!({"edit": true, "because": "用户说接着改"})).unwrap();
+        assert_eq!(updates.edit, Some(true));
+        assert_eq!(updates.because, vec!["用户说接着改".to_string()]);
+        let updates = parse_updates(&json!({"edit": "fresh"})).unwrap();
+        assert_eq!(updates.edit, Some(false));
+        let updates = parse_updates(&json!({"edit": {"mode": "refine"}})).unwrap();
+        assert_eq!(updates.edit, Some(true));
+        let err = parse_updates(&json!({"edit": "kinda"})).unwrap_err();
+        assert!(err.contains("kinda"), "{err}");
     }
 }

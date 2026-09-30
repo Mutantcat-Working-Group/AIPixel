@@ -337,7 +337,7 @@ impl OpenAiCompatGenerator {
 }
 
 pub fn build_image_generator(config: &ModelConfig) -> Arc<dyn ImageGenerator> {
-    let client = reqwest::Client::new();
+    let client = super::providers::http_client();
     match config.protocol {
         Protocol::Anthropic => Arc::new(UnsupportedGenerator),
         Protocol::OpenAiCompat => Arc::new(OpenAiCompatGenerator {
@@ -383,7 +383,7 @@ pub async fn probe_image_support(config: &ModelConfig) -> ImageSupport {
         Protocol::Anthropic => ImageSupport::No { reason: "protocol" },
         Protocol::OpenAiCompat => {
             OpenAiCompatGenerator {
-                client: reqwest::Client::new(),
+                client: super::providers::http_client(),
                 base_url: config.base_url.trim_end_matches('/').to_string(),
                 api_key: config.api_key.clone(),
                 model: config.model.clone(),
@@ -811,7 +811,9 @@ mod tests {
                 for stream in listener.incoming() {
                     let Ok(mut stream) = stream else { break };
                     let request = read_request(&mut stream);
-                    log.lock().unwrap().push(request.clone());
+                    log.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(request.clone());
                     let text = String::from_utf8_lossy(&request).to_string();
                     let path = text
                         .lines()
@@ -839,16 +841,25 @@ mod tests {
         }
 
         fn count(&self) -> usize {
-            self.requests.lock().unwrap().len()
+            self.requests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len()
         }
 
         fn text_of(&self, index: usize) -> String {
-            let requests = self.requests.lock().unwrap();
+            let requests = self
+                .requests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             String::from_utf8_lossy(&requests[index]).to_string()
         }
 
         fn raw_of(&self, index: usize) -> Vec<u8> {
-            self.requests.lock().unwrap()[index].clone()
+            self.requests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)[index]
+                .clone()
         }
 
         fn path_of(&self, index: usize) -> String {

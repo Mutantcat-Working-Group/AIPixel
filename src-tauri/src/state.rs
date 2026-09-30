@@ -138,7 +138,10 @@ impl AppState {
             .app_config_dir()
             .map_err(|e| format!("cannot resolve config dir: {e}"))?;
         std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create config dir: {e}"))?;
-        *self.config_dir.lock().unwrap() = dir;
+        *self
+            .config_dir
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = dir;
         self.load_models();
         self.load_limits();
         self.schedule_mcp_recovery();
@@ -146,7 +149,10 @@ impl AppState {
     }
 
     fn mcp_path(&self) -> PathBuf {
-        self.config_dir.lock().unwrap().join("mcp.json")
+        self.config_dir
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .join("mcp.json")
     }
 
     pub fn mcp_registry(&self) -> Arc<McpRegistry> {
@@ -195,11 +201,17 @@ impl AppState {
     }
 
     fn models_path(&self) -> PathBuf {
-        self.config_dir.lock().unwrap().join("models.json")
+        self.config_dir
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .join("models.json")
     }
 
     fn limits_path(&self) -> PathBuf {
-        self.config_dir.lock().unwrap().join("limits.json")
+        self.config_dir
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .join("limits.json")
     }
 
     fn load_limits(&self) {
@@ -212,13 +224,25 @@ impl AppState {
         let Ok(file) = serde_json::from_str::<LimitsFile>(&text) else {
             return;
         };
-        *self.limits.lock().unwrap() = file.limits;
-        *self.mcp_enabled.lock().unwrap() = file.mcp_enabled;
+        *self
+            .limits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = file.limits;
+        *self
+            .mcp_enabled
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = file.mcp_enabled;
     }
 
     fn save_limits(&self) {
-        let snapshot = *self.limits.lock().unwrap();
-        let mcp_enabled = *self.mcp_enabled.lock().unwrap();
+        let snapshot = *self
+            .limits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mcp_enabled = *self
+            .mcp_enabled
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Ok(text) = serde_json::to_string_pretty(&LimitsFile {
             limits: snapshot,
             mcp_enabled,
@@ -233,19 +257,30 @@ impl AppState {
             return;
         };
         if let Ok(file) = serde_json::from_str::<ModelsFile>(&text) {
-            *self.models.lock().unwrap() = file;
+            *self
+                .models
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = file;
         }
     }
 
     fn save_models(&self) {
-        let snapshot = self.models.lock().unwrap().clone();
+        let snapshot = self
+            .models
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         if let Ok(text) = serde_json::to_string_pretty(&snapshot) {
             let _ = std::fs::write(self.models_path(), text);
         }
     }
 
     pub fn models_view(&self) -> ModelsView {
-        let file = self.models.lock().unwrap().clone();
+        let file = self
+            .models
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         ModelsView {
             active_id: file.active_id.clone(),
             entries: file
@@ -269,7 +304,10 @@ impl AppState {
 
     /// 当前生效的模型配置；没配过就返回空壳，让 provider 给出可读错误。
     pub fn active_config(&self) -> ModelConfig {
-        let file = self.models.lock().unwrap();
+        let file = self
+            .models
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(active) = file.active() {
             return active.clone();
         }
@@ -289,7 +327,10 @@ impl AppState {
 
     /// 按 id 取一份完整配置（含密钥），供会话改绑模型用。
     pub fn model_config(&self, id: &str) -> Result<ModelConfig, String> {
-        let file = self.models.lock().unwrap();
+        let file = self
+            .models
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         file.entries
             .iter()
             .find(|m| m.id == id)
@@ -299,7 +340,10 @@ impl AppState {
 
     /// 只把本机已存密钥交给 upsert 合并，前端始终看不到它。
     pub fn stored_api_key(&self, id: &str) -> Option<String> {
-        let file = self.models.lock().unwrap();
+        let file = self
+            .models
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         file.entries
             .iter()
             .find(|m| m.id == id)
@@ -307,7 +351,10 @@ impl AppState {
     }
 
     pub fn upsert_model(&self, incoming: ModelConfig, previous_key: Option<String>) {
-        let mut file = self.models.lock().unwrap();
+        let mut file = self
+            .models
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut entry = incoming;
         let changed_id = entry.id.clone();
         if let Some(existing) = file.entries.iter_mut().find(|m| m.id == entry.id) {
@@ -348,7 +395,10 @@ impl AppState {
     }
 
     pub fn remove_model(&self, id: &str) {
-        let mut file = self.models.lock().unwrap();
+        let mut file = self
+            .models
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         file.entries.retain(|m| m.id != id);
         if file.active_id == id {
             file.active_id = file
@@ -363,7 +413,10 @@ impl AppState {
     }
 
     pub fn set_active_model(&self, id: &str) -> Result<(), String> {
-        let mut file = self.models.lock().unwrap();
+        let mut file = self
+            .models
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !file.entries.iter().any(|m| m.id == id) {
             return Err(format!("unknown model: {id}"));
         }
@@ -389,8 +442,13 @@ impl AppState {
         let fresh = self
             .model_config(target)
             .unwrap_or_else(|_| self.active_config());
-        let sessions: Vec<Arc<AgentSession>> =
-            self.sessions.lock().unwrap().values().cloned().collect();
+        let sessions: Vec<Arc<AgentSession>> = self
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .cloned()
+            .collect();
         for session in sessions {
             let current = session.model_config();
             if current.id == target || self.model_config(&current.id).is_err() {
@@ -410,28 +468,44 @@ impl AppState {
     pub fn session(&self, id: &str) -> Result<Arc<AgentSession>, String> {
         self.sessions
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(id)
             .cloned()
             .ok_or_else(|| format!("unknown session: {id}"))
     }
 
     pub fn session_ids(&self) -> Vec<String> {
-        self.sessions.lock().unwrap().keys().cloned().collect()
+        self.sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .keys()
+            .cloned()
+            .collect()
     }
 
     /// 当前护栏值。启动时是默认值，用户在设置里改过就一直是改过的那份。
     pub fn limits(&self) -> LoopLimits {
-        *self.limits.lock().unwrap()
+        *self
+            .limits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// 存护栏并推到所有活着的会话上。下一轮请求才会读到新值，
     /// 已经在飞的那一轮按老规矩收摊——打断一次请求只会更难看。
     pub fn set_limits(&self, limits: LoopLimits) {
         let limits = limits.clamped();
-        *self.limits.lock().unwrap() = limits;
-        let sessions: Vec<Arc<AgentSession>> =
-            self.sessions.lock().unwrap().values().cloned().collect();
+        *self
+            .limits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = limits;
+        let sessions: Vec<Arc<AgentSession>> = self
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .cloned()
+            .collect();
         for session in sessions {
             let mut cfg = session.runner_config();
             cfg.loop_limits = limits;
@@ -442,7 +516,10 @@ impl AppState {
 
     /// 建会话并按当前生效模型绑定 provider。
     pub fn create_session(&self, document: Document) -> Arc<AgentSession> {
-        let mut counter = self.counter.lock().unwrap();
+        let mut counter = self
+            .counter
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *counter += 1;
         let id = format!("s{}", *counter);
         // 排序位直接取创建序号：新会话天然排最后，侧边栏顺序与创建顺序一致。
@@ -460,28 +537,43 @@ impl AppState {
                 .with_order(order),
         );
         // 总开关关着就别挂：新会话从第一轮起就看不见外部工具。
-        if !*self.mcp_enabled.lock().unwrap() {
+        if !*self
+            .mcp_enabled
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
             session.set_mcp_registry(None);
         }
         self.sessions
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(id.clone(), session.clone());
         session
     }
 
     /// MCP 总开关的当前值。
     pub fn mcp_enabled(&self) -> bool {
-        *self.mcp_enabled.lock().unwrap()
+        *self
+            .mcp_enabled
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// 开/关 MCP，并当场作用到所有活着的会话。
     /// 关的时候摘掉注册表而不是留着不读：模型下一轮看到的工具清单就是真实能力，
     /// 悬着一份「看得见但调不动」的注册表只会让模型反复撞墙。
     pub fn set_mcp_enabled(&self, enabled: bool) {
-        *self.mcp_enabled.lock().unwrap() = enabled;
-        let sessions: Vec<Arc<AgentSession>> =
-            self.sessions.lock().unwrap().values().cloned().collect();
+        *self
+            .mcp_enabled
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = enabled;
+        let sessions: Vec<Arc<AgentSession>> = self
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .cloned()
+            .collect();
         for session in sessions {
             session.set_mcp_registry(if enabled {
                 Some(self.mcp.clone())
@@ -493,7 +585,10 @@ impl AppState {
     }
 
     pub fn drop_session(&self, id: &str) {
-        self.sessions.lock().unwrap().remove(id);
+        self.sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(id);
     }
 }
 

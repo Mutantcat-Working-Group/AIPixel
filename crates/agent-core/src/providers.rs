@@ -12,6 +12,23 @@ use std::collections::{HashMap, VecDeque};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
+
+/// TCP 连接阶段的超时。
+///
+/// `reqwest::Client::new()` 一个超时都不带：网关收了连接却迟迟不响应时，
+/// `.send().await` 能挂到天荒地老。重试状态发出去之后界面就再也不动，
+/// 用户看到的正是「正在重试 1/5」之后的一片死寂。连接超时兜住最常卡的
+/// 那一段；响应头那一段由 runner 的 `timeout` 收口。
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// 所有 provider 共用的 HTTP 客户端。
+pub(crate) fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
 
 /// 没配 Max tokens 时的输出上限兜底。真值在 `limits`，这里只留一个别名，
 /// 免得两处数字各自漂移。
@@ -153,7 +170,7 @@ pub trait LlmProvider: Send + Sync {
 
 /// 构造对应协议的 provider。
 pub fn build_provider(config: &ModelConfig) -> Arc<dyn LlmProvider> {
-    let client = reqwest::Client::new();
+    let client = http_client();
     match config.protocol {
         Protocol::Anthropic => Arc::new(AnthropicProvider {
             client,
@@ -186,7 +203,7 @@ pub async fn list_models(config: &ModelConfig) -> Result<Vec<String>, ProviderEr
     if base.is_empty() {
         return Err(ProviderError::Config("missing base url".into()));
     }
-    let client = reqwest::Client::new();
+    let client = http_client();
     let mut last_err: Option<ProviderError> = None;
     for url in model_list_urls(&base) {
         let mut req = client.get(&url);

@@ -181,6 +181,97 @@ fn find(haystack: &str, signal: &str) -> Option<usize> {
     None
 }
 
+/// 修改类触发词。与成品类型不是一回事：成品说「要画个什么东西」，
+/// 这里说的是「在已经画好的东西上动刀」。
+///
+/// 为什么单列一轴而不是塞进 `Intent`：用户说「把这只猫的动作改一下」时，
+/// 成品仍然是 sprite（说清楚是个照旧），但操作是改。两件事都要告诉模型，
+/// 而 `Intent` 只有一个坑位。塞进去就只能二选一——选 sprite，
+/// 模型照着「剪影先行」把猫重画一遍，用户的手笔和已确认的姿态全没了；
+/// 选 modify，又丢掉「这是个角色」这条约束。
+///
+/// 刻意不收「重画」「重新画」「重做」：那些话要的就是覆盖，
+/// 归到这一轴来正好和愿望相反。
+const EDIT_WORDS: &[&str] = &[
+    // 中文：改、调、加、换、删都是改，但都要带上下文，光一个字会误伤
+    // （「更加」里藏着「加」，「交换」里藏着「换」）。
+    "优化",
+    "细化",
+    "润色",
+    "完善",
+    "修改",
+    "改动",
+    "更改",
+    "改改",
+    "改成",
+    "改色",
+    "换色",
+    "换个颜色",
+    "调整",
+    "微调",
+    "调亮",
+    "调暗",
+    "加上",
+    "添加",
+    "加个",
+    "加一",
+    "加条",
+    "添加一个",
+    "换成",
+    "换个",
+    "去掉",
+    "删掉",
+    // 英文：短词走整词匹配，长词允许子串，和成品那边一个规矩。
+    "refine",
+    "polish",
+    "improve",
+    "tweak",
+    "adjust",
+    "modify",
+    "edit",
+    "add a",
+    "add some",
+    "make it",
+    "change the",
+];
+
+/// 从用户原话读「这一轮是在改已有的画」。命中即返回那个词（界面上当判据念）。
+/// 一词不中就返回 `None`——那是从零画，该走成品类型那一轴。
+pub fn classify_edit(text: &str) -> Option<String> {
+    let needle = text.to_lowercase();
+    EDIT_WORDS
+        .iter()
+        .filter_map(|word| find(&needle, word).map(|at| (at, *word)))
+        .min_by_key(|(at, _)| *at)
+        .map(|(_, word)| word.to_string())
+}
+
+/// 工具入参里的「这一轮改不改已有画面」。布尔、字符串、`{"mode": ...}` 都认，
+/// 认不出的值报错——猜反了就是「该改的时候重画、该重画的时候改」。
+pub fn parse_edit(value: &serde_json::Value) -> Result<bool, String> {
+    use serde_json::Value;
+    let raw = match value {
+        Value::Bool(b) => return Ok(*b),
+        Value::Number(n) => return Ok(n.as_f64().unwrap_or(0.0) != 0.0),
+        Value::String(s) => s.as_str(),
+        Value::Object(map) => map
+            .get("mode")
+            .or_else(|| map.get("id"))
+            .or_else(|| map.get("edit"))
+            .and_then(Value::as_str)
+            .ok_or("pixel_plan: an edit flag needs a 'mode'")?,
+        other => return Err(format!("pixel_plan: cannot read an edit flag from {other}")),
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "true" | "yes" | "on" | "1" | "refine" | "edit" | "modify" | "keep" => Ok(true),
+        "false" | "no" | "off" | "0" | "none" | "null" | "clear" | "release" | "fresh"
+        | "redraw" => Ok(false),
+        other => Err(format!(
+            "pixel_plan: '{other}' does not say whether to edit; use true or false"
+        )),
+    }
+}
+
 fn boundary(haystack: &str, at: usize, end: usize) -> bool {
     let before = haystack[..at].chars().next_back();
     let after = haystack[end..].chars().next();

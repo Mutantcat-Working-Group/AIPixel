@@ -360,6 +360,19 @@ impl Document {
         Ok(())
     }
 
+    /// 画布上是不是真有一颗画上去的像素。全图扫一遍 cel，只看有没有
+    /// 非透明索引，不碰 palette。
+    ///
+    /// 用来给「这一轮是改还是重画」兜底：用户说「画只猫，加个项圈」，
+    /// 词面上是改，可画布空空如也时压根没东西可改。少了这个判定，
+    /// 提示词会带着「不许从头画」的禁令上路，而禁令的对象根本不存在。
+    pub fn has_pixels(&self) -> bool {
+        self.cels
+            .values()
+            .flat_map(|frames| frames.values())
+            .any(|cel| cel.indices.iter().any(|&idx| idx != 0))
+    }
+
     /// 就近归队到这一层范围里的某个颜色：色不在范围内时用，锁着那一层全靠它兜底。
     pub fn nearest_in_range(&self, layer_id: &str, color: Rgba) -> Option<Rgba> {
         let range = self.layer_palette(layer_id)?;

@@ -106,6 +106,7 @@ export const zh = {
   "agent.thinking_off_retry":
     "这个模型把预算全花在思考上了，一个工具都没调；已关掉思考重问一次",
   "agent.retrying": "这次请求没成（{reason}），正在重试 {attempt}/{max}",
+  "agent.craft_fallback": "模型没有先写提示词，已按你的原话兜底生成，继续作画",
   "agent.empty_message": "消息是空的：写点什么，或者附上一张图",
   "agent.request_failed": "请求没成：{reason}",
   "agent.turn_budget":
@@ -815,6 +816,8 @@ export const en: Record<TKey, string> = {
     "This model spent the whole budget thinking and called no tool; retrying with thinking turned off",
   "agent.retrying":
     "That request failed ({reason}); retrying {attempt} of {max}",
+  "agent.craft_fallback":
+    "The model skipped writing prompt lists; drawing from your words as-is",
   "agent.empty_message": "The message is empty: write something, or attach an image",
   "agent.request_failed": "The request failed: {reason}",
   "agent.turn_budget":

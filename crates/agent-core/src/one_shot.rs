@@ -11,6 +11,12 @@
 use super::models::{ChatRequest, Message, ModelConfig, Protocol};
 use super::providers::{ProviderError, DEFAULT_MAX_TOKENS};
 use serde_json::{json, Value};
+use std::time::Duration;
+use tokio::time::timeout;
+
+/// 一次性请求的总时限。读一张参考图、微调一段提示词都比聊天慢，但再慢
+/// 也有个头；超过这个数还没回音，就是端点挂住了。
+const ONESHOT_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// 发一次不带工具的对话，返回助手的全部文本。
 ///
@@ -36,7 +42,7 @@ pub async fn chat_once(
         // 补写是接着断点往下写，思考只会把断点重复一遍。
         disable_thinking: config.disable_thinking.unwrap_or(true),
     };
-    let client = reqwest::Client::new();
+    let client = super::providers::http_client();
     match config.protocol {
         Protocol::Anthropic => {
             let body = json!({
@@ -141,11 +147,20 @@ async fn post_json(
             .header("anthropic-version", "2023-06-01"),
         Protocol::OpenAiCompat => req.header("authorization", format!("Bearer {api_key}")),
     };
-    let resp = req
-        .json(body)
-        .send()
-        .await
-        .map_err(|e| ProviderError::Network(e.to_string()))?;
+    // 单轮请求没有流可看：端点挂住时这发 json 会被永远悬着，vision / refine
+    // 侧道任务跟着静默死掉。发车部分设总时限，超时按网络故障交回，调用方
+    // 照实报错，用户看到的是「没成」，而不是一个再也不动的转圈。
+    let sent = timeout(ONESHOT_TIMEOUT, req.json(body).send()).await;
+    let resp = match sent {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => return Err(ProviderError::Network(e.to_string())),
+        Err(_) => {
+            return Err(ProviderError::Network(format!(
+                "no response within {}s, the endpoint looks stalled",
+                ONESHOT_TIMEOUT.as_secs()
+            )))
+        }
+    };
     let status = resp.status();
     if !status.is_success() {
         let text = resp.text().await.unwrap_or_default();

@@ -3,6 +3,7 @@
 //! 三个落地工具的封装，把模型入参翻译成 pixel-core 的类型化操作。
 //! 「不让模型手写矩阵」的契约就在这一层收口。
 
+use super::craft;
 use super::imagegen::LandSpot;
 use super::models::{ActiveContext, ToolSpec};
 use super::plan::{self, PLAN_TOOL};
@@ -281,6 +282,7 @@ pub fn specs() -> Vec<ToolSpec> {
             }),
         },
         plan::spec(),
+        craft::spec(),
     ]
 }
 
@@ -1126,10 +1128,12 @@ mod tests {
                     | IMAGE_GEN_TOOL
                     // 本轮分流归 runner：它手里有这一轮的附件清单和分流表。
                     | PLAN_TOOL
+                    // 提示词清单同样归 runner：它要把它绑到这一轮的每一次生图上。
+                    | craft::PROMPT_TOOL
             );
             assert!(handled, "{} is described but not dispatched", spec.name);
         }
-        assert_eq!(specs().len(), 7);
+        assert_eq!(specs().len(), 8);
     }
 
     #[test]

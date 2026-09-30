@@ -14,6 +14,7 @@
 
 pub mod artstyle;
 pub mod colornames;
+pub mod craft;
 pub mod glossary;
 pub mod imagegen;
 pub mod intent;

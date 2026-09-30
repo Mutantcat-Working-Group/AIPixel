@@ -23,7 +23,9 @@ use futures_util::StreamExt;
 use serde_json::{json, Value};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
+use tokio::time::timeout;
 
+use super::craft;
 use super::imagegen::{self, ImageGenParams, LandSpot};
 use super::knowledge;
 use super::limits;
@@ -71,7 +73,23 @@ struct LastShader {
 /// 想得久一点没关系——推理增量、心跳、工具入参分段都会带来字节；
 /// 这么久一个字节都没有，基本就是连接假死（代理把流吞了、对端不吭声挂了）。
 /// 不设这条线的话 `stream.next()` 会永远挂住，前端只剩一个思考节点空转。
-const STREAM_IDLE_LIMIT: Duration = Duration::from_secs(1800);
+const STREAM_IDLE_LIMIT: Duration = Duration::from_secs(300);
+
+/// 发出去的请求多久之内必须见到响应头。
+///
+/// `provider.request()` 里那段 `.send().await` 在拿到响应头之前不算流：
+/// 流静默看门狗罩不住它，而 reqwest 的连接超时也罩不住「连接建好了、
+/// 网关却不吭声」这一段。中转站把请求挂在半开连接上是常态，没有这条线
+/// 的话，重试状态发出去之后整个 turn 就静默死掉了。超时按网络故障重发，
+/// 等一个退避再试常常就通。
+const HEADERS_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// 生图一次最多等多久。
+///
+/// 出图本就比聊天慢，但端点挂住不返图时整轮就静默死掉。超时不重发——
+/// 图都画不出来，原样再要一次大概率还是不出来；把丑话回给模型，它换个
+/// 写法或者如实告诉用户，都比让 turn 卡死强。
+const IMAGE_GEN_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// 「整轮一个工具都没调」时最多催几次。
 ///
@@ -453,15 +471,45 @@ fn retry_backoff(attempt: usize) -> Duration {
     Duration::from_millis(1000u64 << attempt.saturating_sub(1).min(3))
 }
 
+/// 发一次请求，响应头要在 `budget` 之内见到，否则按网络故障交回。
+///
+/// `provider.request()` 里拿到响应头之前那段不算流：流静默看门狗罩不住它
+/// （流还没开始），reqwest 的连接超时也罩不住「连接建好了、网关却不吭声」
+/// 这一段。中转站把请求挂在半开连接上是常态——用户看到的「正在重试 1/5」
+/// 之后一片死寂，绝大多数就是死在这里：没有这条线，那一发请求永远不回来。
+/// 超时按 `Network` 交回，好让原有的重试路径（退避、五次封顶）原样接住，
+/// 而不是在重试小循环里另开一套收尾逻辑。
+async fn request_with_headers_timeout(
+    provider: &dyn LlmProvider,
+    request: &ChatRequest,
+    budget: Duration,
+) -> Result<providers::EventStream, ProviderError> {
+    match timeout(budget, provider.request(request)).await {
+        Ok(res) => res,
+        Err(_) => Err(ProviderError::Network(format!(
+            "no response headers within {}s, the connection looks stalled",
+            budget.as_secs()
+        ))),
+    }
+}
+
 /// 重发前的退避等待。
 ///
 /// 测试里整段跳过：一组五次重试真要等 23 秒，而假 provider 的剧本一秒就能走完。
 #[cfg(test)]
-async fn pause_before_retry(_attempt: usize) {}
+async fn pause_before_retry(_attempt: usize, _cancelled: &AtomicBool) {}
 
 #[cfg(not(test))]
-async fn pause_before_retry(attempt: usize) {
-    tokio::time::sleep(retry_backoff(attempt)).await;
+async fn pause_before_retry(attempt: usize, cancelled: &AtomicBool) {
+    // 退避期间用户点了停止，就别让人对着一个没反应的按钮干等八秒：
+    // 拆成小片轮询取消标志，醒了立刻收。
+    let left = retry_backoff(attempt);
+    let mut waited = Duration::ZERO;
+    while waited < left && !cancelled.load(Ordering::SeqCst) {
+        let slice = (left - waited).min(Duration::from_millis(100));
+        tokio::time::sleep(slice).await;
+        waited += slice;
+    }
 }
 
 /// 一次回复是怎么收场的：模型自己说完了，还是被输出上限掐断了。
@@ -574,9 +622,10 @@ pub struct AgentSession {
     /// 出图清单和提示词的 TURN ROUTING 段必须跟着改，不然模型嘴上要的是
     /// 「只借画风」，清单里还写着「视觉真值」，两处各说各话。
     plan: Mutex<TurnPlan>,
-    /// 这一轮的用户原话。知识库每发一次请求都要重新检索一遍，
-    /// 因为纠正可能把意图和风格换掉，命中的知识条目也该跟着换。
-    turn_text: Mutex<String>,
+    /// 这一轮的提示词清单：模型在动笔前用 pixel_prompt 写下的正向/逆向两段。
+    /// 开 turn 时清空——清单跟着这一单的图走，不跨轮留用。写没写是硬流程：
+    /// 生图工具在它为空时第一次被挡下，第二次按用户原话兜底放行。
+    craft: Mutex<Option<craft::CraftedPrompt>>,
     /// 用户在编辑器里动手的痕迹（一句话一条）。下一轮请求前冲刷成一条 user 消息，
     /// 让模型知道「画面已经被人改过了」，别照着自己上一轮的想象继续画。
     pending_edits: Mutex<Vec<String>>,
@@ -601,7 +650,7 @@ impl AgentSession {
             order: AtomicU64::new(0),
             ref_nodes: AtomicU64::new(0),
             plan: Mutex::new(TurnPlan::default()),
-            turn_text: Mutex::new(String::new()),
+            craft: Mutex::new(None),
             pending_edits: Mutex::new(Vec::new()),
             last_shader: Mutex::new(None),
         }
@@ -622,13 +671,19 @@ impl AgentSession {
     /// 换掉（或摘掉）MCP 注册表。None = 这个会话从此不接外部工具，
     /// 已经暴露过的工具清单下一轮重建时自然消失。
     pub fn set_mcp_registry(&self, registry: Option<Arc<McpRegistry>>) {
-        *self.mcp.lock().unwrap() = registry;
+        *self
+            .mcp
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = registry;
     }
 
     /// 这个会话现在接不接外部工具。给总开关和诊断用：不把注册表本身交出去，
     /// 想摘它的人只能走 set_mcp_registry。
     pub fn mcp_attached(&self) -> bool {
-        self.mcp.lock().unwrap().is_some()
+        self.mcp
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
     }
 
     /// 给会话一个排序位。侧边栏拖动排序后按新的位次整批改写。
@@ -647,14 +702,20 @@ impl AgentSession {
 
     /// 侧边栏显示名；None 表示还没改过，前端拿默认编号显示。
     pub fn title(&self) -> Option<String> {
-        self.title.lock().unwrap().clone()
+        self.title
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub fn set_title(&self, title: Option<String>) {
         let trimmed = title
             .map(|t| t.trim().to_string())
             .filter(|t| !t.is_empty());
-        *self.title.lock().unwrap() = trimmed;
+        *self
+            .title
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = trimmed;
     }
 
     /// 记一笔「用户在编辑器里动了什么」。空文本不入簿：一条空行只会
@@ -664,7 +725,10 @@ impl AgentSession {
         if note.trim().is_empty() {
             return;
         }
-        let mut edits = self.pending_edits.lock().unwrap();
+        let mut edits = self
+            .pending_edits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // 记到上限就把最旧的一条挤掉：越近的改动对「下一步画什么」越有参考价值。
         if edits.len() >= MAX_PENDING_EDITS {
             edits.remove(0);
@@ -674,7 +738,12 @@ impl AgentSession {
 
     /// 取走所有待冲刷的改动记录。取走即清空，没人会读第二遍。
     pub fn take_edits(&self) -> Vec<String> {
-        std::mem::take(&mut *self.pending_edits.lock().unwrap())
+        std::mem::take(
+            &mut *self
+                .pending_edits
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
     }
 
     /// 这份 shader 身份是不是刚跑过、跑完到现在画布又没动过。
@@ -682,14 +751,18 @@ impl AgentSession {
     fn last_shader_is(&self, key: &str, revision: u64) -> bool {
         self.last_shader
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
             .is_some_and(|last| last.key == key && last.revision == revision)
     }
 
     /// 跑成功的那份 shader 记下来。只有 `pixel_run_shader` 会走到这儿。
     fn remember_shader(&self, key: String, revision: u64) {
-        *self.last_shader.lock().unwrap() = Some(LastShader { key, revision });
+        *self
+            .last_shader
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(LastShader { key, revision });
     }
 
     /// 把某个角色另绑到一个模型。配同一个角色就是换模型。
@@ -702,13 +775,16 @@ impl AgentSession {
         let provider = providers::build_provider(&config);
         self.role_engines
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(role, Engine { config, provider });
     }
 
     /// 取消某个角色的单独绑定，让它回落去蹭主模型。没绑过就是空操作。
     pub fn clear_role(&self, role: ModelRole) {
-        self.role_engines.lock().unwrap().remove(&role);
+        self.role_engines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&role);
     }
 
     /// 这个角色实际该用哪个模型配置：单独绑了就用它，否则用主模型。
@@ -716,7 +792,7 @@ impl AgentSession {
     pub fn model_for_role(&self, role: ModelRole) -> ModelConfig {
         self.role_engines
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&role)
             .map(|engine| engine.config.clone())
             .unwrap_or_else(|| self.model_config())
@@ -726,7 +802,10 @@ impl AgentSession {
     /// 没有分工引擎的会话也照答：回落主模型，`detached` 是 false。
     pub fn role_bindings(&self) -> Vec<RoleBinding> {
         let primary = self.model_config();
-        let roles = self.role_engines.lock().unwrap();
+        let roles = self
+            .role_engines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         ModelRole::all()
             .into_iter()
             .map(|role| match roles.get(&role) {
@@ -750,7 +829,12 @@ impl AgentSession {
     /// 单模型用户没有角色引擎，并集就等于主模型自己的能力。
     pub fn effective_capabilities(&self) -> Capabilities {
         let mut caps = self.model_config().capabilities;
-        for engine in self.role_engines.lock().unwrap().values() {
+        for engine in self
+            .role_engines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+        {
             caps.vision |= engine.config.capabilities.vision;
             caps.image_gen |= engine.config.capabilities.image_gen;
             caps.video |= engine.config.capabilities.video;
@@ -763,7 +847,7 @@ impl AgentSession {
     fn mcp_specs(&self) -> Vec<ToolSpec> {
         self.mcp
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
             .map(|r| r.specs())
             .unwrap_or_default()
@@ -774,28 +858,47 @@ impl AgentSession {
     }
 
     pub fn model_config(&self) -> ModelConfig {
-        self.engine.lock().unwrap().config.clone()
+        self.engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .config
+            .clone()
     }
 
     pub fn runner_config(&self) -> RunnerConfig {
-        self.runner_config.lock().unwrap().clone()
+        self.runner_config
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub fn set_runner_config(&self, config: RunnerConfig) {
-        *self.runner_config.lock().unwrap() = config;
+        *self
+            .runner_config
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = config;
     }
 
     /// 运行时切换模型：重建 provider，保留文档与消息历史。
     pub fn rebind_provider(&self, config: ModelConfig) {
         let provider = providers::build_provider(&config);
-        *self.engine.lock().unwrap() = Engine { config, provider };
+        *self
+            .engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Engine { config, provider };
     }
 
     /// 用外部文档整体替换当前文档（前端加载 .aip 或撤销后同步回来）。
     /// 激活图层/帧若已不存在则回落到首个，避免后续工具调用落空。
     pub fn sync_document(&self, document: Document) {
-        let mut doc = self.document.lock().unwrap();
-        let mut active = self.active.lock().unwrap();
+        let mut doc = self
+            .document
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !doc_has_layer(&doc, &active.layer) {
             if let Some(first) = doc.layers.first() {
                 active.layer = first.id.clone();
@@ -810,15 +913,24 @@ impl AgentSession {
     }
 
     pub fn set_active(&self, active: ActiveContext) {
-        *self.active.lock().unwrap() = active;
+        *self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = active;
     }
 
     pub fn active(&self) -> ActiveContext {
-        self.active.lock().unwrap().clone()
+        self.active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub fn set_permission(&self, permission: PermissionMode) {
-        self.runner_config.lock().unwrap().permission = permission;
+        self.runner_config
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .permission = permission;
     }
 
     /// 用户对一条挂起的工具调用给出决定。call_id 对不上说明这是过期决定
@@ -828,7 +940,11 @@ impl AgentSession {
         call_id: &str,
         decision: ApprovalDecision,
     ) -> Result<(), String> {
-        let slot = self.approval.lock().unwrap().take();
+        let slot = self
+            .approval
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
         match slot {
             Some(pending) if pending.call_id == call_id => {
                 let _ = pending.tx.send(decision);
@@ -840,54 +956,84 @@ impl AgentSession {
     }
 
     pub fn history(&self) -> Vec<Message> {
-        self.messages.lock().unwrap().clone()
+        self.messages
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub fn load_history(&self, messages: Vec<Message>) {
-        *self.messages.lock().unwrap() = messages;
+        *self
+            .messages
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = messages;
     }
 
     pub fn clear_history(&self) {
-        self.messages.lock().unwrap().clear();
+        self.messages
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
     }
 
     pub fn document(&self) -> Document {
-        self.document.lock().unwrap().clone()
+        self.document
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// 借出文档做只读的一次性计算（渲染垫图、导出预览）。
     /// 和 `with_document_mut` 用同一把锁，但不会 bump revision，也不会让外界改到文档。
     pub fn with_document<T>(&self, f: impl FnOnce(&Document) -> T) -> T {
-        let doc = self.document.lock().unwrap();
+        let doc = self
+            .document
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         f(&doc)
     }
 
     /// 借出文档做一次性原地修改（插帧、量化、编辑器操作），完成后返回新 revision。
     /// 主循环的 agent turn 也走同一把锁，所以这里不会和并发 turn 交织。
     pub fn with_document_mut<T>(&self, f: impl FnOnce(&mut Document) -> T) -> T {
-        let mut doc = self.document.lock().unwrap();
+        let mut doc = self
+            .document
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         f(&mut doc)
     }
 
     pub fn document_json(&self) -> Value {
-        let doc = self.document.lock().unwrap();
+        let doc = self
+            .document
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         serde_json::to_value(&*doc).unwrap_or(Value::Null)
     }
 
     pub fn revision(&self) -> u64 {
-        self.document.lock().unwrap().revision
+        self.document
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .revision
     }
 
     /// 序列化成 .aip v2 文本（中间文件格式不变）。
     pub fn aip_text(&self) -> Result<String, String> {
-        let doc = self.document.lock().unwrap();
+        let doc = self
+            .document
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         pixel_core::context::to_aip(&doc)
     }
 
     pub fn interrupt(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
         // 有审批挂着的话，发送端一掉，等待中的主循环立刻收手，不会和用户赌手感。
-        self.approval.lock().unwrap().take();
+        self.approval
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
     }
 
     pub fn is_cancelled(&self) -> bool {
@@ -904,7 +1050,10 @@ impl AgentSession {
         let (sender, mut receiver) = oneshot::channel();
         {
             // 上一轮的挂起没清掉就顶掉：turn 顺序执行，出现即异常，顶掉保证不死等。
-            let mut slot = self.approval.lock().unwrap();
+            let mut slot = self
+                .approval
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             *slot = Some(ApprovalSlot {
                 call_id: call.id.clone(),
                 tx: sender,
@@ -959,13 +1108,33 @@ impl AgentSession {
         // 存进会话状态。模型读原话觉得判错了再调 pixel_plan 纠正，两段接力。少了前一段，
         // 「光思考不干活」的模型就根本不会把约束带上路——而那几条一漏，「照这个画风」
         // 就变成了复刻，「瓦片」就变成了一张大地图。
-        let plan = TurnPlan::from_text(&text, &attachments);
-        *self.plan.lock().unwrap() = plan.clone();
-        *self.turn_text.lock().unwrap() = text.clone();
+        // 改画轴先问画布：上面真有像素才谈得上「改」。空画布上「画只猫，加个项圈」
+        // 词面上是改、实际得从零画，那时候该走从零画的分流，而不是带着
+        // 「不许 clear()、不许重画」的禁令上路。锁顺序 document -> ...，
+        // 这里单独取一次就放，不和其他锁交叉。
+        let has_pixels = self
+            .document
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .has_pixels();
+        let plan = TurnPlan::from_text(&text, &attachments, has_pixels);
+        *self
+            .plan
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = plan.clone();
+        // 上一轮的提示词清单到此作废：这一单的图该配它自己的正向/逆向清单，
+        // 留着旧清单等于让上一张画的 brief 约束这一张。
+        *self
+            .craft
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         // 上一轮那份 shader 记忆到此为止。用户开口要「照这样再来一遍」时，
         // 上一轮的 script 配上没动过的画布会被误判成重放——新开一轮就是
         // 一次重新来过的机会。turn 内的原样重跑才是真毛病，那边有护栏。
-        *self.last_shader.lock().unwrap() = None;
+        *self
+            .last_shader
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         self.emit_plan_node(&tx, &attachments, &plan);
 
         // 图片清单走在图片前面：模型必须知道每张图的身份与顺序，
@@ -983,21 +1152,27 @@ impl AgentSession {
                 data_base64: attachment.data_base64,
             });
         }
-        self.messages.lock().unwrap().push(Message {
-            role: Role::User,
-            content,
-        });
+        self.messages
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(Message {
+                role: Role::User,
+                content,
+            });
 
         // 用户发消息前在编辑器里动过的痕迹，先冲刷成一条 user 消息。
         // 少了这一步，模型会照着自己上一轮的想象继续画，把用户的手笔当成不存在。
         let manual_edits = self.take_edits();
         if !manual_edits.is_empty() {
-            self.messages.lock().unwrap().push(Message {
-                role: Role::User,
-                content: vec![ContentBlock::Text {
-                    text: manual_edit_digest(&manual_edits),
-                }],
-            });
+            self.messages
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::Text {
+                        text: manual_edit_digest(&manual_edits),
+                    }],
+                });
         }
 
         // 进入 turn 时快照一份预算，避免中途改设置导致行为漂移。
@@ -1005,6 +1180,13 @@ impl AgentSession {
         let mut runner_config = self.runner_config();
         // 这句话是不是在要图。纯聊天不必催，见 asks_for_artwork。
         let art_requested = asks_for_artwork(&text);
+        // 这一轮走不走提示词流程：要图、改画、成品意图已定都算，纯问答不算。
+        // 判据只用 Rust 已经定性的东西，不猜模型待会要干什么——猜漏了顶多少
+        // 一段清单，猜错了就是每句闲聊都被逼先写提示词。
+        let craft_needed = craft::required(plan.editing, plan.intent, art_requested);
+        // 清单写没写归会话状态管；本 turn 只记「挡下过一次没有」——第二次仍然
+        // 跳过清单的生图调用放行，并如实告诉用户走了兜底。
+        let mut craft_warned = false;
         let mut steps = 0usize;
         let mut last_failure: Option<(String, String)> = None;
         let mut failure_streak = 0usize;
@@ -1021,7 +1203,10 @@ impl AgentSession {
         // 关思考：用户钉死（Some）就照办；没钉死（None）先按模型默认来，
         // 但保留一次自动翻盘的机会——见下面 retry 小循环里的兜底。
         let pinned_thinking = {
-            let engine = self.engine.lock().unwrap();
+            let engine = self
+                .engine
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             engine.config.disable_thinking
         };
         let mut thinking_off = pinned_thinking.unwrap_or(false);
@@ -1050,7 +1235,12 @@ impl AgentSession {
             }
             logical_rounds += 1;
 
-            let provider = self.engine.lock().unwrap().provider.clone();
+            let provider = self
+                .engine
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .provider
+                .clone();
             // 本逻辑轮已经写下的正文。续写指令要把断点原文按在模型眼前，
             // 光说一句「继续」，它会当新问题重想一遍、把开头再念一次。
             let mut carried = String::new();
@@ -1072,9 +1262,14 @@ impl AgentSession {
                     emit(&tx, AgentEvent::Interrupted);
                     return;
                 }
-                let request = self.chat_request(&runner_config, token_ceiling, thinking_off);
+                let request =
+                    self.chat_request(&runner_config, token_ceiling, thinking_off, craft_needed);
 
-                let stream = match provider.request(&request).await {
+                let sent =
+                    request_with_headers_timeout(provider.as_ref(), &request, HEADERS_TIMEOUT)
+                        .await;
+
+                let stream = match sent {
                     Ok(stream) => stream,
                     Err(e) => {
                         // provider 说「max_tokens 太大了，最多 N」：降下来重发，
@@ -1106,7 +1301,7 @@ impl AgentSession {
                                     ),
                                 },
                             );
-                            pause_before_retry(retries).await;
+                            pause_before_retry(retries, &self.cancelled).await;
                             continue;
                         }
                         emit(
@@ -1144,7 +1339,7 @@ impl AgentSession {
                                 ),
                             },
                         );
-                        pause_before_retry(retries).await;
+                        pause_before_retry(retries, &self.cancelled).await;
                         continue;
                     }
                     emit(
@@ -1177,7 +1372,10 @@ impl AgentSession {
                     // 再看同一段光想不干的推理——那是纯浪费。
                     // 只写本次运行内的会话状态，不动 models.json 里的模型定义：
                     // 那是用户手改的东西，不该被一次兜底悄悄改写。
-                    let mut engine = self.engine.lock().unwrap();
+                    let mut engine = self
+                        .engine
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     if engine.config.disable_thinking.is_none() {
                         engine.config.disable_thinking = Some(true);
                     }
@@ -1359,7 +1557,7 @@ impl AgentSession {
             if !blocks.is_empty() {
                 self.messages
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push(Message::assistant(blocks));
             }
 
@@ -1376,7 +1574,7 @@ impl AgentSession {
                     tool_nudges += 1;
                     self.messages
                         .lock()
-                        .unwrap()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .push(Message::user_text(tool_nudge()));
                     emit(
                         &tx,
@@ -1441,7 +1639,7 @@ impl AgentSession {
                                     is_error: false,
                                 },
                             );
-                            self.messages.lock().unwrap().push(Message::tool_result(
+                            self.messages.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(Message::tool_result(
                                 call.id.clone(),
                                 "the user rejected this tool call. Do not retry it as-is; explain what you were about to do and ask how you should proceed.",
                                 false,
@@ -1460,6 +1658,7 @@ impl AgentSession {
                 // DocumentUpdated：画布一个像素都没动，推上去只会让前端
                 // 白刷一次。
                 let mut shader_paused = false;
+                let mut craft_blocked = false;
                 let outcome: ToolOutcome = match &call.parse_error {
                     Some(e) => ToolOutcome {
                         content: format!(
@@ -1468,8 +1667,38 @@ impl AgentSession {
                         is_error: true,
                     },
                     None => {
-                        let registry = self.mcp.lock().unwrap().clone();
-                        if call.name.starts_with(mcp::MCP_TOOL_PREFIX) {
+                        // 提示词流程的硬闸：这一轮要生图，而清单还没写。第一次挡下
+                        // 并要求先写；第二次仍然跳过清单的调用按用户原话兜底一支基线
+                        // 放行——再倔的模型也画得出图，同时如实告诉用户这单没走成
+                        // 完整的提示词流程。锁只取一次就放，不和后面的文档锁交叉。
+                        let craft_gate = craft_needed
+                            && craft::is_drawing_tool(&call.name)
+                            && self
+                                .craft
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .as_ref()
+                        .is_none_or(|crafted| crafted.is_empty());
+                        if craft_gate && !craft_warned {
+                            craft_warned = true;
+                            craft_blocked = true;
+                            ToolOutcome {
+                                content: craft::craft_first_refusal(),
+                                is_error: true,
+                            }
+                        } else {
+                            if craft_gate {
+                                let routing = self.plan.lock().unwrap_or_else(std::sync::PoisonError::into_inner).outcome_text();
+                                *self.craft.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(craft::fallback(&text, &routing));
+                                emit(
+                                    &tx,
+                                    AgentEvent::Status {
+                                        message: craft_fallback_status(),
+                                    },
+                                );
+                            }
+                       let registry = self.mcp.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+                       if call.name.starts_with(mcp::MCP_TOOL_PREFIX) {
                             // 外部工具：分流到用户自配的 MCP 服务器，不进文档锁。
                             match registry {
                                 Some(registry) => {
@@ -1493,12 +1722,15 @@ impl AgentSession {
                             // 只改会话里的分流表，不碰文档、不等模型。按 sync 写
                             // 就够，签名跟着其余分支保持 async 是为了分流链一致。
                             self.run_plan(&call.input).await
+                        } else if call.name == craft::PROMPT_TOOL {
+                            // 只写下这一轮的提示词清单，不碰文档、不等模型。
+                            self.run_craft(&call.input).await
                         } else if call.name == tools::IMAGE_GEN_TOOL {
                             // 生图要等模型回图，异步跑；await 期间绝不持有文档锁。
                             self.run_image_gen(&call.input).await
                         } else {
-                            let mut doc = self.document.lock().unwrap();
-                            let active = self.active.lock().unwrap();
+                            let mut doc = self.document.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                            let active = self.active.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                             // 同一份 shader 原样重跑：跳过执行，画布不动，
                             // 回一句能操作的话。模型照抄三遍也不收手，按
                             // 「同一个调用连错三次」收摊，见下面的 streak。
@@ -1525,6 +1757,9 @@ impl AgentSession {
                                 outcome
                             }
                         }
+                        // 提示词闸门的 else 分支到此收口：放行的调用回到原来的
+                        // 分发链上，和被挡下一次的路径完全同一条。
+                        }
                     }
                 };
 
@@ -1544,11 +1779,10 @@ impl AgentSession {
                     let head: String = content.chars().take(budget).collect();
                     content = format!("{head}\n...[truncated to {budget} chars]");
                 }
-                self.messages.lock().unwrap().push(Message::tool_result(
-                    call.id,
-                    content,
-                    outcome.is_error,
-                ));
+                self.messages
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(Message::tool_result(call.id, content, outcome.is_error));
 
                 if outcome.is_error {
                     let key = (call.name.clone(), call.input.to_string());
@@ -1578,12 +1812,18 @@ impl AgentSession {
                 // 读操作不改文档，不推 DocumentUpdated。
                 // MCP 工具在文档之外跑（不回推文档事件）；读操作本来也不推。
                 // 被跳过的 shader 同理：一个像素都没动。
+                // 被挡下补写清单的生图调用同理：那一发根本没动笔。
                 if !shader_paused
+                    && !craft_blocked
                     && call.name != "pixel_read_canvas"
+                    && call.name != craft::PROMPT_TOOL
                     && !call.name.starts_with(mcp::MCP_TOOL_PREFIX)
                 {
                     let (revision, document) = {
-                        let doc = self.document.lock().unwrap();
+                        let doc = self
+                            .document
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
                         (
                             doc.revision,
                             serde_json::to_value(&*doc).unwrap_or(Value::Null),
@@ -1603,23 +1843,52 @@ impl AgentSession {
         cfg: &RunnerConfig,
         ceiling: Option<u32>,
         disable_thinking: bool,
+        craft_needed: bool,
     ) -> ChatRequest {
-        let doc = self.document.lock().unwrap();
-        let active = self.active.lock().unwrap();
-        let engine = self.engine.lock().unwrap();
-        // 本轮分流和知识条目按当前 plan 和原话现算：模型中途纠正过，
+        // 提示词清单段单独先算，只拿一次 craft 锁：没写就给「动笔前先写清单」
+        // 的要求段，写了就把两段清单作为约束带上路。放在 document/active/engine
+        // 三把锁之前取，锁顺序保持 document -> active -> engine -> plan 不变。
+        let craft_section = {
+            let crafted = self
+                .craft
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if !craft_needed {
+                String::new()
+            } else {
+                match &crafted {
+                    Some(crafted) if !crafted.is_empty() => craft::bound_section(crafted),
+                    _ => craft::required_section(),
+                }
+            }
+        };
+        let doc = self
+            .document
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let active = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let engine = self
+            .engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // 本轮分流和知识条目按当前 plan 现算：模型中途纠正过，
         // 下一发请求就该带着新结论上路，缓存会把纠正吃掉。
-        // 锁顺序固定 document -> active -> engine -> plan -> turn_text。
+        // 锁顺序固定 document -> active -> engine -> plan。
         let (routing, craft_notes) = {
-            let plan = self.plan.lock().unwrap();
-            let text = self.turn_text.lock().unwrap();
+            let plan = self
+                .plan
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             (
                 plan.prompt_sections(),
-                knowledge::prompt_section(
-                    &text,
-                    knowledge::DEFAULT_LIMIT,
-                    knowledge::DEFAULT_BUDGET,
-                ),
+                // 按 plan 里的 id 出段，不按原话重检：改画那一轮会把 refine
+                // 硬塞进列表，重检会把它又挤掉，而它偏偏是唯一一条讲
+                // 「保留已有像素」的条目。
+                knowledge::section_from_ids(&plan.knowledge_ids, knowledge::DEFAULT_BUDGET),
             )
         };
         ChatRequest {
@@ -1629,10 +1898,17 @@ impl AgentSession {
                 &active.frame,
                 active.color.as_deref(),
                 cfg.canvas_context_chars,
-                &routing,
-                &craft_notes,
+                prompt::PromptExtras {
+                    routing: &routing,
+                    craft: &craft_section,
+                    craft_notes: &craft_notes,
+                },
             ),
-            messages: self.messages.lock().unwrap().clone(),
+            messages: self
+                .messages
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
             // MCP 工具追加在内建 pixel_* 之后：模型每轮看到的都是当前真实能力。
             tools: {
                 let mut specs = tools::specs();
@@ -1772,11 +2048,14 @@ impl AgentSession {
         if raw.text.is_empty() {
             self.messages
                 .lock()
-                .unwrap()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(Message::user_text(nudge));
             return;
         }
-        let mut messages = self.messages.lock().unwrap();
+        let mut messages = self
+            .messages
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         messages.push(Message::assistant(raw.blocks()));
         messages.push(Message::user_text(nudge));
     }
@@ -1787,7 +2066,10 @@ impl AgentSession {
     /// 历史里，下一轮只会看到一句悬空的 user 消息。`push_resume` 永远以这条
     /// 指令收尾，所以退一条就够。
     fn undo_resume(&self) {
-        self.messages.lock().unwrap().pop();
+        self.messages
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop();
     }
 
     /// agent 生图工具：让模型直接产出位图，再量化落到画布。与同步工具分开跑，
@@ -1807,6 +2089,7 @@ impl AgentSession {
             && plan.intent.is_none()
             && plan.style.is_none()
             && plan.knowledge_ids.is_empty()
+            && !plan.editing
         {
             return;
         }
@@ -1847,7 +2130,10 @@ impl AgentSession {
                 }
             }
         };
-        let mut plan = self.plan.lock().unwrap();
+        let mut plan = self
+            .plan
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // 只认这一轮清单里真有的参考图。清单之外的下标说明模型在自说自话：照改
         // 会让定性表和清单错开位，之后每张图的约束全串到另一张上去。
         // 先全验、再全改。半途报错会把前面几步的改动留在表里，模型收到错误却
@@ -1879,6 +2165,24 @@ impl AgentSession {
                     update.index,
                     update.mode.as_str()
                 ));
+            }
+        }
+        if let Some(edit) = updates.edit {
+            if plan.editing != edit {
+                plan.editing = edit;
+                if edit {
+                    // 改成「改」时同样得把 refine 带上：它是唯一一条讲
+                    // 「保留已有像素」的条目，缺了它「接着改」会被读成重画。
+                    plan.editing_hit = Some("the user asked to edit".to_string());
+                    if !plan.knowledge_ids.iter().any(|id| id == "refine") {
+                        plan.knowledge_ids.insert(0, "refine".to_string());
+                        plan.knowledge_ids.truncate(4);
+                    }
+                    changed.push("this turn now edits what is on the canvas".to_string());
+                } else {
+                    plan.editing_hit = None;
+                    changed.push("this turn now draws from scratch".to_string());
+                }
             }
         }
         if let Some(intent) = updates.intent {
@@ -1930,6 +2234,29 @@ impl AgentSession {
         }
     }
 
+    /// 模型写下这一轮的提示词清单。只改会话里的 craft：系统提示词的
+    /// CRAFTED PROMPTS 段由它推导，所以写下的那一刻下一发请求就带着清单上路，
+    /// 生图工具也立刻放行——流程的松紧全凭这一个字段。
+    async fn run_craft(&self, input: &Value) -> ToolOutcome {
+        let crafted = match craft::parse(input) {
+            Ok(crafted) => crafted,
+            Err(e) => {
+                return ToolOutcome {
+                    content: e,
+                    is_error: true,
+                }
+            }
+        };
+        *self
+            .craft
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(crafted.clone());
+        ToolOutcome {
+            content: craft::recorded_text(&crafted),
+            is_error: false,
+        }
+    }
+
     async fn run_image_gen(&self, input: &Value) -> ToolOutcome {
         let params = match tools::ImageGenToolParams::parse(input) {
             Ok(p) => p,
@@ -1966,11 +2293,22 @@ impl AgentSession {
             size: params.size.clone(),
             reference,
         };
-        let image = match generator.generate(&request).await {
-            Ok(img) => img,
-            Err(e) => {
+        // 生图比聊天慢得多，但慢也有个头：端点挂住不返图时整轮就静默死掉。
+        // 超时按工具错误回给模型，它会改提示词重画或者如实告诉用户。
+        let image = match timeout(IMAGE_GEN_TIMEOUT, generator.generate(&request)).await {
+            Ok(Ok(img)) => img,
+            Ok(Err(e)) => {
                 return ToolOutcome {
                     content: format!("{IMAGE_GEN_TOOL}: image generation failed: {e}"),
+                    is_error: true,
+                }
+            }
+            Err(_) => {
+                return ToolOutcome {
+                    content: format!(
+                        "{IMAGE_GEN_TOOL}: no image came back within {}s; the endpoint looks stalled - retry with a simpler prompt or a different image model",
+                        IMAGE_GEN_TIMEOUT.as_secs()
+                    ),
                     is_error: true,
                 }
             }
@@ -2057,8 +2395,20 @@ fn needs_approval(mode: PermissionMode, name: &str) -> bool {
         // Chat 模式只放行「只读」和「改定性」两种：前者只是看画布，后者只是把
         // 上一行清单里的结论换个说法，都碰不到画面。弹审批卡反而逼着用户为一个
         // 文本决定反复点同意。
-        PermissionMode::Chat => name != "pixel_read_canvas" && name != PLAN_TOOL,
+        // pixel_prompt 只是写两段清单文本，碰不到画面，和读回一个性质：
+        // 放行。弹审批卡会逼用户为一个文本决定反复点同意。
+        PermissionMode::Chat => {
+            name != "pixel_read_canvas" && name != PLAN_TOOL && name != craft::PROMPT_TOOL
+        }
     }
+}
+
+/// 模型第二次仍然不写提示词、按用户原话兜底放行时的状态条。
+fn craft_fallback_status() -> UiText {
+    UiText::new(
+        "agent.craft_fallback",
+        "模型没有先写提示词，已按你的原话兜底生成，继续作画",
+    )
 }
 
 fn emit(tx: &UnboundedSender<AgentEvent>, event: AgentEvent) {
@@ -2600,9 +2950,19 @@ mod tests {
             &self,
             req: &ChatRequest,
         ) -> Result<providers::EventStream, ProviderError> {
-            let script = self.scripts.lock().unwrap().remove(0);
-            self.seen.lock().unwrap().push(req.disable_thinking);
-            self.systems.lock().unwrap().push(req.system.clone());
+            let script = self
+                .scripts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(0);
+            self.seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(req.disable_thinking);
+            self.systems
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(req.system.clone());
             Ok(Box::pin(futures_util::stream::iter(script)))
         }
     }
@@ -2624,8 +2984,15 @@ mod tests {
             systems: Mutex::new(Vec::new()),
         });
         let watched = Arc::clone(&provider);
-        let config = s.engine.lock().unwrap().config.clone();
-        *s.engine.lock().unwrap() = Engine { config, provider };
+        let config = s
+            .engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .config
+            .clone();
+        *s.engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Engine { config, provider };
         watched
     }
 
@@ -2635,6 +3002,8 @@ mod tests {
         text: String,
         statuses: Vec<String>,
         tools: Vec<String>,
+        /// 画布被推送给前端的次数。要断言「这一发根本没动笔」就看它。
+        doc_updates: usize,
         completed: bool,
         error: Option<String>,
         /// 报错带的变量拼成的文本，用来看「这句报错到底交代了什么」。
@@ -2646,6 +3015,7 @@ mod tests {
             text: String::new(),
             statuses: Vec::new(),
             tools: Vec::new(),
+            doc_updates: 0,
             completed: false,
             error: None,
             error_detail: None,
@@ -2656,6 +3026,7 @@ mod tests {
                 AgentEvent::Reasoning { text } => flow.text.push_str(&text),
                 AgentEvent::Status { message } => flow.statuses.push(message.key),
                 AgentEvent::ToolCall { name, .. } => flow.tools.push(name),
+                AgentEvent::DocumentUpdated { .. } => flow.doc_updates += 1,
                 AgentEvent::Completed { .. } => flow.completed = true,
                 AgentEvent::Error { message } => {
                     flow.error = Some(message.key.clone());
@@ -2723,6 +3094,18 @@ mod tests {
         ]
     }
 
+    /// 一截只写了提示词清单的回复。要图的一轮都得先过这一步。
+    fn craft_call(id: &str) -> Vec<Result<LlmEvent, ProviderError>> {
+        tool_call(
+            id,
+            craft::PROMPT_TOOL,
+            json!({
+                "positive": "a 64x64 red marker block on the first grid cell, flat colors",
+                "negative": "no stray pixels, no smudged edges, no colors outside the palette",
+            }),
+        )
+    }
+
     #[tokio::test]
     async fn a_round_that_only_thought_is_still_progress() {
         let s = session();
@@ -2763,7 +3146,11 @@ mod tests {
         assert!(flow.error.is_none());
         assert_eq!(flow.statuses, vec!["agent.continuing".to_string()]);
 
-        let history = s.messages.lock().unwrap().clone();
+        let history = s
+            .messages
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         let texts: Vec<String> = history.iter().map(|m| m.text_of()).collect();
         assert_eq!(texts.len(), 4, "原话、半截回复、续写指令、完整回复");
         assert_eq!(texts[1], "前半段", "半截回复要原样进历史");
@@ -2799,6 +3186,51 @@ mod tests {
         assert_eq!(flow.statuses, vec!["agent.retrying".to_string()]);
     }
 
+    /// 一个永远不答话的 provider：`.request()` 挂住不回，模拟网关把请求
+    /// 挂在半开连接上。
+    struct HangingProvider;
+
+    #[async_trait::async_trait]
+    impl providers::LlmProvider for HangingProvider {
+        async fn request(
+            &self,
+            _req: &ChatRequest,
+        ) -> Result<providers::EventStream, ProviderError> {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_request_that_never_answers_becomes_a_retryable_failure() {
+        let provider = HangingProvider;
+        let request = ChatRequest {
+            system: String::new(),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            max_tokens: 1024,
+            temperature: None,
+            disable_thinking: false,
+            echo_reasoning: false,
+        };
+
+        let err = match request_with_headers_timeout(&provider, &request, Duration::from_millis(20))
+            .await
+        {
+            Ok(_) => panic!("挂死的请求必须在预算之内交回失败，不能挂在 run_turn 里"),
+            Err(e) => e,
+        };
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no response headers"),
+            "失败原因要说清是响应头等不来，用户才知道该怪谁: {msg}"
+        );
+        assert!(
+            retryable(&err),
+            "响应头超时和网络抖动是同一类故障，必须走退避重试而不是直接判死"
+        );
+    }
+
     #[tokio::test]
     async fn an_unauthorised_request_is_not_retried_at_all() {
         let s = session();
@@ -2824,7 +3256,14 @@ mod tests {
         let detail = flow.error_detail.unwrap_or_default();
         assert!(detail.contains("401"), "{detail}");
         assert_eq!(flow.error.as_deref(), Some("agent.request_failed"));
-        assert_eq!(s.messages.lock().unwrap().len(), 1, "只有用户那一句");
+        assert_eq!(
+            s.messages
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            1,
+            "只有用户那一句"
+        );
     }
 
     #[test]
@@ -2945,7 +3384,11 @@ mod tests {
         let s = session();
         // 钉住「开着思考」：不然第一次死思考就被自动翻盘接走了，
         // 测的就不是护栏本身。
-        s.engine.lock().unwrap().config.disable_thinking = Some(false);
+        s.engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .config
+            .disable_thinking = Some(false);
         let cap = s.runner_config().loop_limits.max_reasoning_continuations;
         rewire(
             &s,
@@ -2972,9 +3415,11 @@ mod tests {
         );
         let detail = flow.error_detail.unwrap_or_default();
         assert!(detail.contains(&format!("rounds={}", cap + 1)), "{detail}");
-        assert!(
-            flow.tools.is_empty(),
-            "思考到尾也没有工具调用：{:?}",
+        assert_eq!(
+            flow.tools,
+            vec!["pixel_plan".to_string()],
+            "思考到尾模型一个工具都没调。pixel_plan 是开 turn 时我们自己摆的分流节点，\
+             不算它动过手：{:?}",
             flow.tools
         );
     }
@@ -3016,9 +3461,12 @@ mod tests {
     async fn the_same_shader_rerun_verbatim_is_skipped_and_the_turn_stops() {
         let s = session();
         let script = marker_walker();
+        // 要图的一轮得先写提示词清单，不然第一发 shader 会被挡下去补写，
+        // 「同一个调用连错三次」的额度就被挡下那一次用掉一次。
         rewire(
             &s,
             vec![
+                craft_call("c0"),
                 tool_call("c1", "pixel_run_shader", json!({"script": script})),
                 tool_call("c2", "pixel_run_shader", json!({"script": script})),
                 tool_call("c3", "pixel_run_shader", json!({"script": script})),
@@ -3032,13 +3480,25 @@ mod tests {
 
         // 头一发真的跑了；后三发原样重发，发发跳过。照抄三遍还不收手，
         // 按「同一个调用连错三次」收摊，别再往后烧。
-        assert_eq!(flow.tools, vec!["pixel_run_shader"; 4]);
+        assert_eq!(
+            flow.tools,
+            vec![
+                "pixel_prompt".to_string(),
+                "pixel_run_shader".to_string(),
+                "pixel_run_shader".to_string(),
+                "pixel_run_shader".to_string(),
+                "pixel_run_shader".to_string(),
+            ]
+        );
         assert_eq!(
             flow.error.as_deref(),
             Some("agent.same_call_failed"),
             "转圈得有个头：{flow:?}"
         );
-        let doc = s.document.lock().unwrap();
+        let doc = s
+            .document
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let layer = doc.layers[0].id.clone();
         let frame = doc.frames[0].id.clone();
         let row = &doc.cel(&layer, &frame).unwrap().indices[..8];
@@ -3049,15 +3509,139 @@ mod tests {
         );
     }
 
+    /// 要图的一轮不写提示词清单就动笔：头一发被挡下并要求补写，画布一个像素
+    /// 都不许动；第二次仍然跳过清单时，按用户原话兜底一支基线放行，并如实
+    /// 告诉用户这单没走成完整的提示词流程。
+    #[tokio::test]
+    async fn an_art_turn_requires_the_prompt_lists_before_drawing() {
+        let s = session();
+        let script = marker_walker();
+        rewire(
+            &s,
+            vec![
+                tool_call("c1", "pixel_run_shader", json!({"script": script})),
+                tool_call("c2", "pixel_run_shader", json!({"script": script})),
+                done("画好了"),
+            ],
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("画个方块".into(), Vec::new(), tx).await;
+        let flow = drain(rx);
+
+        assert_eq!(
+            flow.statuses,
+            vec!["agent.craft_fallback".to_string()],
+            "兜底放行要说出来，不能悄悄降级：{:?}",
+            flow.statuses
+        );
+        // 挡一次、画一次：各推一次画布，被挡那一次一个像素都没动。
+        assert_eq!(
+            flow.doc_updates, 1,
+            "挡下那一次不许推画布，只有真画了才推：{flow:?}"
+        );
+        assert!(flow.completed, "{:?}", flow.error);
+        let doc = s
+            .document
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let layer = doc.layers[0].id.clone();
+        let frame = doc.frames[0].id.clone();
+        let row = &doc.cel(&layer, &frame).unwrap().indices[..8];
+        assert_ne!(row[0], 0, "兜底之后这一发真的画上了");
+    }
+
+    /// 清单写定之后，这一轮的每一发请求都得带着它上路：不然写过的约束下
+    // 一发就丢了，模型照着自己的老习惯画，等于没写。
+    #[tokio::test]
+    async fn a_crafted_list_binds_every_request_after_it() {
+        let s = session();
+        let script = marker_walker();
+        let watched = rewire_watch(
+            &s,
+            vec![
+                craft_call("c0"),
+                tool_call("c1", "pixel_run_shader", json!({"script": script})),
+                done("画好了"),
+            ],
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("画个方块".into(), Vec::new(), tx).await;
+        let flow = drain(rx);
+
+        assert!(flow.completed, "{:?}", flow.error);
+        let systems = watched
+            .systems
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(systems.len(), 3, "写清单一发、照着画一发、收尾一发");
+        assert!(
+            !systems[0].contains("CRAFTED PROMPTS FOR THIS TURN"),
+            "清单还没写，这一发要的是「先去写」：{}",
+            systems[0]
+        );
+        assert!(
+            systems[2].contains("CRAFTED PROMPTS FOR THIS TURN"),
+            "画完之后那一发也得带着清单，别让它回头推翻自己：{}",
+            systems[2]
+        );
+        assert!(
+            systems[0].contains("PROMPT CRAFT"),
+            "没写清单的那一发仍然带着动笔前的要求：{}",
+            systems[0]
+        );
+        assert!(
+            systems[1].contains("CRAFTED PROMPTS FOR THIS TURN"),
+            "写着清单的那一发得把它带上路：{}",
+            systems[1]
+        );
+        assert!(
+            systems[1].contains("a 64x64 red marker block"),
+            "清单的原文要在约束段里：{}",
+            systems[1]
+        );
+    }
+
+    /// 纯聊天的一轮从不要求写提示词清单：没人在问答里往画布上落像素，
+    /// 逼它先写清单只是把一轮闲聊拖成三轮。
+    #[tokio::test]
+    async fn a_chat_turn_never_asks_for_prompt_lists() {
+        let s = session();
+        let watched = rewire_watch(&s, vec![done("这一栏是导出用的")]);
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("解释一下这个面板怎么用".into(), Vec::new(), tx)
+            .await;
+        let flow = drain(rx);
+
+        assert_eq!(flow.text, "这一栏是导出用的");
+        let systems = watched
+            .systems
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(systems.len(), 1);
+        assert!(
+            !systems[0].contains("PROMPT CRAFT"),
+            "闲聊不该被逼写提示词：{}",
+            systems[0]
+        );
+    }
+
     /// 画布动过了，同一份 script 就不再算重放：模型针对新画面修修补补时
     /// 原样再来一次是正经操作，护栏不许误伤。
     #[tokio::test]
     async fn the_same_script_is_allowed_again_once_the_canvas_moved() {
         let s = session();
         let script = marker_walker();
+        // 先写清单：这一轮在要图，绕不过提示词那一步。少了它第一发 shader
+        // 会被挡下去补写，marker 的落点就全错了。
         rewire(
             &s,
             vec![
+                craft_call("c0"),
                 tool_call("c1", "pixel_run_shader", json!({"script": script})),
                 tool_call(
                     "c2",
@@ -3075,10 +3659,11 @@ mod tests {
         let flow = drain(rx);
 
         assert_eq!(
-            // pixel_plan 是分流给界面看的节点，不是调用，剔掉再比。
+            // pixel_plan 是分流给界面看的节点，pixel_prompt 是提示词清单。
+            // 两个都不动画布，剔掉再比剩下真正落在画布上的调用。
             flow.tools
                 .iter()
-                .filter(|n| *n != "pixel_plan")
+                .filter(|n| **n != "pixel_plan" && n.as_str() != craft::PROMPT_TOOL)
                 .cloned()
                 .collect::<Vec<_>>(),
             vec![
@@ -3088,7 +3673,10 @@ mod tests {
             ]
         );
         assert!(flow.completed, "{:?}", flow.error);
-        let doc = s.document.lock().unwrap();
+        let doc = s
+            .document
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let layer = doc.layers[0].id.clone();
         let frame = doc.frames[0].id.clone();
         let row = &doc.cel(&layer, &frame).unwrap().indices[..8];
@@ -3138,7 +3726,10 @@ mod tests {
             ]
         );
         assert!(flow.completed, "{:?}", flow.error);
-        let doc = s.document.lock().unwrap();
+        let doc = s
+            .document
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let frame = doc.frames[0].id.clone();
         assert_ne!(
             doc.cel("L9", &frame).unwrap().indices[0],
@@ -3189,7 +3780,13 @@ mod tests {
         );
         // 用户那一句 + 二十套「半截回复 + 续写指令」；第二十一发是收摊前那一问，
         // 不再回灌，所以总数停在 41 条。用户能整段复制走自己续。
-        assert_eq!(s.messages.lock().unwrap().len(), 41);
+        assert_eq!(
+            s.messages
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            41
+        );
     }
 
     #[tokio::test]
@@ -3223,7 +3820,13 @@ mod tests {
             "要说清是回复不再推进"
         );
         // 用户那一句 + 第一次续写回灌的「半截回复 + 续写指令」，共三条。
-        assert_eq!(s.messages.lock().unwrap().len(), 3);
+        assert_eq!(
+            s.messages
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            3
+        );
     }
 
     #[tokio::test]
@@ -3273,8 +3876,17 @@ mod tests {
         assert!(flow.error.is_none(), "{:?}", flow.error);
         assert_eq!(flow.text, "先写脚本画好了");
         // 半截入参不可信：进历史会被 provider 整包拒掉，续写那次就白发。
-        assert_eq!(flow.tools, vec!["pixel_read_canvas".to_string()]);
-        let history = s.messages.lock().unwrap().clone();
+        // 「画一只猫」命中知识库，分流节点先摆出来；真正要看的是残缺那一次
+        // apply_operations 没留下痕迹。
+        assert_eq!(
+            flow.tools,
+            vec!["pixel_plan".to_string(), "pixel_read_canvas".to_string()]
+        );
+        let history = s
+            .messages
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         let ids: Vec<String> = history
             .iter()
             .flat_map(|m| m.content.iter())
@@ -3308,10 +3920,22 @@ mod tests {
     /// 换一把钉死关思考的会话：用户要的是「别想，直接画」。
     fn session_with_thinking_off() -> AgentSession {
         let s = session();
-        let mut config = s.engine.lock().unwrap().config.clone();
+        let mut config = s
+            .engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .config
+            .clone();
         config.disable_thinking = Some(true);
-        let provider = s.engine.lock().unwrap().provider.clone();
-        *s.engine.lock().unwrap() = Engine { config, provider };
+        let provider = s
+            .engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .provider
+            .clone();
+        *s.engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Engine { config, provider };
         s
     }
 
@@ -3348,7 +3972,11 @@ mod tests {
         let flow = drain(rx);
 
         assert_eq!(
-            watched.seen.lock().unwrap().as_slice(),
+            watched
+                .seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_slice(),
             // 第一发照模型默认来，翻盘后那发带关思考；第三发是工具结果回灌后的
             // 追问，翻盘在本 turn 内一直生效。
             &[false, true, true],
@@ -3360,8 +3988,12 @@ mod tests {
             "用户该知道我们关了思考：{:?}",
             flow.statuses,
         );
-        // 「画一只猫」什么都没定出来，就不该摆分流节点：空节点只是噪声。
-        assert_eq!(flow.tools, vec!["pixel_run_shader".to_string()]);
+        // 「画一只猫」命中美术知识库，分流节点先摆出来；要看的仍然是那句 shader 调用
+        // 在关思考之后真的发了出来。
+        assert_eq!(
+            flow.tools,
+            vec!["pixel_plan".to_string(), "pixel_run_shader".to_string()]
+        );
         assert!(flow.completed, "{:?}", flow.error);
     }
 
@@ -3410,11 +4042,18 @@ mod tests {
             flow.statuses,
         );
         assert_eq!(
-            watched.seen.lock().unwrap().as_slice(),
+            watched
+                .seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_slice(),
             &[false, true, true],
             "翻盘后该带着关思考重发",
         );
-        assert_eq!(flow.tools, vec!["pixel_run_shader".to_string()]);
+        assert_eq!(
+            flow.tools,
+            vec!["pixel_plan".to_string(), "pixel_run_shader".to_string()]
+        );
         assert!(flow.completed, "{:?}", flow.error);
     }
 
@@ -3437,10 +4076,17 @@ mod tests {
         let flow = drain(rx);
 
         assert_eq!(
-            watched.seen.lock().unwrap().as_slice(),
+            watched
+                .seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_slice(),
             &[false],
             "照模型默认来，不许偷偷改开关：{:?}",
-            watched.seen.lock().unwrap(),
+            watched
+                .seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
         assert!(
             !flow
@@ -3498,7 +4144,7 @@ mod tests {
         let pushed = s
             .messages
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .filter(|m| matches!(m.role, super::super::models::Role::User))
             .count();
@@ -3599,7 +4245,10 @@ mod tests {
         let flow = drain(rx);
 
         assert!(flow.completed, "{:?}", flow.error);
-        let systems = watched.systems.lock().unwrap();
+        let systems = watched
+            .systems
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(
             systems.len() >= 2,
             "纠正之后还得再发一发才好接着画：{:?}",
@@ -3668,7 +4317,10 @@ mod tests {
         let flow = drain(rx);
 
         assert!(flow.completed, "{:?}", flow.error);
-        let systems = watched.systems.lock().unwrap();
+        let systems = watched
+            .systems
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(systems.len() >= 2, "{:?}", systems.len());
         assert_eq!(
             systems[0], systems[1],
@@ -3682,23 +4334,15 @@ mod tests {
         );
     }
 
-    /// 纯快照的一轮不发分流节点：没有参照图可定性，摆一张空卡片只是噪声。
+    /// 纯快照的一轮不发分流节点：没有参照图可定性，也没有知识命中，空卡片只是噪声。
     #[tokio::test]
     async fn a_snapshot_only_turn_stays_quiet() {
         let s = session();
-        // 这一轮是在要图，光说话会被催满两次才收摊，脚本得多备几条。
-        rewire(
-            &s,
-            vec![
-                done("看完了"),
-                done("还在看"),
-                done("真的看完了"),
-                done("收尾"),
-            ],
-        );
+        // 一句话看完就答，不是在要图：不用备催促的重放。
+        rewire(&s, vec![done("看完了")]);
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        s.run_turn("画一只猫".into(), vec![snapshot_image()], tx)
+        s.run_turn("帮我看看这张图".into(), vec![snapshot_image()], tx)
             .await;
         let flow = drain(rx);
 
@@ -3707,6 +4351,7 @@ mod tests {
             "快照不定性，别摆节点：{:?}",
             flow.tools
         );
+        assert_eq!(flow.text, "看完了");
     }
 
     /// 澄清提问是合法收尾：问完就该停下等用户回话，不能催。
@@ -3772,7 +4417,14 @@ mod tests {
             .await;
         let flow = drain(rx);
 
-        assert_eq!(watched.seen.lock().unwrap().as_slice(), &[true]);
+        assert_eq!(
+            watched
+                .seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_slice(),
+            &[true]
+        );
         assert!(
             !flow
                 .statuses
@@ -3808,7 +4460,11 @@ mod tests {
     #[tokio::test]
     async fn a_thinking_on_choice_is_never_overridden() {
         let s = session();
-        s.engine.lock().unwrap().config.disable_thinking = Some(false);
+        s.engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .config
+            .disable_thinking = Some(false);
         let watched = rewire_watch(
             &s,
             vec![
@@ -3823,7 +4479,11 @@ mod tests {
         let flow = drain(rx);
 
         assert_eq!(
-            watched.seen.lock().unwrap().as_slice(),
+            watched
+                .seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_slice(),
             &[false, false],
             "钉了「开着思考」就不该翻盘",
         );
@@ -4013,7 +4673,9 @@ mod tests {
     async fn interrupt_clears_a_pending_approval_so_the_wait_unblocks() {
         let s = session();
         let (tx, mut rx) = oneshot::channel();
-        *s.approval.lock().unwrap() = Some(ApprovalSlot {
+        *s.approval
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ApprovalSlot {
             call_id: "call-1".into(),
             tx,
         });
@@ -4030,7 +4692,9 @@ mod tests {
     async fn a_decision_reaches_the_waiting_turn() {
         let s = session();
         let (tx, rx) = oneshot::channel();
-        *s.approval.lock().unwrap() = Some(ApprovalSlot {
+        *s.approval
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ApprovalSlot {
             call_id: "call-1".into(),
             tx,
         });
@@ -4108,8 +4772,16 @@ mod tests {
             &self,
             req: &ChatRequest,
         ) -> Result<providers::EventStream, ProviderError> {
-            self.asked.lock().unwrap().push(req.max_tokens);
-            match self.outcomes.lock().unwrap().remove(0) {
+            self.asked
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(req.max_tokens);
+            match self
+                .outcomes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(0)
+            {
                 Ok(script) => Ok(Box::pin(futures_util::stream::iter(script))),
                 Err(e) => Err(e),
             }
@@ -4121,10 +4793,17 @@ mod tests {
             outcomes: Mutex::new(outcomes),
             asked: Mutex::new(Vec::new()),
         });
-        let mut config = s.engine.lock().unwrap().config.clone();
+        let mut config = s
+            .engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .config
+            .clone();
         config.model = "deepseek-v4.1-flash".into();
         config.max_tokens = None;
-        *s.engine.lock().unwrap() = Engine {
+        *s.engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Engine {
             config,
             provider: provider.clone(),
         };
@@ -4156,7 +4835,11 @@ mod tests {
         assert!(flow.error.is_none(), "{:?}", flow.error);
         assert!(flow.completed, "降级之后该正常跑完");
         assert_eq!(
-            provider.asked.lock().unwrap().as_slice(),
+            provider
+                .asked
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_slice(),
             &[65536, 8192, 8192],
             "被拒之后每一发都得带上新上限"
         );
@@ -4199,7 +4882,10 @@ mod tests {
             "续了一发发现没东西可补，就该收场"
         );
         assert_eq!(flow.text, "```lua\npset(1, 1, red)\n没什么要补充的");
-        let messages = s.messages.lock().unwrap();
+        let messages = s
+            .messages
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(messages.len(), 2, "追问指令该被撤掉");
         assert_eq!(messages[0].role, Role::User);
         assert_eq!(messages[1].role, Role::Assistant);

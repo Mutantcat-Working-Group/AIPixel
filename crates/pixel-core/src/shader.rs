@@ -303,6 +303,32 @@ impl Sandbox {
         globals.set("height", h)?;
         globals.set("canvas_w", w)?;
         globals.set("canvas_h", h)?;
+
+        // 尺寸适配助手：模型对着 64x64 调好的常量画 24x24 的画布，一小半坐标
+        // 直接越界、剩下的挤在左上角，这是「脚本和画布不适配」最常见的样子。
+        // 把「按比例」写成 canvas.scale(0.5) 比写四个魔数短，模型才会真的用。
+        let canvas: Table = globals.get("canvas")?;
+        canvas.set("width", w)?;
+        canvas.set("height", h)?;
+        canvas.set("cx", w as f64 / 2.0)?;
+        canvas.set("cy", h as f64 / 2.0)?;
+        canvas.set("min", w.min(h))?;
+        canvas.set("max", w.max(h))?;
+        // scale(k)：把「按 64px 设计」的常量折算到当前画布的长边比例。
+        let unit = w.max(h) as f64 / 64.0;
+        let scale_fn = self.lua.create_function(move |_lua, k: f64| Ok(k * unit))?;
+        canvas.set("scale", scale_fn)?;
+        // grid(cols, rows)：把画布切成 cols x rows 的格子，返回格子的整数宽高。
+        // 至少留一格：除零会产出 NaN 坐标，那比直接报错难查得多。
+        let (fw, fh) = (w as f64, h as f64);
+        let grid_fn = self
+            .lua
+            .create_function(move |_lua, (cols, rows): (f64, f64)| {
+                let cols = if cols >= 1.0 { cols } else { 1.0 };
+                let rows = if rows >= 1.0 { rows } else { 1.0 };
+                Ok(((fw / cols).floor().max(1.0), (fh / rows).floor().max(1.0)))
+            })?;
+        canvas.set("grid", grid_fn)?;
         Ok(())
     }
 

@@ -28,8 +28,10 @@ pub const DEFAULT_LIMIT: usize = 4;
 /// 检查预算：条目正文注入系统提示词的字符上限，防某一轮把上下文吃干。
 pub const DEFAULT_BUDGET: usize = 2600;
 
-/// 知识库。按「运动 -> 上色 -> 造型 -> 场景 -> 工具词」排，同组相邻，
+/// 知识库。按「技法 -> 素材 -> 生物 -> 器物 -> 场景 -> 工具词」排，同组相邻，
 /// 模型扫起来快；检索同分时按这个顺序兜底，结果稳定可复现。
+/// 生物和器物两组的条目是「怎么把一样东西画对」的要点：用户说「画只猫」时，
+/// 只给上色规则是不够的——模型知道怎么铺色阶，照样能把猫画成四条腿的毯子。
 pub const ENTRIES: &[KnowledgeEntry] = &[
     KnowledgeEntry {
         id: "walk-cycle",
@@ -238,6 +240,204 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         ],
         body: "A refinement request means add to what is already on the canvas, never redraw it from scratch. Read the current grid first, keep the approved silhouette and pose, and never open a refinement script with clear(). Add information inside the existing structures: sub-divide a ramp step with a dither band, add a rim light on the shadow side, deepen contact shadows, tighten the cluster rhythm. Keep the palette the same unless the user asks for more colors, and end by reading the canvas back - a script that changes nothing is skipped as a replay, so change the script or finish.",
     },
+    KnowledgeEntry {
+        id: "color-harmony",
+        title: "Hue relationships and color schemes",
+        keywords: &[
+            "配色方案",
+            "色调",
+            "色系",
+            "邻近色",
+            "对比色",
+            "冷暖",
+            "互补色",
+            "harmony",
+            "hue scheme",
+            "complementary",
+            "analogous",
+            "color scheme",
+        ],
+        body: "Pick the hue relationship before the first pixel: analogous (a 30-60 degree band) reads calm and unified, complementary (opposite hues) reads punchy but needs one side clearly dominant, and a triad reads busy unless two thirds of the canvas is neutral. Warm hues advance and cool hues recede, so spend the warm accent on the focal point and keep the cool hues in the background. One hue family should own more than half the canvas.",
+    },
+    KnowledgeEntry {
+        id: "canvas-scale",
+        title: "Matching the drawing to the canvas size",
+        keywords: &[
+            "画布大小",
+            "画布尺寸",
+            "画布多大",
+            "尺寸",
+            "分辨率",
+            "canvas size",
+            "resolution",
+            "grid size",
+            "how big",
+        ],
+        body: "Read width and height from the canvas context and derive EVERY coordinate from them - a script with literal constants tuned for 64px blasts off the edge of a 24px canvas. Under 16 pixels the silhouette is the whole picture and outlines hurt; at 32-64 spend it on two or three signature details plus a 3-step ramp; at 96 and above loops and math pay for themselves and you can carry 4-5 ramp steps per material. Use canvas.scale(k) for a 64px-design constant, canvas.grid(cols, rows) for a cell grid, and canvas.cx / canvas.cy instead of a hand-computed centre.",
+    },
+    KnowledgeEntry {
+        id: "quadruped",
+        title: "Quadrupeds: cats, dogs and four-legged bodies",
+        keywords: &[
+            "四足", "走兽", "兽", "猛兽", "猫", "狗", "兔", "狐狸", "狼", "熊", "鹿",
+            "quadruped", "beast", "four legs", "cat", "dog", "fox", "wolf", "bear", "deer",
+            "rabbit",
+        ],
+        body: "A side-view quadruped is ONE body mass plus four separate legs: two verticals under the shoulder, two under the hip, all four landing on the same ground line. The spine sags slightly in the middle, the chest sits higher than the belly, and the head rides level with the back rather than above it. Keep a visible gap between the near and far pair so the stance reads three-dimensional, shade the far legs a step darker, and give the tail its own curve with a phase lag.",
+    },
+    KnowledgeEntry {
+        id: "cat",
+        title: "Cats and small felines",
+        keywords: &[
+            "猫", "猫咪", "橘猫", "小猫", "狸花猫", "黑猫", "白猫",
+            "cat", "cats", "kitten", "kitty", "tabby", "feline",
+        ],
+        body: "A cat is round, never angular: the head is close to a circle with two triangles on top, the body an ellipse about three heads long, and the legs short enough that the belly nearly clears the ground. Ears take a darker inner triangle with a light rim on the lit side; the muzzle reads as a lighter wedge under the nose; whiskers are two or three single pixels, not lines. Stripes run along the body long axis in two or three tapering bands, and the paws take a lighter pad plus a dark contact shadow where they land.",
+    },
+    KnowledgeEntry {
+        id: "dog",
+        title: "Dogs and canines",
+        keywords: &["狗", "犬", "小狗", "柴犬", "dog", "dogs", "puppy", "hound", "canine"],
+        body: "Read a dog by the muzzle and the ear: a long squared snout, a nostril dot at its tip, and one ear either flopped past the jaw or perked as a triangle. The chest is deeper than a cat, the legs longer, and the tail a straight or gently curved taper whose tip swings to read a wag. Keep the neck line straight from shoulder to skull - a curved back reads as a wolf or a hound instead.",
+    },
+    KnowledgeEntry {
+        id: "horse",
+        title: "Horses and long-legged runners",
+        keywords: &["马", "马匹", "骏马", "horse", "horses", "pony", "stallion"],
+        body: "A horse is leg: the body mass is short and deep, the neck arches up to a small head, and the four legs are about two thirds of the total height with a joint at mid-length. Hooves read as a single dark block at the foot, the mane as a row of small triangles along the neck crest, and the tail as a long tapering mass from the rump. Below 32 pixels keep each leg to two straight lines with a knee bump and let the motion live in the hooves.",
+    },
+    KnowledgeEntry {
+        id: "bird",
+        title: "Birds and wings",
+        keywords: &[
+            "鸟", "飞鸟", "小鸟", "麻雀", "鹰", "乌鸦", "翅膀", "羽",
+            "bird", "birds", "wing", "wings", "feather", "eagle", "crow", "sparrow",
+        ],
+        body: "A bird in profile is a teardrop body with a triangular beak at the front and a fan of tail feathers at the back, and the eye sits high and forward close to the beak. A folded wing reads as two or three overlapping bands along the body with the longest feather on the bottom; a spread wing is a long tapering blade with a notched tip. Legs are two thin lines to a three-toed foot, and a perched bird is mostly silhouette plus one belly shade.",
+    },
+    KnowledgeEntry {
+        id: "fish",
+        title: "Fish and aquatic creatures",
+        keywords: &["鱼", "小鱼", "金鱼", "鲨鱼", "fish", "fishes", "shark", "goldfish", "whale"],
+        body: "A fish is a lens shape: pointed at the nose, widest just behind the head, pinched at the tail stalk. The tail fin is a triangle whose fluke follows the current, dorsal and ventral fins are small triangles on the top and bottom edge, and the gill line is a single curved stroke just behind the head. Scales read as two or three rows of a repeating arc near the back, not over the whole body; the belly is always a lighter step than the back.",
+    },
+    KnowledgeEntry {
+        id: "insect",
+        title: "Insects, spiders and small creatures",
+        keywords: &[
+            "虫", "昆虫", "蚂蚁", "蜜蜂", "蝴蝶", "蜘蛛", "蜗牛", "甲虫",
+            "insect", "bug", "ant", "bee", "butterfly", "spider", "snail", "beetle",
+        ],
+        body: "An insect is three clear masses - head, thorax, abdomen - joined by narrow segments, with six thin legs in two pairs and two antennae. Butterfly and moth wings are two large overlapping blades with a repeating spot or band pattern; a beetle is a single rounded shell split by one centre line. Keep the segments readable as separate clusters at even 12 pixels, and shade the shell with a hard specular since it is chitin, not fur.",
+    },
+    KnowledgeEntry {
+        id: "fur",
+        title: "Fur, feathers and hair masses",
+        keywords: &[
+            "毛发", "皮毛", "绒毛", "羽毛", "头发", "鬃毛",
+            "fur", "hair", "pelt", "fluff", "mane", "down",
+        ],
+        body: "Hair is a mass first and strands second: settle the whole silhouette of the mass in one fill, then break ONLY its outer edge with two or three pixel notches that follow the flow direction. Never draw individual strands - they read as noise and cost a loop per hair. Give the mass one ramp and let a rim light trace the lit side of its contour; let the shape cross the body outline to sell volume.",
+    },
+    KnowledgeEntry {
+        id: "blade",
+        title: "Blades, weapons and held tools",
+        keywords: &[
+            "剑", "刀", "匕首", "斧", "斧头", "锤", "长矛", "法杖", "武器", "兵器",
+            "sword", "blade", "dagger", "knife", "axe", "hammer", "spear", "staff", "weapon",
+        ],
+        body: "Draw a weapon along its long axis as three separate masses - blade, guard, grip - and never let them share one fill. The blade is a long tapering quad with a lighter centre line and a bright edge on the lit side; the guard and pommel are solid blocks that read as the weightiest part; the grip is darker than the blade and set on a diagonal so the hand finds it. Metal takes the sharpest contrast on the sheet: a thin specular highlight no wider than one pixel and a hard dark core shadow.",
+    },
+    KnowledgeEntry {
+        id: "armor",
+        title: "Shields, armor and heraldry",
+        keywords: &[
+            "盾", "盾牌", "铠甲", "盔甲", "头盔", "徽章", "纹章",
+            "shield", "armor", "armour", "helmet", "crest", "heraldry", "emblem",
+        ],
+        body: "A shield is one silhouette with a charged centre: draw the outline shape first, then place the emblem as a smaller mass inside it with clear margin. Metal armor reads as overlapping plates - each plate takes its own highlight and shadow along the same light - and a helmet is a dome plus a visor slot. Keep the rim one step lighter than the face so the silhouette survives against a busy background.",
+    },
+    KnowledgeEntry {
+        id: "potion",
+        title: "Potions, bottles and glass",
+        keywords: &[
+            "药水", "瓶子", "玻璃", "水晶", "水杯", "容器", "烧瓶",
+            "potion", "bottle", "flask", "glass", "vial", "jar", "goblet",
+        ],
+        body: "Glass reads by what it does to the shape behind it plus three marks: a narrow highlight on the lit side, a dark contact line along the liquid surface, and a bright rim where the body turns away. A potion is a neck, a shoulder and a body; the cork is a separate small mass. Liquid fills only the lower two thirds and takes its own brighter ramp, and a glow inside a bottle is built from the outside in with the core painted last.",
+    },
+    KnowledgeEntry {
+        id: "container",
+        title: "Chests, crates and boxes",
+        keywords: &[
+            "宝箱", "箱子", "木箱", "盒子", "背包", "袋子", "柜子",
+            "chest", "crate", "box", "barrel", "sack", "bag", "backpack",
+        ],
+        body: "A container is a lid plus a body plus a lock, three masses stacked on one vertical axis, and the lid overhangs the body slightly so the joint reads as a line. Wood takes its grain direction along the long axis and a soft core shadow; iron bands are horizontal wraps that catch one highlight. The lock or clasp is the focal point - it takes the brightest highlight and the darkest shadow in the whole object.",
+    },
+    KnowledgeEntry {
+        id: "treasure",
+        title: "Coins, gems and treasure",
+        keywords: &[
+            "金币", "银币", "宝石", "钻石", "珠宝", "宝藏", "钱",
+            "coin", "coins", "gem", "gems", "jewel", "diamond", "treasure", "gold",
+        ],
+        body: "A gem is a flat-topped shape with facets: a bright top facet, a mid tone on one side, and the darkest step on the opposite facet, all sharing one light. A coin is an ellipse with a raised rim and a symbol in the middle, and its value reads from the rim being one step brighter than the face. Give treasure one hot specular and let the darkest dark of the scene sit directly beside it so the sparkle has contrast to work against.",
+    },
+    KnowledgeEntry {
+        id: "small-object",
+        title: "Keys, torches, books and handheld props",
+        keywords: &[
+            "钥匙", "火把", "火炬", "书本", "书", "卷轴", "灯笼", "灯", "蜡烛", "号角",
+            "key", "torch", "Lantern", "book", "scroll", "candle", "lamp", "horn",
+        ],
+        body: "Small props read from one iconic silhouette plus one telling detail: a key is a ring plus a shaft plus one tooth, a book is a cover plus a visible page block on one edge, and a torch is a shaft plus a flame mass that is wider than the shaft. Fire and light sources are drawn from the outside in - tint the surrounding air two steps toward the flame colour first, then place the hot core last. Keep the prop centred and let its shadow fall in one direction.",
+    },
+    KnowledgeEntry {
+        id: "tree",
+        title: "Trees, trunks and wood",
+        keywords: &[
+            "树", "树木", "大树", "树干", "松树", "棕榈", "枯木",
+            "tree", "trees", "trunk", "pine", "palm", "log", "stump",
+        ],
+        body: "A tree is a trunk plus a canopy mass: the trunk tapers as it rises, splits into two or three limbs that reach INTO the canopy, and takes a vertical grain. The canopy is a cluster of overlapping lobes of two or three sizes with only the outer edge varied. Conifers are stacked triangles with a flat bottom; broadleaf trees are round masses with notches. Keep one light direction on every lobe and let branch tips read as 2x2 clusters.",
+    },
+    KnowledgeEntry {
+        id: "rock",
+        title: "Rocks, stones and crystals",
+        keywords: &[
+            "石头", "岩石", "石块", "鹅卵石", "水晶", "矿石", "悬崖", "冰块",
+            "rock", "rocks", "stone", "stones", "boulder", "crystal", "ore", "cliff", "ice",
+        ],
+        body: "A rock is a closed polygon with no parallel sides and no sharp 90 degree corners; shade it with two or three flat facets meeting at one bright top edge. Stones on the ground belong to one size family with the smaller ones clustered near the large one. Ice and crystal are the exception: they take a translucent mid tone with bright interior lines rather than a solid shadow, and their edges are lighter than the interior.",
+    },
+    KnowledgeEntry {
+        id: "building",
+        title: "Buildings, houses and architecture",
+        keywords: &[
+            "房子", "房屋", "建筑", "屋子", "塔楼", "城墙", "桥", "门", "窗",
+            "house", "building", "tower", "wall", "bridge", "door", "window", "hut",
+        ],
+        body: "Architecture reads from one-box massing plus roof plus openings: settle the volumes as flat filled shapes first, then cut windows and doors as darker rectangles that never touch the wall edge except at the bottom. Roofs are the lightest plane because they face the sky, and walls take their shade from the same light direction. Keep every vertical exactly vertical and every roofline on one shared angle - mixed angles break the whole structure.",
+    },
+    KnowledgeEntry {
+        id: "food",
+        title: "Food, fruit and consumables",
+        keywords: &[
+            "食物", "水果", "苹果", "面包", "肉", "蘑菇", "料理", "果实",
+            "food", "fruit", "apple", "bread", "meat", "mushroom", "berry", "pie",
+        ],
+        body: "Food reads from shape plus one appetite cue: a round fruit takes a bright specular and a small stem, bread reads as a domed top with two or three slash marks, and meat is a rounded mass with a bone tip. Mushrooms are a cap plus a stem with the cap the lighter plane. Keep food within one warm hue family and give it one soft shadow under it so it sits on the surface instead of floating.",
+    },
+    KnowledgeEntry {
+        id: "vehicle",
+        title: "Vehicles, ships and mounts",
+        keywords: &[
+            "车", "马车", "船", "飞船", "坦克", "载具", "飞行器",
+            "vehicle", "cart", "wagon", "ship", "boat", "tank", "airship", "mount",
+        ],
+        body: "A vehicle is a chassis mass plus a propulsion mass plus one or two wheels or a hull line, and its wheels and windows share one line across the body. A ship reads from the hull silhouette plus a mast or smokestack plus a flag; a cart reads from two wheels plus a bed plus a shaft. Shade the chassis in two long planes rather than per-part, and keep any text or emblem level with the body, not rotated.",
+    },
 ];
 
 /// 检出这一轮用得上的知识条目。明文命中加权：词越长越算数，
@@ -281,7 +481,21 @@ pub fn matched_ids(query: &str, limit: usize) -> Vec<String> {
 /// 摆进系统提示词的知识段。没有命中就返回空串——一段空标题比没有更糟。
 /// `budget` 是字符上限，够几条就几条，剩下的等命中词更明确的那一轮。
 pub fn prompt_section(query: &str, limit: usize, budget: usize) -> String {
-    let hits = retrieve(query, limit);
+    render(retrieve(query, limit), budget)
+}
+
+/// 按条目 id 列表摆知识段。分流在那里定的 id 列表就是真相——「这一轮改画」
+/// 会把 `refine` 硬塞进去，那句话就算一个字都没提到技法也照样带上路。
+/// 认不出的 id 直接跳过：宁可少一条，也不要在系统提示词里留一行空标题。
+pub fn section_from_ids(ids: &[String], budget: usize) -> String {
+    let hits: Vec<&'static KnowledgeEntry> = ids
+        .iter()
+        .filter_map(|id| ENTRIES.iter().find(|entry| entry.id == id))
+        .collect();
+    render(hits, budget)
+}
+
+fn render(hits: Vec<&'static KnowledgeEntry>, budget: usize) -> String {
     if hits.is_empty() {
         return String::new();
     }
@@ -352,6 +566,22 @@ mod tests {
         assert!(retrieve("把颜色再丰富一些", 4)
             .iter()
             .any(|e| e.id == "refine"));
+
+        // 用户嘴里除了技法，说得最多的是「画只猫」「来把剑」。生物和器物两组检索
+        // 不到，模型就只能凭训练语料里的平均认知画——猫画成四条腿的毯子、剑画成
+        // 一根发光的棍子，都是这么来的。
+        assert_eq!(retrieve("画一只坐着的小猫", 4)[0].id, "cat");
+        assert_eq!(retrieve("画一把长剑", 4)[0].id, "blade");
+        assert_eq!(retrieve("一棵松树", 4)[0].id, "tree");
+        let two = retrieve("宝箱和金币", 4);
+        let named: Vec<&str> = two.iter().map(|e| e.id).collect();
+        assert!(named.contains(&"container"), "{named:?}");
+        assert!(named.contains(&"treasure"), "{named:?}");
+        // 按 id 出段：分流里硬塞的 refine 也要能落到提示词里。
+        let forced = section_from_ids(&["refine".to_string(), "cat".to_string()], DEFAULT_BUDGET);
+        assert!(forced.contains("Refinement and realism"), "{forced}");
+        assert!(forced.contains("Cats and small felines"), "{forced}");
+        assert!(section_from_ids(&["no-such-entry".to_string()], DEFAULT_BUDGET).is_empty());
 
         let mut ids: Vec<&str> = ENTRIES.iter().map(|e| e.id).collect();
         ids.sort_unstable();

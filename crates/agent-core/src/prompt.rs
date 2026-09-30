@@ -20,16 +20,17 @@ LUA CANVAS API (for pixel_run_shader): pset(x,y,color), pget(x,y), line(x0,y0,x1
 STROKE IS NOT FILL: ellipse, circle and rect trace the outline only; the *fill names (ellipfill, circfill, rectfill) or the trailing true flag are the only way to get a solid body. A body stroked and then patched over with pset 2x2 blobs is the single most expensive mistake in this API - never draw a body that way.
 Every color helper takes and returns \"#RRGGBB\" strings, so they chain in any order: mix(hex('#e74c3c'), '#000000', 0.35), alpha(pal(1), 0.5), {a=hex('#FF004D')} inside a stamp legend.
 
-WORKFLOW - compose once, verify once:
-1. DRAW with pixel_run_shader whenever the request is about artwork. Write ONE Lua script per transaction and pick its body from two, by which one is actually cheaper rather than by habit:
+WORKFLOW - prompt craft first, compose once, verify once:
+1. CRAFT THE PROMPT LISTS with pixel_prompt before any drawing tool this turn: ONE positive list of everything the drawing must contain and ONE negative list of everything it must not, distilled from the user's words and the routing below. The lists then bind every drawing tool - a drawing that ignores either side of them is wrong. Call it exactly once per turn, before the first pixel_run_shader / pixel_generate_image / pixel_pixelize_image / pixel_tween_frames call, and never restate the lists to the user.
+2. DRAW with pixel_run_shader whenever the request is about artwork. Write ONE Lua script per transaction and pick its body from two, by which one is actually cheaper rather than by habit:
    PATHS AND MATH - loops, pal(i) (needs registered colors - see PALETTE FIRST), mix()/hsv()/alpha(), noise()/rand() - whenever the artwork has symmetry, repetition, a cycle, or a canvas at 48px and above. A loop's size does not grow with the canvas and the runtime places every pixel exactly.
    HAND-WRITTEN ROWS - stamp(rows, legend, 0, 0), where each row is one string of legend symbols and '.' is transparent - whenever the subject is a single small sprite at 47px and below and no loop would pay off. A 16x16 sprite is 16 short rows: shorter than any script that draws it, immune to coordinate arithmetic, and every pixel placed deliberately instead of approximated. Pad every row to the same length with '.'; a column past the last painted pixel still needs its dot so all rows share one width.
    The test is always the same one: if you were about to write a loop, use paths and math; if you were about to place a single shape from four constants, hand-written rows are both shorter and safer. Never hand-write pixels that a loop would produce in one line, and never build a loop for a shape you would use once.
    ANIMATION: for animated artwork pass animate=true and drive motion with phase (0..1) or time (seconds); the runtime renders every frame. Frame count is document structure: create/retime frames first with pixel_apply_operations (create_frame, set_frame_duration), then run the shader.
    IMAGE ATTACHMENTS: a user message may carry images, listed by an "Images attached to this message" caption. The entry captioned "canvas snapshot" is context only - never a request to redraw it, and the authoritative current canvas is always the text grid plus tool results. Every entry captioned "reference image" carries a "reference mode" and that mode is binding: mode "full" means the image IS the subject, so reproduce its subject, composition, proportions and palette on the canvas; mode "style" means the image is only a sample of palette, ramps, light direction, outline and dithering, and the subject, composition, pose and proportions MUST come from the user's words, never from the image. The full rules are restated next to each reference in the caption.
    TURN ROUTING is already the current state, decided from the user's words before this request went out - read it, do not restate it. Re-sending a routing the section above already carries is a wasted round. Call pixel_plan ONCE, before any drawing tool, ONLY where something there is actually wrong: the user's own words clearly contradict the mode written for a reference, or the deliverable type / locked art style above is clearly wrong for what the user asked. In every other case never call it, and draw instead.
-2. Use pixel_apply_operations only for document structure (create/rename/move/delete layers, frames, palette colors) and tiny precise patches (a few pixels via set_pixels, stamp_grid, draw_shape, bucket_fill, clear_region). Batch structural changes into ONE call. You may combine it with pixel_run_shader in the same turn.
-3. After edits, the tool result contains the updated active-layer grid. Check it once. Call pixel_read_canvas only when you need the canvas again later. If it reads right, finish the turn with a one-sentence summary - a script that already ran and changed nothing will be skipped as a replay, so change the script or finish, never re-run it.
+3. Use pixel_apply_operations only for document structure (create/rename/move/delete layers, frames, palette colors) and tiny precise patches (a few pixels via set_pixels, stamp_grid, draw_shape, bucket_fill, clear_region). Batch structural changes into ONE call. You may combine it with pixel_run_shader in the same turn.
+4. After edits, the tool result contains the updated active-layer grid. Check it once. Call pixel_read_canvas only when you need the canvas again later. If it reads right, finish the turn with a one-sentence summary - a script that already ran and changed nothing will be skipped as a replay, so change the script or finish, never re-run it.
 
 LARGE CANVASES: the default grid context is a limited top-left window; pixels outside it are UNKNOWN, never transparent. For larger canvases, first call pixel_read_canvas with {"overview": true} for a downsampled map, then read exact windows (up to 128x128) of the areas you are about to edit. If the request targets a region, read it first.
 
@@ -73,6 +74,19 @@ ENCODING RULES: colors are #RRGGBB or #RRGGBBAA (or a palette index). Transparen
 
 Preserve existing pixels unless the user asks to replace them. Reply in the user's language and keep the final summary short; never echo the canvas grid back to the user."##;
 
+/// 系统提示词的三段动态拼接内容：本轮分流、提示词清单、命中的知识条目。
+/// 三者都是「这一轮才可能有」的段落，收在一处调用点就不必每次都按位置
+/// 猜第三个字符串该放什么。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PromptExtras<'a> {
+    /// 意图分流段：讲这一轮要什么（新建 / 修改 / 瓦片地图 / 风格参照等）。
+    pub routing: &'a str,
+    /// 提示词清单段：正向 / 逆向提示词等生图前的固定步骤。
+    pub craft: &'a str,
+    /// 命中的知识条目：本轮检索到的美术术语解释。
+    pub craft_notes: &'a str,
+}
+
 /// 组装完整系统提示词：静态规则 + 本轮分流 + 两张对照表 + 命中的知识 + 实时
 /// canvas 上下文（RLE + 图例 + 目录 + 激活项）。
 ///
@@ -86,15 +100,20 @@ pub fn build_system_prompt(
     active_frame: &str,
     current_color: Option<&str>,
     max_chars: usize,
-    routing: &str,
-    craft_notes: &str,
+    extras: PromptExtras<'_>,
 ) -> String {
     let mut out = String::new();
     out.push_str(SYSTEM_CRAFT);
     // 本轮分流紧跟规则：它优先级高于通用规则，所以不能埋到上下文末尾。
-    if !routing.is_empty() {
+    if !extras.routing.is_empty() {
         out.push('\n');
-        out.push_str(routing);
+        out.push_str(extras.routing);
+    }
+    // 提示词清单段紧跟分流：分流讲「这一轮要什么」，清单讲「照着什么画」，
+    // 两段都必须在模型下笔之前出现，顺序不能颠倒。
+    if !extras.craft.is_empty() {
+        out.push('\n');
+        out.push_str(extras.craft);
     }
     // 两张对照表跟在规则后面：模型先学怎么画，再学「用户嘴里说的那个东西叫什么」。
     // 颜色名表决定用户说「蓝」时落到哪个 hex，术语表决定用户说「勾线」时去搜什么。
@@ -103,9 +122,9 @@ pub fn build_system_prompt(
     out.push('\n');
     out.push_str(&glossary::prompt_table());
     // 知识条目是这一轮才命中的那几条，空串表示这句用不上，不要留空标题。
-    if !craft_notes.is_empty() {
+    if !extras.craft_notes.is_empty() {
         out.push('\n');
-        out.push_str(craft_notes);
+        out.push_str(extras.craft_notes);
     }
     out.push_str("\n\nCurrent canvas context:\n");
     out.push_str(&context::system_context(
@@ -158,8 +177,11 @@ mod tests {
             "F0",
             Some("#f2a03d"),
             4000,
-            "TURN ROUTING: the user asked for a tile map, style 16-bit platformer",
-            "CRAFT NOTES - color ramp: build 3-5 steps per material",
+            PromptExtras {
+                routing: "TURN ROUTING: the user asked for a tile map, style 16-bit platformer",
+                craft_notes: "CRAFT NOTES - color ramp: build 3-5 steps per material",
+                craft: "PROMPT CRAFT - mandatory before any drawing tool this turn",
+            },
         );
 
         // 静态规则：turn order、Lua API、像素工艺。
@@ -178,6 +200,7 @@ mod tests {
         assert!(prompt.contains("COLOR NAMES"));
         assert!(prompt.contains("ART VOCABULARY"));
         // 实时画布与当前画笔色。
+        assert!(prompt.contains("PROMPT CRAFT"), "缺提示词流程段");
         assert!(prompt.contains("Current canvas context:"));
         assert!(prompt.contains("#f2a03d"), "当前画笔色要告诉模型");
     }
@@ -185,7 +208,7 @@ mod tests {
     #[test]
     fn the_draw_two_body_rules_are_both_stated() {
         let doc = pixel_core::Document::new("t", 16, 16).unwrap();
-        let prompt = build_system_prompt(&doc, "L0", "F0", None, 4000, "", "");
+        let prompt = build_system_prompt(&doc, "L0", "F0", None, 4000, PromptExtras::default());
         // 两条腿都必须在场：一条都不许被删成「一律」。
         assert!(prompt.contains("PATHS AND MATH"), "缺路径/数学路径规则");
         assert!(prompt.contains("HAND-WRITTEN ROWS"), "缺手写行路径规则");
@@ -213,7 +236,7 @@ mod tests {
     #[test]
     fn the_finishing_rules_are_all_present() {
         let doc = pixel_core::Document::new("t", 32, 32).unwrap();
-        let prompt = build_system_prompt(&doc, "L0", "F0", None, 4000, "", "");
+        let prompt = build_system_prompt(&doc, "L0", "F0", None, 4000, PromptExtras::default());
         for rule in [
             "PIXELS ARE PLACED, NOT APPROXIMATED",
             // 肢体/尾巴的前后关系：画错顺序细节就被身体盖掉。
