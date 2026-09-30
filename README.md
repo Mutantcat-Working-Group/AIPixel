@@ -210,13 +210,6 @@ python3 example/img2aip_converter.py             # refer_img/ -> refer_aip/
 - 配方随项目走（已落地）：`.aipr` 纯文本 JSON，单条或整本导出，手上这份没存过也能直接分享；导入时同名不覆盖而是加序号，坏条目单独跳过并在回执里逐条交代
 - 下一步：批量脚本化入口（CLI），让 recipe 能在 CI 里复跑
 
-### 参照与致谢
-
-- `424431185/pixel-asset-master-skills`：像素资产生成的工作流切分与提示词工程思路
-- `Fantety/PixTXT`：`.aip` 相邻文本像素格式的图层 / 帧文档模型设计
-
-两份都是参照而非照抄：格式、主循环与工具名都按我们自己的约束重做，`.aip` 与七个内置工具的边界来自这份仓库自己的取舍。
-
 ### 开源协议
 
 - 著作权归 **异猫工作群（Mutantcat Working Group · mutantcat.org）** 所有，Copyright (C) 2026

@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! .aip 格式：v1 遗留纯文本矩阵 + v2 增强文本格式。
 //!
-//! v2 参照 PixTXT 的单字符调色板符号 + RLE 思路并做了针对性改进：
-//! - 图层 / 帧 / cel 是一等公民（PixTXT 需要 @image id + meta 变通）
+//! v2 用单字符调色板符号配 RLE 顺手好读，取舍全按本项目自己的约束来：
+//! - 图层 / 帧 / cel 直接是一等公民，不必靠额外 id 段变通
 //! - revision、图层/帧 id 精确回读，乐观锁跨重启连续
 //! - 预留 @anim 元信息（fps/loop），命名带引号可含空格，支持 # 注释
 //! - 符号分配与文档 RLE 上下文完全一致（同一套 rle::SYMBOLS）

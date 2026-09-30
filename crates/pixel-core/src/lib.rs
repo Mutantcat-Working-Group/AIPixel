@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Mutantcat Working Group
 // SPDX-License-Identifier: GPL-3.0-only
 //! pixel-core: 像素文档模型、类型化操作、RLE 上下文编码、
-//! .aip v2 文本格式（参照 PixTXT 设计，图层/帧一等公民）、Lua 沙箱着色器，
+//! .aip v2 文本格式（图层/帧一等公民）、Lua 沙箱着色器，
 //! 以及 PNG 序列 / spritesheet / GIF 导出。
 //!
 //! 设计约束（按本项目自己的取舍）：
