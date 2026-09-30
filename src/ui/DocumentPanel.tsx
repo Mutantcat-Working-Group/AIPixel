@@ -651,13 +651,13 @@ const [hexDraft, setHexDraft] = useState("");
     openContextMenu(event, [
       {
         key: "rename",
-        label: t("doc.layer_rename"),
+        label: t("menu.layer_rename"),
         icon: <Pencil size={13} />,
         onSelect: () => beginRename(layerId, layer.name),
       },
       {
         key: "scope",
-        label: t("layer.scope"),
+        label: t("menu.layer_scope"),
         icon: <Palette size={13} />,
         onSelect: () => {
           setScopeLayerId(layerId);
@@ -666,27 +666,27 @@ const [hexDraft, setHexDraft] = useState("");
       },
       {
         key: "visible",
-        label: layer.visible ? t("layer.hide") : t("layer.show"),
+        label: layer.visible ? t("menu.layer_hide") : t("menu.layer_show"),
         icon: layer.visible ? <EyeOff size={13} /> : <Eye size={13} />,
         onSelect: () => void useStore.getState().setLayerVisible(layerId, !layer.visible),
       },
       {
         key: "up",
-        label: t("layer.up"),
+        label: t("menu.layer_up"),
         icon: <ArrowUp size={13} />,
         disabled: index >= layers.length - 1,
         onSelect: () => move(1),
       },
       {
         key: "down",
-        label: t("layer.down"),
+        label: t("menu.layer_down"),
         icon: <ArrowDown size={13} />,
         disabled: index <= 0,
         onSelect: () => move(-1),
       },
       {
         key: "delete",
-        label: t("layer.delete"),
+        label: t("menu.layer_delete"),
         icon: <Trash2 size={13} />,
         danger: true,
         disabled: layers.length <= 1,
