@@ -45,6 +45,5 @@ python3 img2x_converter.py 输入.png -s 32x32 -m letterbox -o resized
 
 - `.aip` 的早期约定（明文文本、索引 0 恒为透明）从这里来，桌面端沿用并长成了 v2：图层与帧是一等结构
 - 桌面端工作台的「量化」就是 `img2aip_converter.py` 那条思路的 Rust 实现，落在 `crates/pixel-core`
-- 除此之外没有代码共用：桌面端不 import 这里的脚本，这里也不读桌面端的产物
 
-License: MIT
+本目录随 AIPixel 一同以 GPL-3.0 分发，`pyproject.toml` 里的元数据同样标成 GPL-3.0。

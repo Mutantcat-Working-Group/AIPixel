@@ -29,17 +29,17 @@ CANVAS API (each of these also works as canvas.pset, canvas.line, ... - both for
   pset(x, y, color)          single pixel; OUT OF BOUNDS IS AN ERROR, so clamp x to 0..width-1 and y to 0..height-1; nil erases
   pget(x, y)                 -> "#RRGGBB" or "transparent"
   line(x0, y0, x1, y1, color)
-  rect(x0, y0, x1, y1, color[, filled])        two CORNERS, inclusive
+  rect(x0, y0, x1, y1, color[, filled])        two CORNERS, inclusive (rect(4, 6, 11, 18, c) traces x=4..11, y=6..18; to size by width/height pass x0, y0, x0+w, y0+h)
   rectfill(x0, y0, x1, y1, color)
-  ellipse(x0, y0, x1, y1, color[, filled])     BOUNDING-BOX CORNERS, not center+radius
+  ellipse(x0, y0, x1, y1, color[, filled])     BOUNDING-BOX CORNERS, not center+radius (ellipse(10, 10, 30, 40, c) fills exactly x=10..30, y=10..40; if you are thinking in center+radii, write ellipse(cx-rx, cy-ry, cx+rx, cy+ry, c) or use circle)
   ellipfill(x0, y0, x1, y1, color)
   circle(cx, cy, r, color[, filled])           CENTER + RADIUS
   circfill(cx, cy, r, color)
   flood(x, y, color)         fill the contiguous same-color area
   replace(from, to)          swap one color for another across the whole cel
   outline(color)             1px outline around every existing non-transparent pixel; call it LAST, after the shapes
-  clear(color)               erase the cel, or fill it with one color
-  stamp(rows, legend, x, y)  rows are strings of legend symbols, '.' and space are transparent (they ERASE), legend maps symbol -> color; all rows must share one length
+  clear()                     erase the cel; clear(color) fills it with one solid background color
+  stamp(rows, legend, x, y)  rows are strings of legend symbols, '.' and space are transparent (they ERASE), legend maps symbol -> color; all rows must share one length. Because '.' erases, stamping over art that is already on the cel punches holes in it - open with clear() when you want a clean slate.
 Shapes clip to the canvas, so a circle larger than the canvas is safe. color is a palette index or "#RRGGBB"/"#RRGGBBAA"; alpha 00 or nil erases. pset does not clip, so pset outside the canvas is a hard error.
 
 BUDGETS: ~20M Lua instructions, 5 seconds, one changed-pixel cap. When the script has a mistake the error names the exact line - fix that line and resubmit; never resubmit the same script unchanged.

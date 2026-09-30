@@ -322,6 +322,9 @@ impl AppState {
             existing.max_tokens = entry.max_tokens;
             existing.temperature = entry.temperature;
             existing.api_key = entry.api_key.clone();
+            // 「关不关思考」也得跟着保存。漏了它，用户在弹窗里关掉思考，
+            // 之后只改一个 Base URL 再存，这一项就悄悄回到了「不干预」。
+            existing.disable_thinking = entry.disable_thinking;
             // 能力必须跟着保存：漏了它，用户在弹窗里勾的勾选一关一开就丢了，
             // 而工作流可用性完全由它决定。
             existing.capabilities = entry.capabilities;
@@ -578,5 +581,31 @@ mod tests {
             "m2",
             "被删的定义不能再挂在会话上"
         );
+    }
+
+    /// 「关不关思考」要跟着改：用户在弹窗里关掉它，之后只动一个 Base URL
+    /// 再存盘，这一项不该悄悄回到「不干预」——那正是无限思考的病根。
+    #[test]
+    fn editing_other_fields_keeps_the_thinking_choice() {
+        let state = AppState::default();
+        state.upsert_model(model_def("m1", "一号"), None);
+
+        let mut off = model_def("m1", "一号");
+        off.disable_thinking = Some(true);
+        state.upsert_model(off, Some("test-key".into()));
+        assert_eq!(state.model_config("m1").unwrap().disable_thinking, Some(true));
+
+        // 之后只改地址再存一次：思考的意愿不能丢。
+        let mut moved = model_def("m1", "一号");
+        moved.disable_thinking = Some(true);
+        moved.base_url = "https://example.invalid/v2".into();
+        state.upsert_model(moved, Some("test-key".into()));
+        let live = state.model_config("m1").unwrap();
+        assert_eq!(
+            live.disable_thinking,
+            Some(true),
+            "别处一改就不该把思考的意愿冲掉"
+        );
+        assert_eq!(live.base_url, "https://example.invalid/v2");
     }
 }

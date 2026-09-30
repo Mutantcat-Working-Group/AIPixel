@@ -396,12 +396,35 @@ impl Sandbox {
             })?;
         globals.set("mix", mix_fn)?;
 
-        // hsv(h, s, v) -> "#hex"（h 取 0..360）
+        // hsv(h, s, v[, a]) -> "#hex"（h 取 0..360，a 接受 0..1 或 0..255）
+        // 提示词里那个 `[, a]` 曾经只是装饰：mlua 的元组解构对多出来的实参
+        // 只字不提地丢掉，模型写 hsv(30, .8, .9, .5) 拿回一个完全不透明的
+        // 颜色，不报错也不提示，半透明一整层就这么凭空消失。
         let hsv_fn = self
             .lua
-            .create_function(|lua, (h, s, v): (f64, f64, f64)| {
-                let color = hsv_to_rgb(h / 360.0, s, v);
-                Ok(Value::String(lua.create_string(color.to_hex().as_bytes())?))
+            .create_function(|lua, args: mlua::MultiValue| {
+                let mut it = args.into_iter();
+                let (h, s, v) = (num_arg(it.next())?, num_arg(it.next())?, num_arg(it.next())?);
+                // 给错类型要喊出来，别像元组解构那样一声不响地丢掉。
+                let a = match it.next().unwrap_or(Value::Nil) {
+                    Value::Nil => None,
+                    other => Some(num_arg(Some(other))?),
+                };
+                let mut color = hsv_to_rgb(h / 360.0, s, v);
+                if let Some(a) = a {
+                    color.a = if a <= 1.0 {
+                        (a * 255.0).round().clamp(0.0, 255.0) as u8
+                    } else {
+                        a.round().clamp(0.0, 255.0) as u8
+                    };
+                }
+                // 带 alpha 时必须走 rgba 表示，否则 to_hex 会把那 8 个位丢掉。
+                let text = if color.a == 255 {
+                    color.to_hex()
+                } else {
+                    color.to_rgba_hex()
+                };
+                Ok(Value::String(lua.create_string(text.as_bytes())?))
             })?;
         globals.set("hsv", hsv_fn)?;
 
@@ -712,9 +735,14 @@ impl Sandbox {
         })?;
         globals.set("outline", outline)?;
 
-        let clear = self.canvas_fn(|doc, layer, frame, _args: mlua::MultiValue| {
+        let clear = self.canvas_fn(|doc, layer, frame, args: mlua::MultiValue| {
+            // clear() / clear(nil) 擦掉整格；clear('#1b1f2e') 整格填底色。
+            // 提示词里写着「erase the cel, or fill it with one color」，
+            // 早先这里把参数整个丢掉，模型写 clear(夜色) 只换来一张空白画布。
+            let color = args.into_iter().next().unwrap_or(Value::Nil);
+            let idx = resolve_color(doc, color)?;
             let cel = cel_mut(doc, layer, frame)?;
-            cel.indices.iter_mut().for_each(|i| *i = 0);
+            cel.indices.iter_mut().for_each(|i| *i = idx);
             Ok(())
         })?;
         globals.set("clear", clear)?;
@@ -964,9 +992,13 @@ pub fn resolve_color_for_layer(doc: &mut Document, layer: &str, value: Value) ->
     match value {
         Value::Integer(i) => {
             if i < 0 || i as usize >= doc.palette.len() {
+                // 新文档的 palette 可能是空的：len()-1 会下溢，拿 usize::MAX 去
+                // 报「范围 (0..18446744073709551615)」，读的人只会更糊涂。
+                let top = doc.palette.len().saturating_sub(1);
                 return Err(mlua::Error::RuntimeError(format!(
-                    "color index {i} outside palette (0..{})",
-                    doc.palette.len() - 1
+                    "color index {i} outside palette (0..{top}) - add colors first with \
+                     pixel_apply_operations add_palette_colors, or pass a \"#RRGGBB\" string, \
+                     which every drawing call also takes"
                 )));
             }
             Ok(i as u16)
@@ -1151,5 +1183,85 @@ mod tests {
             text.contains("this_function_does_not_exist"),
             "原文要留住：{text}"
         );
+    }
+
+    /// 提示词写着 `hsv(h, s, v[, a])`。第四个参数曾经被 mlua 的元组解构静默
+    /// 丢掉：半透明一整层凭空变成实色，不报错、不提示，模型甚至不知道自己少
+    /// 画了一层。补上回归，别让这类「多给一个实参就哑掉」再发生。
+    #[test]
+    fn hsv_alpha_channel_actually_lands() {
+        let mut doc = blank();
+        let (layer, frame) = (doc.layers[0].id.clone(), doc.frames[0].id.clone());
+        run_shader(
+            &mut doc,
+            &layer,
+            "canvas.pset(1, 1, hsv(200, 0.9, 0.3, 0.5)) canvas.pset(2, 2, hsv(200, 0.9, 0.3))",
+            false,
+            &ShaderBudget::default(),
+        )
+        .expect("hsv 四参不该报错");
+        let cel = doc.cel(&layer, &frame).unwrap();
+        let half = doc.color_of(cel.get(doc.width, 1, 1).unwrap()).unwrap();
+        let full = doc.color_of(cel.get(doc.width, 2, 2).unwrap()).unwrap();
+        assert_eq!(half.a, 128, "0.5 的 alpha 要落成 128：{half:?}");
+        assert_eq!(full.a, 255, "不传 alpha 仍是实色：{full:?}");
+        // 带 alpha 的颜色必须走 rgba 表示，rgb 表示会把那 8 位丢掉。
+        assert_eq!((half.r, half.g, half.b), (full.r, full.g, full.b), "同一色相只有 alpha 不同");
+    }
+
+    /// 提示词写着「erase the cel, or fill it with one color」。
+    /// 底色填充曾经被整个丢掉，模型每次铺夜色都只拿回一张空白画布。
+    #[test]
+    fn clear_with_a_color_fills_the_cel_instead_of_erasing() {
+        let mut doc = blank();
+        let (layer, frame) = (doc.layers[0].id.clone(), doc.frames[0].id.clone());
+        run_shader(
+            &mut doc,
+            &layer,
+            "clear('#0B1026') canvas.pset(0, 0, '#FF004D')",
+            false,
+            &ShaderBudget::default(),
+        )
+        .expect("底色填充不该报错");
+        let cel = doc.cel(&layer, &frame).unwrap();
+        let bg = doc.palette_index_of(Rgba::rgb(0x0b, 0x10, 0x26)).unwrap();
+        assert_eq!(cel.get(doc.width, 15, 15).unwrap(), bg, "整格都该是底色");
+        assert_ne!(cel.get(doc.width, 0, 0).unwrap(), bg, "pset 之后左上角是前景");
+    }
+
+    /// clear() 不带参数仍是擦除：宽度铺满色、下一句再 erase 要能回头。
+    #[test]
+    fn clear_without_a_color_still_erases() {
+        let mut doc = blank();
+        let (layer, frame) = (doc.layers[0].id.clone(), doc.frames[0].id.clone());
+        run_shader(
+            &mut doc,
+            &layer,
+            "clear('#FF004D') canvas.pset(1, 1, '#FF004D') canvas.clear(nil) canvas.pset(2, 2, '#FF004D')",
+            false,
+            &ShaderBudget::default(),
+        )
+        .expect("clear(nil) 是擦除，不该报错");
+        let cel = doc.cel(&layer, &frame).unwrap();
+        assert_eq!(cel.get(doc.width, 1, 1).unwrap(), 0, "擦除要真擦掉");
+        assert_ne!(cel.get(doc.width, 2, 2).unwrap(), 0, "擦除后还能继续画");
+        assert_eq!(cel.get(doc.width, 0, 0).unwrap(), 0);
+    }
+
+    /// 报错必须带脚本行号：提示词承诺「the error names the exact line」，
+    /// 16 行的脚本在第 16 行炸，模型得知道改哪一行。
+    #[test]
+    fn script_errors_carry_the_line_number() {
+        let mut doc = blank();
+        let layer = doc.layers[0].id.clone();
+        let mut script = String::new();
+        for i in 0..15 {
+            script.push_str(&format!("local v{i} = {i}\n"));
+        }
+        script.push_str("bad_literal(9999)\n");
+        let err = run_shader(&mut doc, &layer, &script, false, &ShaderBudget::default())
+            .expect_err("第 16 行调用不存在的函数必须报错");
+        let text = err.to_string();
+        assert!(text.contains(":16"), "行号没进报错：{text}");
     }
 }
