@@ -407,6 +407,11 @@ export function paintStroke(id: string, stroke: StrokeRequest): Promise<number> 
   return invoke<number>("editor_paint_stroke", { id, stroke });
 }
 
+/** 改画布宽高：左上角锚定，原有像素跟着搬家。返回新 revision。 */
+export function resizeCanvas(id: string, width: number, height: number): Promise<number> {
+  return invoke<number>("editor_resize_canvas", { id, width, height });
+}
+
 /** 油漆桶：color 为 null 表示把整片区域浸回透明。返回新 revision。 */
 export function fillCells(
   id: string,

@@ -154,6 +154,12 @@ export const zh = {
   "doc.aip_tooltip": "查看本文档的 .aip v2 文本",
   "doc.show_aip": "显示 .aip",
   "doc.hide_aip": "隐藏 .aip",
+  "doc.size_edit": "改画布宽高",
+  "doc.resize_title": "画布宽高",
+  "doc.resize_ok": "应用",
+  "doc.resize_cancel": "取消",
+  "doc.resize_hint":
+    "从左上角锚定：原有像素尽量留住，放大时右下角补透明，缩小时右下角会被裁掉。",
 
   // ---------- 配色范围 ----------
   // 调色板就是「这一层允许用哪些颜色」的边界：先定范围，再在范围里挑色落笔。
@@ -548,6 +554,7 @@ export const zh = {
   "store.fill_failed": "填充失败：{error}",
   "store.edit_failed": "编辑失败：{error}",
   "store.undo_failed": "撤销失败：{error}",
+  "store.resize_failed": "改画布宽高失败：{error}",
   "store.set_active_failed": "同步选中项失败：{error}",
   "store.set_mcp_enabled_failed": "切换 MCP 总开关失败：{error}",
   "store.rename_session_failed": "会话改名失败：{error}",
@@ -848,6 +855,12 @@ export const en: Record<TKey, string> = {
   "doc.aip_tooltip": "Inspect the .aip v2 text for this document",
   "doc.show_aip": "Show .aip",
   "doc.hide_aip": "Hide .aip",
+  "doc.size_edit": "Canvas size",
+  "doc.resize_title": "Canvas size",
+  "doc.resize_ok": "Apply",
+  "doc.resize_cancel": "Cancel",
+  "doc.resize_hint":
+    "Anchored at the top-left corner: existing pixels are kept where they fit, growing adds transparent cells at the bottom right, and shrinking crops from the bottom right.",
 
   // ---------- Palette scope ----------
   "palette.title": "Palette scope",
@@ -1247,6 +1260,7 @@ export const en: Record<TKey, string> = {
   "store.fill_failed": "the fill failed: {error}",
   "store.edit_failed": "the edit failed: {error}",
   "store.undo_failed": "undo failed: {error}",
+  "store.resize_failed": "could not resize the canvas: {error}",
   "store.set_active_failed": "could not sync the selection: {error}",
   "store.set_mcp_enabled_failed": "could not toggle the MCP master switch: {error}",
   "store.rename_session_failed": "could not rename the session: {error}",

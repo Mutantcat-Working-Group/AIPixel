@@ -72,6 +72,7 @@ pub fn run() {
             editor::editor_apply_ops,
             editor::editor_fill,
             editor::editor_paint_stroke,
+            editor::editor_resize_canvas,
             batch::batch_scan,
             batch::batch_run,
             batch::batch_recipe_delete,

@@ -171,6 +171,39 @@ pub fn editor_fill(
     Ok(revision)
 }
 
+/// 改画布大小（纯函数，可单测）：左上角锚定，装得下的像素原样保留。
+/// 改完自查一遍限额——上限以内的宽高也可能把格子总量顶到很高，check_limits 是最后一道关。
+pub fn apply_resize(doc: &mut Document, width: u32, height: u32) -> Result<u64, String> {
+    doc.resize(width, height).map_err(|e| e.to_string())?;
+    doc.check_limits().map_err(|e| e.to_string())?;
+    doc.bump();
+    Ok(doc.revision)
+}
+
+/// 改画布宽高并广播新文档。左上角 WxH 点开的那个弹窗落到这儿。
+#[tauri::command]
+pub fn editor_resize_canvas(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    width: u32,
+    height: u32,
+) -> Result<u64, String> {
+    let session = state.session(&id)?;
+    let before = session.document();
+    let (old_width, old_height) = (before.width, before.height);
+    if old_width == width && old_height == height {
+        // 尺寸没动就别白刷一次 revision：前端靠 revision 判断要不要重画。
+        return Ok(before.revision);
+    }
+    let revision = session.with_document_mut(|doc| apply_resize(doc, width, height))?;
+    session.note_edit(format!(
+        "canvas resized from {old_width}x{old_height} to {width}x{height}"
+    ));
+    emit_document(&app, &session);
+    Ok(revision)
+}
+
 /// 结构与帧操作（含 duplicate_frame）直接复用 pixel-core 的 ops：
 /// 同一套原子事务，模型和编辑器走的是一条代码路径。
 #[tauri::command]
@@ -461,5 +494,52 @@ mod tests {
         let painted = d.cels["L0"]["F0"].clone();
         apply_fill(&mut d, "L0", "F0", 0, 0, Some("#FF004D")).expect("same-color fill applies");
         assert_eq!(d.cels["L0"]["F0"].indices, painted.indices);
+    }
+
+    /// 放大画布：原像素留住、版本号往前动一格，前端才会跟着重画。
+    #[test]
+    fn resizing_the_canvas_keeps_existing_pixels_and_bumps_the_revision() {
+        let mut d = doc();
+        apply_stroke(
+            &mut d,
+            &StrokeRequest {
+                layer: "L0".into(),
+                frame: "F0".into(),
+                cells: vec![cell(1, 1)],
+                color: Some("#FF004D".into()),
+            },
+        )
+        .expect("stroke applies");
+        let before = d.revision;
+
+        let revision = apply_resize(&mut d, 12, 12).expect("grow applies");
+
+        assert_eq!(revision, before + 1);
+        assert_eq!((d.width, d.height), (12, 12));
+        assert_eq!(d.cels["L0"]["F0"].indices.len(), 144);
+        // 改动之后宽度是 12，那一笔落在 y=1、x=1，所以下标是 stride + 1。
+        let stride = d.width as usize;
+        assert_eq!(
+            d.cels["L0"]["F0"].indices[stride + 1],
+            1,
+            "画过的格子还在原位"
+        );
+    }
+
+    #[test]
+    fn resizing_to_the_same_dimensions_still_delivers_a_revision() {
+        let mut d = doc();
+        let before = d.revision;
+        // 前端点了确认但尺寸没动：也照常回一个新 revision，界面不会卡在旧读数上。
+        let revision = apply_resize(&mut d, 8, 8).expect("same size applies");
+        assert_eq!(revision, before + 1);
+    }
+
+    #[test]
+    fn resizing_outside_the_limits_is_refused_wholesale() {
+        let mut d = doc();
+        let before = (d.width, d.height);
+        assert!(apply_resize(&mut d, 0, 8).is_err(), "0 不是合法宽高");
+        assert_eq!((d.width, d.height), before, "被拒的尺寸不许改动文档");
     }
 }

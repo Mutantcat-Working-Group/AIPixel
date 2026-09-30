@@ -346,6 +346,8 @@ export interface StoreActions {
   moveLayer: (delta: number) => Promise<void>;
   /** 回退一步编辑器改动：撤销栈见底就什么都不做。 */
   undoEdit: () => Promise<void>;
+  /** 改画布宽高：左上角锚定，原有像素留住，新区域透明。 */
+  resizeCanvas: (width: number, height: number) => Promise<void>;
   /** 换批量种类。旧扫描立马作废：素材类型和语义都变了，留着只会误导。 */
   setBatchKind: (kind: BatchKind) => void;
   /** 改 recipe。换了输入目录同样作废旧扫描。 */
@@ -1863,6 +1865,26 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         await getState().refreshPng();
       } catch (error) {
         flagKey("store.undo_failed", { error: String(error) });
+      }
+    },
+
+    resizeCanvas: async (width, height) => {
+      const id = getState().activeId;
+      const nextWidth = Math.round(width);
+      const nextHeight = Math.round(height);
+      if (!id || nextWidth < 1 || nextHeight < 1) return;
+      const current = getState().document;
+      // 尺寸没动就别惊动后端：Rust 那边也会短路，这里挡掉只是省一趟往返。
+      if (current && current.width === nextWidth && current.height === nextHeight) return;
+      try {
+        // Rust 收到就广播 document_updated，画布与预览都由那条事件接走；
+        // 这里再主动拉一次文档，是防止事件被别的路径抢先时落下。
+        await bridge.resizeCanvas(id, nextWidth, nextHeight);
+        await loadDocument(id);
+        // 侧栏那一行画着「宽x高」：改完不重拉，那一行会一直停在旧尺寸上。
+        await getState().refreshSessions();
+      } catch (error) {
+        flagKey("store.resize_failed", { error: String(error) });
       }
     },
 

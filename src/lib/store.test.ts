@@ -1178,4 +1178,57 @@ describe("新建会话与模型定义改动", () => {
     expect(invokeCalls.some((call) => call.cmd === "session_list")).toBe(true);
     expect(useStore.getState().sessions.map((s) => s.model_label)).toEqual(["二号模型"]);
   });
+
+  it("左上角 WxH 改尺寸：把新宽高交给 Rust，再拉回一份文档", async () => {
+    useStore.setState({
+      activeId: "doc-01",
+      document: blankDocument(64, 64),
+      notice: null,
+    });
+    invokeResults["editor_resize_canvas"] = 7;
+    invokeResults["agent_document"] = {
+      id: "doc-01",
+      revision: 7,
+      document: blankDocument(96, 48),
+    };
+    invokeResults["session_list"] = [{ ...sessionOf(96, 48), id: "doc-01" }];
+    invokeCalls.length = 0;
+
+    await useStore.getState().resizeCanvas(96, 48);
+
+    const resize = invokeCalls.find((call) => call.cmd === "editor_resize_canvas");
+    expect(resize?.args).toMatchObject({ id: "doc-01", width: 96, height: 48 });
+    expect(useStore.getState().document?.width).toBe(96);
+    expect(useStore.getState().document?.height).toBe(48);
+    expect(useStore.getState().sessions[0]?.width).toBe(96);
+  });
+
+  it("尺寸没变就不惊动 Rust，也弹不出通知", async () => {
+    useStore.setState({
+      activeId: "doc-01",
+      document: blankDocument(64, 64),
+      notice: null,
+    });
+    invokeCalls.length = 0;
+
+    await useStore.getState().resizeCanvas(64, 64);
+
+    expect(invokeCalls.some((call) => call.cmd === "editor_resize_canvas")).toBe(false);
+    expect(useStore.getState().notice).toBeNull();
+  });
+
+  it("Rust 拒了这次改尺寸，界面要说清楚", async () => {
+    useStore.setState({
+      activeId: "doc-01",
+      document: blankDocument(64, 64),
+      notice: null,
+    });
+    invokeErrors["editor_resize_canvas"] = "boom";
+    invokeCalls.length = 0;
+
+    await useStore.getState().resizeCanvas(128, 128);
+
+    expect(useStore.getState().notice?.isError).toBe(true);
+    delete invokeErrors["editor_resize_canvas"];
+  });
 });

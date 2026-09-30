@@ -47,6 +47,7 @@ import { compositeFrame } from "../lib/render";
 import { parseHex, rgbaToHex } from "../lib/palette";
 import { NAMED_COLORS, colorName } from "../lib/colornames";
 import FrameThumb from "./FrameThumb";
+import CanvasSizeModal from "./CanvasSizeModal";
 import { openContextMenu, type ContextMenuItem } from "./ContextMenu";
 import type {
   EditorTool,
@@ -124,6 +125,23 @@ const [hexDraft, setHexDraft] = useState("");
   // 洋葱皮的上一帧先落在离屏画布上，再压低透明度贴到底层，
   // 因为 putImageData 不吃 globalAlpha。
   const ghostRef = useRef<HTMLCanvasElement | null>(null);
+  // 左上角 WxH 点开的改尺寸弹窗。新建会话那扇窗是「起步」，这扇窗是「改」，
+  // 说的话不一样，其余控件共用 CanvasSizeModal。
+  const [sizeOpen, setSizeOpen] = useState(false);
+  const [sizeDraft, setSizeDraft] = useState<{ width: number; height: number }>({
+    width: 64,
+    height: 64,
+  });
+
+  // 开窗那一刻才取现文档宽高：这层组件不会随换会话重建，
+  // 停在旧会话的草稿值会被带到新会话里。
+  const openSizeModal = () => {
+    setSizeDraft({
+      width: document?.width ?? 64,
+      height: document?.height ?? 64,
+    });
+    setSizeOpen(true);
+  };
 
   // 瓦片平铺按份数等比缩：预览区不用滚动也能看全接缝，格子仍旧是整数倍。
   const scale = document
@@ -811,9 +829,23 @@ const [hexDraft, setHexDraft] = useState("");
         </div>
         <div className="doc-meta">
           <span>{document?.name ?? t("doc.empty")}</span>
-          <span>
-            {document ? `${document.width}x${document.height}` : "--"}
-          </span>
+          <Tooltip title={t("doc.size_edit")}>
+            <span
+              className="doc-size"
+              role="button"
+              tabIndex={0}
+              aria-label={t("doc.size_edit")}
+              data-disabled={document ? undefined : "true"}
+              onClick={() => document && openSizeModal()}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter" && event.key !== " ") return;
+                event.preventDefault();
+                if (document) openSizeModal();
+              }}
+            >
+              {document ? `${document.width}x${document.height}` : "--"}
+            </span>
+          </Tooltip>
           <span>{t("doc.rev", { rev: revision })}</span>
         </div>
       </div>
@@ -1248,6 +1280,30 @@ const [hexDraft, setHexDraft] = useState("");
           {aipOpen && aipText !== null ? <pre className="aip-text">{aipText}</pre> : null}
         </div>
       </div>
+
+      <CanvasSizeModal
+        open={sizeOpen}
+        width={sizeDraft.width}
+        height={sizeDraft.height}
+        title={t("doc.resize_title")}
+        okText={t("doc.resize_ok")}
+        cancelText={t("doc.resize_cancel")}
+        widthLabel={t("sidebar.width")}
+        heightLabel={t("sidebar.height")}
+        presetsLabel={t("sidebar.presets")}
+        readout={t("sidebar.size_readout", {
+          width: sizeDraft.width,
+          height: sizeDraft.height,
+          cells: sizeDraft.width * sizeDraft.height,
+        })}
+        hint={t("doc.resize_hint")}
+        onChange={(width, height) => setSizeDraft({ width, height })}
+        onOk={() => {
+          setSizeOpen(false);
+          void useStore.getState().resizeCanvas(sizeDraft.width, sizeDraft.height);
+        }}
+        onCancel={() => setSizeOpen(false)}
+      />
     </aside>
   );
 }

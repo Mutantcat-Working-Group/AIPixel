@@ -637,6 +637,32 @@ function handler(cmd: string, raw?: unknown): unknown {
     case "agent_sync_document":
       revision += 1;
       return { revision };
+    case "editor_resize_canvas": {
+      // 改画布宽高：左上角锚定，和 Rust 的 Cel::resize 同一套算法——装得下的格子
+      // 原样搬过去，多出来的补透明（索引 0）。尺寸没动就不动账本。
+      const width = Math.max(1, Math.min(1024, Math.round(Number(payload.width) || doc.width)));
+      const height = Math.max(1, Math.min(1024, Math.round(Number(payload.height) || doc.height)));
+      if (width !== doc.width || height !== doc.height) {
+        for (const layerId of Object.keys(doc.cels)) {
+          for (const frameId of Object.keys(doc.cels[layerId] ?? {})) {
+            const cel = doc.cels[layerId][frameId];
+            const grown = new Array<number>(width * height).fill(0);
+            const rows = Math.min(height, doc.height);
+            const cols = Math.min(width, doc.width);
+            for (let y = 0; y < rows; y += 1) {
+              const from = y * doc.width;
+              for (let x = 0; x < cols; x += 1) grown[y * width + x] = cel.indices[from + x];
+            }
+            cel.indices = grown;
+          }
+        }
+        doc.width = width;
+        doc.height = height;
+        revision += 1;
+        broadcast();
+      }
+      return revision;
+    }
     case "editor_paint_stroke": {
       // 落笔：把这一笔的格子写进当前 cel；橡皮的颜色是 null，也就是回到透明格。
       // 形状必须和真机一致：bridge 发的是 { id, stroke: { layer, frame, cells, color } }，

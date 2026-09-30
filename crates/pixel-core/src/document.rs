@@ -142,6 +142,25 @@ impl Cel {
         self.indices[idx] = value;
         true
     }
+
+    /// 按新宽高重排格子：左上角锚定，装得下的原样搬过来，装不下的丢掉。
+    /// 新露出来的区域是透明格（索引 0）。
+    pub fn resize(&mut self, old_width: u32, old_height: u32, width: u32, height: u32) {
+        if old_width == width && old_height == height {
+            return;
+        }
+        let old_w = old_width as usize;
+        let rows = old_height as usize;
+        let keep_rows = rows.min(height as usize);
+        let keep_cols = old_w.min(width as usize);
+        let mut next = vec![0u16; (width * height) as usize];
+        for y in 0..keep_rows.min(self.indices.len().div_ceil(old_w.max(1))) {
+            let from = y * old_w..y * old_w + keep_cols;
+            let to = y * (width as usize)..y * (width as usize) + keep_cols;
+            next[to].copy_from_slice(&self.indices[from]);
+        }
+        self.indices = next;
+    }
 }
 
 /// 像素文档。所有修改必须经由 `ops::apply`，以维护 revision。
@@ -344,6 +363,26 @@ impl Document {
         let range = self.layer_palette(layer_id)?;
         nearest_color(&range.colors, color)
     }
+
+    /// 改画布宽高。左上角锚定：已有像素按原位保留，越界部分自然裁掉，
+    /// 放大时新区域是透明格。尺寸不合法时整幅不动，报 `DocumentError::Dimension`。
+    pub fn resize(&mut self, width: u32, height: u32) -> Result<(), DocumentError> {
+        if width < 1 || height < 1 || width > MAX_DIMENSION || height > MAX_DIMENSION {
+            return Err(DocumentError::Dimension(width.max(height)));
+        }
+        let (old_width, old_height) = (self.width, self.height);
+        if old_width == width && old_height == height {
+            return Ok(());
+        }
+        for layer in self.cels.values_mut() {
+            for cel in layer.values_mut() {
+                cel.resize(old_width, old_height, width, height);
+            }
+        }
+        self.width = width;
+        self.height = height;
+        Ok(())
+    }
 }
 
 /// redmean 加权距离：人眼对绿差敏感、对暗部红差迟钝。
@@ -371,4 +410,60 @@ pub fn nearest_color(candidates: &[Rgba], target: Rgba) -> Option<Rgba> {
         }
     }
     best
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn doc() -> Document {
+        let mut d = Document::new("resize", 4, 3).expect("4x3 stays in limits");
+        d.intern_color(Rgba::rgb(255, 0, 0)).expect("red interns");
+        d
+    }
+
+    /// 左上角 (0,0) 附近各画一格，改完宽高要还能找得回来。
+    #[test]
+    fn resize_keeps_pixels_anchored_at_the_top_left() {
+        let mut d = doc();
+        d.cel_mut("L0", "F0").expect("cel").set(4, 0, 0, 1);
+        d.cel_mut("L0", "F0").expect("cel").set(4, 3, 2, 1);
+
+        d.resize(6, 4).expect("grow is legal");
+
+        assert_eq!((d.width, d.height), (6, 4));
+        assert_eq!(d.cels["L0"]["F0"].indices.len(), 24);
+        assert_eq!(d.cels["L0"]["F0"].indices[0], 1, "原点那颗跟着搬家");
+        assert_eq!(d.cels["L0"]["F0"].indices[2 * 6 + 3], 1, "角落那颗也要留住");
+        assert_eq!(
+            d.cels["L0"]["F0"].indices[3 * 6 + 5],
+            0,
+            "新露出来的格子是透明"
+        );
+    }
+
+    /// 缩小时右下角被裁掉：那不是 bug，是用户把画布改小了。
+    #[test]
+    fn shrinking_drops_what_falls_outside() {
+        let mut d = doc();
+        d.cel_mut("L0", "F0").expect("cel").set(4, 3, 2, 1);
+
+        d.resize(2, 2).expect("shrink is legal");
+
+        assert_eq!(d.cels["L0"]["F0"].indices.len(), 4);
+        assert_eq!(
+            d.cels["L0"]["F0"].indices.iter().sum::<u16>(),
+            0,
+            "右下角那颗连同它的行一起被裁掉"
+        );
+    }
+
+    #[test]
+    fn resize_rejects_dimensions_outside_the_document_limits() {
+        let mut d = doc();
+        let before = (d.width, d.height);
+        assert!(d.resize(0, 8).is_err(), "0 不是合法宽高");
+        assert!(d.resize(MAX_DIMENSION + 1, 8).is_err(), "超过上限也不行");
+        assert_eq!((d.width, d.height), before, "被拒的尺寸不许改动文档");
+    }
 }
