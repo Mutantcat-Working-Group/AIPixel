@@ -867,7 +867,9 @@ function handler(cmd: string, raw?: unknown): unknown {
         }
         if (op.op === "create_layer") {
           // 位置、名字、id 都按 Rust 的规矩来：插在 after 之后，没点名就落栈顶；
-          // id 取第一个没占用的编号。配色范围和锁跟新邻居继承，行为对齐。
+          // id 取第一个没占用的编号。配色范围和锁跟新邻居继承，除非显式点名——
+          // Rust 那边 `create_layer {palette_id, locked}` 说了就照办，这里漏了这条
+          // 分支的话，预览里模型显式指定的范围与锁会被悄悄继承掉，和真机不一样。
           const after = op.after as string | null | undefined;
           if (after != null && !doc.layers.some((l) => l.id === after)) continue;
           const pos = after
@@ -875,17 +877,22 @@ function handler(cmd: string, raw?: unknown): unknown {
             : doc.layers.length;
           const neighbor = doc.layers[Math.max(0, pos - 1)];
           // 邻居的配色得真在库里，指向一个不存在的 id 会开天窗。
-          const inherit = doc.palettes.some((p) => p.id === neighbor?.palette_id)
-            ? neighbor.palette_id
-            : (doc.palettes[0]?.id ?? "sweetie16");
+          const named =
+            typeof op.palette_id === "string" &&
+            doc.palettes.some((p) => p.id === op.palette_id)
+              ? (op.palette_id as string)
+              : doc.palettes.some((p) => p.id === neighbor?.palette_id)
+                ? neighbor.palette_id
+                : (doc.palettes[0]?.id ?? "sweetie16");
           const newId = nextId("L", doc.layers.map((l) => l.id));
           doc.layers.splice(Math.min(pos, doc.layers.length), 0, {
             id: newId,
             name: typeof op.name === "string" ? op.name : `Layer ${doc.layers.length + 1}`,
             visible: true,
             opacity: 255,
-            palette_id: inherit,
-            locked: neighbor?.locked ?? false,
+            palette_id: named,
+            locked:
+              typeof op.locked === "boolean" ? op.locked : (neighbor?.locked ?? false),
           });
           const cels: Record<string, { indices: number[] }> = {};
           for (const frame of doc.frames) {

@@ -247,12 +247,24 @@ pub fn pixelize_into_cel(
     src_h: u32,
     opts: &PixelizeOptions,
 ) -> Result<PixelizeReport, String> {
-    let report = pixelize_rgba(rgba, src_w, src_h, doc, opts)?;
-    // 新增主色必须真正落进文档调色板，否则网格索引会指向不存在的颜色。
-    // report.palette 的前 doc.palette.len() 项与文档一致，只追加尾部增量。
-    for color in report.palette.iter().skip(doc.palette.len()) {
-        doc.intern_color(*color)
-            .map_err(|e| format!("cannot extend palette: {e}"))?;
+    let before = doc.palette.len();
+    let mut report = pixelize_rgba(rgba, src_w, src_h, doc, opts)?;
+    // 层的配色锁在这里同样有效：位图量化出来的颜色不许绕过范围仲裁。shader 和
+    // ops 两条路都过 `color_for_layer`，这条不过的话，锁着的一层会被一张位图
+    // 灌进十几个范围外的颜色，「锁」就成了摆设。
+    if doc.layer(layer).is_some_and(|l| l.locked) {
+        let (remap, added) = lock_remap(doc, layer, &report)?;
+        report.indices = report.indices.iter().map(|i| remap[*i as usize]).collect();
+        report.palette_added = added;
+        report.colors_used = used_colors(&report.indices);
+        report.palette = doc.palette.clone();
+    } else {
+        // 新增主色必须真正落进文档调色板，否则网格索引会指向不存在的颜色。
+        // report.palette 的前 before 项与文档一致，只追加尾部增量。
+        for color in report.palette.iter().skip(before) {
+            doc.intern_color(*color)
+                .map_err(|e| format!("cannot extend palette: {e}"))?;
+        }
     }
     let cel = doc
         .cel_mut(layer, frame)
@@ -267,6 +279,59 @@ pub fn pixelize_into_cel(
     cel.indices.copy_from_slice(&report.indices);
     doc.bump();
     Ok(report)
+}
+
+/// 把量化调色板按层的配色锁归队，返回「量化索引 -> 文档索引」的重映射表与新增色数。
+/// 没上锁的层走不到这里；调用方在没锁时原样写盘，不花这一遍。
+fn lock_remap(
+    doc: &mut Document,
+    layer: &str,
+    report: &PixelizeReport,
+) -> Result<(Vec<u16>, usize), String> {
+    // 目标色：范围内的原样、范围外的就近归队（透明不参与，擦除永远合法）。
+    let clamped: Vec<Rgba> = report
+        .palette
+        .iter()
+        .map(|color| doc.color_for_layer(layer, *color))
+        .collect();
+    // 颜色 -> 文档索引（1 起编号）。先查再追加，同色不会重复进调色板。
+    // 键用四元组：`Rgba` 本身没实现 Hash，为一张表改公共类型的 derive 不值得。
+    type Key = (u8, u8, u8, u8);
+    let mut lookup: std::collections::HashMap<Key, u16> = doc
+        .palette
+        .iter()
+        .enumerate()
+        .map(|(i, color)| (key_of(color), i as u16 + 1))
+        .collect();
+    let mut map = vec![0u16; report.palette.len() + 1];
+    let mut pending: Vec<Rgba> = Vec::new();
+    for (i, color) in clamped.iter().enumerate() {
+        let next = (doc.palette.len() + pending.len() + 1) as u16;
+        let slot = *lookup.entry(key_of(color)).or_insert(next);
+        if slot == next {
+            pending.push(*color);
+        }
+        map[i + 1] = slot;
+    }
+    for color in &pending {
+        doc.intern_color(*color)
+            .map_err(|e| format!("cannot extend palette: {e}"))?;
+    }
+    Ok((map, pending.len()))
+}
+
+/// 颜色键：把四个通道合成元组，HashMap 直接可用。
+fn key_of(color: &Rgba) -> (u8, u8, u8, u8) {
+    (color.r, color.g, color.b, color.a)
+}
+
+/// 去重后的用色数（透明不算）：归队之后同一个色可能被多个格子用上，统计跟着重算。
+fn used_colors(indices: &[u16]) -> usize {
+    indices
+        .iter()
+        .filter(|i| **i != 0)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
 }
 
 /// 生成目标调色板：文档已有调色板打底，按 snap 容差决定是否追加主色。

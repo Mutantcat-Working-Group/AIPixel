@@ -1511,3 +1511,88 @@ fn shader_hand_written_rows_reject_a_row_of_the_wrong_width() {
     let msg = err.to_string();
     assert!(msg.contains('2'), "错误要点名那一行：{msg}");
 }
+
+/// 位图落格也要过配色锁：锁着的层只收范围里的色，范围外的就近归队。
+/// shader 和 ops 都过 `color_for_layer`，生图这条不过的话锁就是装饰。
+#[test]
+fn locked_layer_keeps_a_pixelized_bitmap_inside_its_range() {
+    let mut doc = blank();
+    let (l0, f0) = (doc.layers[0].id.clone(), doc.frames[0].id.clone());
+    ops::apply_batch(
+        &mut doc,
+        &[
+            PixelOperation::CreateLayer {
+                after: Some(l0.clone()),
+                name: Some("mono".into()),
+                id: None,
+                palette_id: None,
+                locked: None,
+            },
+            PixelOperation::SetLayerPalette {
+                layer: "L1".into(),
+                palette_id: "onebit".into(),
+            },
+            PixelOperation::SetLayerLocked {
+                layer: "L1".into(),
+                locked: true,
+            },
+        ],
+    )
+    .expect("batch applies");
+
+    // 4x4 纯红位图，contain 铺满 16x16 画布。
+    let mut rgba = Vec::with_capacity(4 * 4 * 4);
+    for _ in 0..(4 * 4) {
+        rgba.extend_from_slice(&[0xFF, 0x00, 0x00, 0xFF]);
+    }
+    let before = doc.palette.len();
+    let report = pixel_core::pixelize::pixelize_into_cel(
+        &mut doc,
+        "L1",
+        &f0,
+        &rgba,
+        4,
+        4,
+        &pixel_core::PixelizeOptions::default(),
+    )
+    .expect("pixelize lands");
+
+    // 落在格子里的每一个色都得是 1-bit 范围里那两个之一；红归队到黑。
+    let cel = doc.cel("L1", &f0).unwrap();
+    let landed: std::collections::BTreeSet<u16> = cel.indices.iter().copied().collect();
+    assert_eq!(landed.len(), 1, "纯红图归队后只剩一色，实际 {landed:?}");
+    let color = doc.color_of(*landed.iter().next().unwrap()).unwrap();
+    assert_eq!(
+        (color.r, color.g, color.b),
+        (0, 0, 0),
+        "红色最近的 1-bit 色是黑"
+    );
+    assert!(
+        !doc.palette.iter().any(|c| (c.r, c.g, c.b) == (255, 0, 0)),
+        "锁着的层不许把范围外的颜色灌进文档调色板"
+    );
+    assert_eq!(
+        report.palette_added + before,
+        doc.palette.len(),
+        "报告里的新增色数要和文档实际一致"
+    );
+
+    // 没锁的那层照旧可以扩色：同一张图落在 L0 上必须长出新颜色。
+    let open_before = doc.palette.len();
+    pixel_core::pixelize::pixelize_into_cel(
+        &mut doc,
+        "L0",
+        &f0,
+        &rgba,
+        4,
+        4,
+        &pixel_core::PixelizeOptions::default(),
+    )
+    .expect("pixelize lands on the open layer");
+    assert!(
+        doc.palette.len() > open_before,
+        "没锁的层应当能扩色（{} -> {}）",
+        open_before,
+        doc.palette.len()
+    );
+}
