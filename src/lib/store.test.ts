@@ -1232,3 +1232,78 @@ describe("新建会话与模型定义改动", () => {
     delete invokeErrors["editor_resize_canvas"];
   });
 });
+
+describe("会话改名与排序", () => {
+  it("改名只点名 id 和新名字，排序把整串 id 交给 Rust", async () => {
+    invokeResults["session_list"] = [];
+    useStore.setState({ sessions: [] });
+    invokeCalls.length = 0;
+
+    await useStore.getState().renameSession("doc-01", "橘猫项目");
+    await useStore.getState().reorderSessions(["b", "a", "c"]);
+
+    const rename = invokeCalls.find((call) => call.cmd === "session_rename");
+    expect(rename?.args).toMatchObject({ id: "doc-01", title: "橘猫项目" });
+    const reorder = invokeCalls.find((call) => call.cmd === "session_reorder");
+    expect(reorder?.args).toMatchObject({ ids: ["b", "a", "c"] });
+  });
+
+  it("改名失败只嘟囔一声，不动会话列表", async () => {
+    invokeErrors["session_rename"] = "nope";
+    invokeResults["session_list"] = [{ ...{ id: "doc-02" } } as SessionInfo];
+    useStore.setState({ sessions: [] });
+    invokeCalls.length = 0;
+
+    await useStore.getState().renameSession("doc-02", "新名字");
+
+    expect(useStore.getState().notice?.isError).toBe(true);
+    delete invokeErrors["session_rename"];
+  });
+});
+
+describe("画布刷新靠 revision 翻倍", () => {
+  it("落笔之后文档和 revision 一起涨，帧缩略图这种二线视图才跟得上", async () => {
+    const doc = seedDocument();
+    const stubs = {
+      agent_list_models: { active_id: "", entries: [] },
+      agent_history: [],
+      batch_recipes_list: [],
+      session_list: [],
+    };
+    Object.assign(invokeResults, stubs);
+    try {
+      await useStore.getState().boot();
+    } finally {
+      for (const key of Object.keys(stubs)) delete invokeResults[key];
+    }
+
+    useStore.setState({
+      activeId: "doc-01",
+      document: doc,
+      revision: 4,
+      pngRevision: 4,
+    });
+    invokeCalls.length = 0;
+
+    await useStore.getState().paintStroke([{ x: 1, y: 1 }]);
+    const stroke = invokeCalls.find((call) => call.cmd === "editor_paint_stroke");
+    expect(stroke?.args).toMatchObject({
+      id: "doc-01",
+      stroke: { layer: "L0", frame: "F0", cells: [{ x: 1, y: 1 }] },
+    });
+    // Rust 广播回来的 revision 是新的：拿它当第二把钥匙的画布与缩略图才重绘。
+    const painted: PixelDocument = {
+      ...doc,
+      // 像素住在 cel 里：第一层第一帧的第一格染上调色板 1 号色。
+      cels: {
+        ...doc.cels,
+        L0: { F0: { indices: [1, ...doc.cels.L0.F0.indices.slice(1)] } },
+      },
+    };
+    publishAgent("doc-01", { kind: "document_updated", revision: 5, document: painted });
+
+    const state = useStore.getState();
+    expect(state.revision).toBe(5);
+    expect(state.document).toEqual(painted);
+  });
+});

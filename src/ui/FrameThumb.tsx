@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 
 import { compositeFrame } from "../lib/render";
+import { useStore } from "../lib/store";
 import type { PixelDocument } from "../lib/types";
 
 // 缩略图盒子的上限：再大的文档也在这个盒子里等比缩小，帧条不会被某一帧撑爆。
@@ -26,6 +27,11 @@ export default function FrameThumb({
   /** 窄容器里改用小盒子；比例照旧按文档最长边算，缩略图永远和导出的帧同源。 */
   compact?: boolean;
 }) {
+  // revision 是重绘的第二把钥匙：document 引用不变、帧号也没变，但帧里的像素
+  // 变了（落笔、AI 改图、撤销、后端原地改文档）时，只有 revision 在涨。缺了
+  // 它缩略图就一直画着上一版，用户看着「帧条还是空白、画布已经有东西了」。
+  // 编辑器主画布的帧层 effect 早就有这层兜底，缩略图补上同一把钥匙。
+  const revision = useStore((s) => s.revision);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const maxWidth = compact ? THUMB_COMPACT_WIDTH : THUMB_MAX_WIDTH;
   const maxHeight = compact ? THUMB_COMPACT_HEIGHT : THUMB_MAX_HEIGHT;
@@ -43,7 +49,7 @@ export default function FrameThumb({
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.imageSmoothingEnabled = false;
     ctx.putImageData(new ImageData(compositeFrame(doc, index), doc.width, doc.height), 0, 0);
-  }, [doc, index]);
+  }, [doc, index, revision]);
 
   return (
     <canvas
