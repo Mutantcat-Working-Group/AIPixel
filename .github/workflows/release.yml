@@ -260,10 +260,12 @@ jobs:
           MOUNTED_DEV=""
           cleanup() {
             if [ -n "${MOUNTED_DEV}" ]; then
-              sudo diskutil unmount "${MOUNT}" >/dev/null 2>&1
-              hdiutil detach "${MOUNTED_DEV}" >/dev/null 2>&1
+              sudo diskutil unmount "${MOUNT}" >/dev/null 2>&1 || true
+              hdiutil detach "${MOUNTED_DEV}" >/dev/null 2>&1 || true
             else
-              hdiutil detach "${MOUNT}" >/dev/null 2>&1
+              # 走的是不挂载的路子时这里根本没东西可卸，hdiutil 会返回非零，
+              # 而 set -e 下那会让整个脚本以 1 收场——校验明明过了却算失败。
+              hdiutil detach "${MOUNT}" >/dev/null 2>&1 || true
             fi
             return 0
           }
