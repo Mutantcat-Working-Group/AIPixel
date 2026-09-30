@@ -253,7 +253,9 @@ fn op_summary(op: &PixelOperation) -> String {
             format!("created a frame after {after:?}")
         }
         PixelOperation::DeleteFrame { id } => format!("deleted frame {id}"),
-        PixelOperation::DuplicateFrame { id } => format!("duplicated frame {id}"),
+        PixelOperation::DuplicateFrame { id, .. } => {
+            format!("duplicated frame {id}")
+        }
         PixelOperation::MoveFrame { id, to_index } => {
             format!("moved frame {id} to slot {to_index}")
         }

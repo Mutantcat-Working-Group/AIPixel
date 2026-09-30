@@ -747,6 +747,8 @@ mod tests {
                 after: None,
                 name: None,
                 id: None,
+                palette_id: None,
+                locked: None,
             }],
         )
         .expect("setup applies");

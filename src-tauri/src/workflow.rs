@@ -991,6 +991,8 @@ mod tests {
                 after: None,
                 name: Some("outline".into()),
                 id: None,
+                palette_id: None,
+                locked: None,
             }],
         )
         .unwrap();

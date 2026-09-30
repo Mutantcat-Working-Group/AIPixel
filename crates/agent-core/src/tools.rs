@@ -82,7 +82,7 @@ STRUCTURE:
   create_layer {name, after?, palette_id?, locked?}        append (or insert after `after`) a layer
   delete_layer {layer}                                     move_layer {layer, to_index}
   rename_layer {layer, name}                               set_layer_properties {layer, visible?, opacity?}
-  create_frame {name?, after?, duration_ms?}               duplicate_frame {frame, after?}
+  create_frame {after?, duration_ms?}                     duplicate_frame {frame, after?}
   delete_frame {frame}                                     move_frame {frame, to_index}
   set_frame_duration {frame, duration_ms}                  the default pace is ~83ms for a 12 FPS loop
 
@@ -96,9 +96,9 @@ COLOR RANGES: every layer points at exactly one named palette.
   locked = true restricts that layer to its range and snaps out-of-range colors to the nearest color inside it; locked = false lets the layer use any color.
 
 PIXEL PATCHES (document structure, plus the placement half of a hand-written sprite):
-  set_pixels {layer?, frame?, cells: [{x, y, color}], w?, h?}   sparse pixel list
+  set_pixels {layer?, frame?, cells: [{x, y, color}]}      sparse pixel list
   stamp_grid {layer?, frame?, rows: [string], legend: {sym: color}, x, y}   every row must share one length, '.' is transparent
-  draw_shape {layer?, frame?, shape: line|rect|ellipse, x0, y0, x1, y1, w?, h?, color, filled?, layer?}
+  draw_shape {layer?, frame?, shape: line|rect|ellipse, x0, y0, x1, y1, color, filled?}
   bucket_fill {layer?, frame?, x, y, color}           clear_region {layer?, frame?, x, y, w, h}
 Coordinates are 0-based from the top-left; colors are "#RRGGBB" or "#RRGGBBAA" (null clears).
 
@@ -315,7 +315,9 @@ fn tool_apply_operations(doc: &mut Document, active: &ActiveContext, input: &Val
     };
     let mut ops: Vec<PixelOperation> = Vec::with_capacity(arr.len());
     for (i, v) in arr.iter().enumerate() {
-        match serde_json::from_value::<PixelOperation>(v.clone()) {
+        let mut patched = v.clone();
+        fill_pixel_target(&mut patched, active);
+        match serde_json::from_value::<PixelOperation>(patched) {
             Ok(op) => ops.push(op),
             Err(e) => return err(format!("operation[{i}] invalid: {e}")),
         }
@@ -330,6 +332,36 @@ fn tool_apply_operations(doc: &mut Document, active: &ActiveContext, input: &Val
             ok(content)
         }
         Err(e) => err(format!("operation failed: {e}")),
+    }
+}
+
+/// 像素五件套允许省掉 `layer`/`frame`：省了就落到当前活跃层帧上。
+/// 模型少发两个字段比发错两个字段便宜——一次缺省能省掉一整轮红字来回。
+fn fill_pixel_target(v: &mut Value, active: &ActiveContext) {
+    let Some(obj) = v.as_object_mut() else { return };
+    let is_pixel = matches!(
+        obj.get("op").and_then(|o| o.as_str()),
+        Some("set_pixels")
+            | Some("bucket_fill")
+            | Some("draw_shape")
+            | Some("clear_region")
+            | Some("stamp_grid")
+    );
+    if !is_pixel {
+        return;
+    }
+    for key in ["layer", "frame"] {
+        let slot = obj.entry(key).or_insert(Value::Null);
+        // 空串、纯空白和 null 一律当没发（和参数解析那边的口径一致），
+        // 真发了值就让位给模型自己指定的那个。
+        let blank = slot.as_str().map(str::trim).unwrap_or_default().is_empty();
+        if blank {
+            *slot = Value::String(if key == "layer" {
+                active.layer.clone()
+            } else {
+                active.frame.clone()
+            });
+        }
     }
 }
 
@@ -954,6 +986,81 @@ mod tests {
         let copy = &doc.cels["L0"]["F2"];
         assert_eq!(copy.indices, source.indices, "复制必须连内容一起");
         assert_eq!(copy.indices[0], 1, "F0 左上角是调色板索引 1");
+    }
+
+    /// 像素五件套省掉 layer/frame：落到当前活跃层帧上，而不是报错。
+    /// 模型少发两个字段不该换来一整轮红字来回。
+    #[test]
+    fn pixel_ops_fall_back_to_the_active_layer_and_frame() {
+        let mut doc = two_pose_doc();
+        let active = ActiveContext {
+            layer: "L0".into(),
+            frame: "F1".into(),
+            color: None,
+        };
+        let untouched = doc.cel("L0", "F0").unwrap().indices.clone();
+        let out = execute(
+            &mut doc,
+            &active,
+            "pixel_apply_operations",
+            &json!({"operations": [
+                {"op": "set_pixels", "cells": [{"x": 3, "y": 3, "color": "#00E436"}]},
+                {"op": "stamp_grid",
+                 "rows": ["..x..", "..x.."],
+                 "legend": {"x": "#FFA300"},
+                 "x": 0, "y": 0}
+            ]}),
+        );
+        assert!(!out.is_error, "{}", out.content);
+        // 落点只能是活跃帧：F1 被改了两处，F0 一个像素都不许动。
+        let landed = doc.cel("L0", "F1").unwrap();
+        let green = doc
+            .palette_index_of(pixel_core::document::Rgba::rgb(0x00, 0xE4, 0x36))
+            .expect("颜色在档");
+        assert_eq!(
+            landed.indices[3 * doc.width as usize + 3],
+            green,
+            "省掉 layer/frame 的 set_pixels 落在活跃帧上"
+        );
+        let amber = doc
+            .palette_index_of(pixel_core::document::Rgba::rgb(0xFF, 0xA3, 0x00))
+            .expect("stamp 颜色在档");
+        assert_eq!(landed.indices[2], amber, "stamp_grid 同样落在活跃帧");
+        assert_eq!(
+            doc.cel("L0", "F0").unwrap().indices,
+            untouched,
+            "别的帧不许被顺手改掉"
+        );
+    }
+
+    /// 显式写出 layer/frame 时缺省逻辑必须让位：指错层还得报错，
+    /// 不能默默改到活跃层上去。
+    #[test]
+    fn explicit_pixel_targets_are_not_overridden() {
+        let mut doc = two_pose_doc();
+        let out = execute(
+            &mut doc,
+            &active(),
+            "pixel_apply_operations",
+            &json!({"operations": [{"op": "set_pixels",
+                "layer": "L9", "frame": "F0",
+                "cells": [{"x": 0, "y": 0, "color": "#00E436"}]}]}),
+        );
+        assert!(out.is_error, "{}", out.content);
+        assert!(out.content.contains("L9"), "{}", out.content);
+    }
+
+    /// 非像素操作不受缺省影响：改名少给目标照样报错，不蒙一个活跃层上去改。
+    #[test]
+    fn structural_ops_keep_requiring_their_target() {
+        let mut doc = two_pose_doc();
+        let out = execute(
+            &mut doc,
+            &active(),
+            "pixel_apply_operations",
+            &json!({"operations": [{"op": "rename_layer", "name": "改名"}]}),
+        );
+        assert!(out.is_error, "{}", out.content);
     }
 
     #[test]

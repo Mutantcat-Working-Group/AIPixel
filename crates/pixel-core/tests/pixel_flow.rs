@@ -25,6 +25,8 @@ fn ops_create_structure_then_set_pixels() {
                 after: Some(layer.clone()),
                 name: Some("fx".into()),
                 id: None,
+                palette_id: None,
+                locked: None,
             },
             PixelOperation::CreateFrame {
                 after: None,
@@ -569,6 +571,153 @@ fn editor_operations_deserialize_from_the_webview_wire_form() {
             ..
         }
     ));
+
+    // 帧与层的四个操作认 `frame`/`layer` 当主键：文档里就是这么写的，
+    // 模型照文档发就得通。以前只认 `id`，一次报错白烧一整轮来回。
+    for (json, expect) in [
+        (
+            serde_json::json!({"op": "set_frame_duration", "frame": "F0", "duration_ms": 80}),
+            "帧时长",
+        ),
+        (
+            serde_json::json!({"op": "delete_frame", "frame": "F0"}),
+            "删帧",
+        ),
+        (
+            serde_json::json!({"op": "move_frame", "frame": "F0", "to_index": 0}),
+            "移帧",
+        ),
+        (
+            serde_json::json!({"op": "rename_layer", "layer": "L0", "name": "x"}),
+            "图层改名",
+        ),
+    ] {
+        let parsed: PixelOperation = serde_json::from_value(json)
+            .unwrap_or_else(|e| panic!("{expect} 用 frame/layer 字段必须能解：{e}"));
+        assert!(
+            matches!(
+                parsed,
+                PixelOperation::SetFrameDuration { .. }
+                    | PixelOperation::DeleteFrame { .. }
+                    | PixelOperation::MoveFrame { .. }
+                    | PixelOperation::RenameLayer { .. }
+            ),
+            "{expect} 解成了别的变体"
+        );
+    }
+}
+
+/// 模型文档里 `duplicate_frame {frame, after?}` 和 `create_layer {palette_id?, locked?}`
+/// 都带可选字段，落地行为必须和文档说的一致：after 说了插哪就插哪，
+/// palette_id/locked 说了就照办，没说才继承邻居。
+#[test]
+fn optional_target_fields_of_frame_and_layer_ops_land_where_documented() {
+    let mut doc = blank();
+    for _ in 0..2 {
+        ops::apply_batch(
+            &mut doc,
+            &[PixelOperation::CreateFrame {
+                after: None,
+                duration_ms: 100,
+                id: None,
+            }],
+        )
+        .expect("frame created");
+    }
+    let order: Vec<String> = doc.frames.iter().map(|f| f.id.clone()).collect();
+    assert_eq!(order, vec!["F0", "F1", "F2"], "先备好三帧");
+
+    // after 指到 F2：副本必须落在 F2 之后，而不是默认的源帧后面。
+    let dup: PixelOperation = serde_json::from_value(serde_json::json!({
+        "op": "duplicate_frame",
+        "frame": "F0",
+        "after": "F2",
+    }))
+    .expect("duplicate_frame with after parses");
+    ops::apply_batch(&mut doc, &[dup]).expect("duplicate applies");
+    let after_dup: Vec<String> = doc.frames.iter().map(|f| f.id.clone()).collect();
+    assert_eq!(
+        after_dup,
+        vec!["F0", "F1", "F2", "F3"],
+        "after 指定 F2 之后，副本就该是第四帧"
+    );
+    assert_eq!(
+        doc.cels
+            .get(&doc.layers[0].id)
+            .and_then(|f| f.get("F3"))
+            .expect("副本带自己的 cel")
+            .indices
+            .len(),
+        usize::try_from(doc.width * doc.height).expect("16x16 fits usize"),
+        "副本必须真带一格内容"
+    );
+
+    // 没给 after 就还是老规矩：紧跟在源帧后面。
+    ops::apply_batch(
+        &mut doc,
+        &[serde_json::from_value::<PixelOperation>(serde_json::json!({
+            "op": "duplicate_frame",
+            "frame": "F3",
+        }))
+        .expect("duplicate_frame without after parses")],
+    )
+    .expect("duplicate applies");
+    let ids: Vec<String> = doc.frames.iter().map(|f| f.id.clone()).collect();
+    assert_eq!(ids[ids.len() - 2], "F3", "缺省落点仍在源帧后面");
+
+    // after 指向源帧自己：就是「照着这一帧改」的默认动作，
+    // 落点必须是源帧后面，不能插到它前面去。
+    ops::apply_batch(
+        &mut doc,
+        &[serde_json::from_value::<PixelOperation>(serde_json::json!({
+            "op": "duplicate_frame",
+            "frame": "F0",
+            "after": "F0",
+        }))
+        .expect("duplicate_frame with after=source parses")],
+    )
+    .expect("duplicate applies");
+    let ids: Vec<String> = doc.frames.iter().map(|f| f.id.clone()).collect();
+    assert_eq!(ids[0], "F0", "源帧还在第一位");
+    assert_eq!(ids[1], "F5", "副本紧跟源帧，插在它后面");
+
+    // 建层就报一套范围和锁，不该再靠第二句 set_layer_palette 补。
+    let created: PixelOperation = serde_json::from_value(serde_json::json!({
+        "op": "create_layer",
+        "after": doc.layers[0].id.clone(),
+        "name": "固定两色层",
+        "palette_id": "onebit",
+        "locked": true,
+    }))
+    .expect("create_layer with palette_id and locked parses");
+    ops::apply_batch(&mut doc, &[created]).expect("create applies");
+    let fresh = doc.layers.last().expect("新层在栈里");
+    assert_eq!(fresh.name, "固定两色层");
+    assert_eq!(fresh.palette_id, "onebit", "显式指定的范围要照办");
+    assert!(fresh.locked, "显式上锁要照办");
+
+    // 一个层只能指着一个范围：拼错的 id 必须当场报错，
+    // 而不是建出一层指向空气、等后面才炸。
+    let bad: PixelOperation = serde_json::from_value(serde_json::json!({
+        "op": "create_layer",
+        "palette_id": "onebitt",
+    }))
+    .expect("create_layer parses");
+    assert!(
+        ops::apply_batch(&mut doc, &[bad]).is_err(),
+        "不存在的 palette_id 必须被拒"
+    );
+    let count = doc.layers.len();
+    let err = ops::apply_batch(
+        &mut doc,
+        &[serde_json::from_value::<PixelOperation>(serde_json::json!({
+            "op": "create_layer",
+            "palette_id": "still-not-here",
+        }))
+        .expect("create_layer parses")],
+    );
+    assert!(err.is_err(), "拼错的范围 id 不许悄悄建层");
+    assert_eq!(doc.layers.len(), count, "失败要整批回滚，不留下半层");
 }
 
 #[test]
@@ -732,6 +881,8 @@ fn locked_layer_clamps_colors_into_its_own_range() {
                 after: Some(l0.clone()),
                 name: Some("mono".into()),
                 id: None,
+                palette_id: None,
+                locked: None,
             },
             PixelOperation::SetLayerPalette {
                 layer: "L1".into(),
@@ -799,6 +950,8 @@ fn layer_ranges_are_independent() {
                 after: Some(l0.clone()),
                 name: Some("free".into()),
                 id: None,
+                palette_id: None,
+                locked: None,
             },
             PixelOperation::SetLayerPalette {
                 layer: "L1".into(),
@@ -836,6 +989,8 @@ fn set_layer_palette_requantizes_only_that_layer() {
                 after: Some(l0.clone()),
                 name: Some("other".into()),
                 id: None,
+                palette_id: None,
+                locked: None,
             },
             PixelOperation::SetPixels {
                 layer: l0.clone(),
@@ -1035,6 +1190,8 @@ fn aip_round_trip_keeps_named_palettes() {
                 after: Some(l0.clone()),
                 name: Some("第二层".into()),
                 id: None,
+                palette_id: None,
+                locked: None,
             },
             PixelOperation::SetLayerPalette {
                 layer: "L1".into(),

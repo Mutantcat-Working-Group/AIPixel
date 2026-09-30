@@ -57,6 +57,61 @@ impl From<mlua::Error> for ShaderError {
     }
 }
 
+/// 沙箱里注册的 helper 与注入全局。模型最容易栽的坑就是拿这些名字当局部
+/// 变量：`local line = ...` 一写，后面每个 `line(...)` 都在调字符串。
+const LUA_BUILTINS: &[&str] = &[
+    "pal",
+    "hex",
+    "mix",
+    "hsv",
+    "alpha",
+    "rand",
+    "noise",
+    "canvas",
+    "pset",
+    "pget",
+    "line",
+    "rect",
+    "rectfill",
+    "ellipse",
+    "ellipfill",
+    "ellipsefill",
+    "circle",
+    "circfill",
+    "circlefill",
+    "flood",
+    "replace",
+    "outline",
+    "clear",
+    "stamp",
+    "width",
+    "height",
+    "canvas_w",
+    "canvas_h",
+    "layer",
+    "frame_index",
+    "frame_count",
+    "time",
+    "phase",
+];
+
+/// 从 `attempt to call a string value (local 'line')` 这类报错里取出被点名的名字，
+/// 撞上内置名就补一句人话。没点名或名字不在册就安静返回 None。
+fn lua_hint(msg: &str) -> Option<String> {
+    let name = ["local", "global"].iter().find_map(|scope| {
+        let marker = format!("({scope} '");
+        let start = msg.find(&marker)? + marker.len();
+        let end = msg[start..].find('\'')? + start;
+        Some(msg[start..end].to_string())
+    })?;
+    if !LUA_BUILTINS.contains(&name.as_str()) {
+        return None;
+    }
+    Some(format!(
+        "hint: `{name}` is a builtin here, and your own local shadows it; rename the local (e.g. ln, {name}_i) instead of reusing the builtin name"
+    ))
+}
+
 /// 运行 shader。`animate=true` 时逐帧执行，注入 time/phase/frame_index/frame_count，
 /// 每帧执行前清空目标 cel；否则在目标 cel 上增量绘制（保留既有像素）。
 pub fn run_shader(
@@ -195,6 +250,13 @@ impl Sandbox {
                     || msg.contains("budget exhausted")
                 {
                     return Err(ShaderError::Budget("execution budget exhausted".into()));
+                }
+                // 报错点名的往往正是被自家局部变量遮蔽的内置函数，
+                // 这句话替模型省掉一整轮「报错-瞎改-再报错」。
+                let mut msg = msg;
+                if let Some(hint) = lua_hint(&msg) {
+                    msg.push_str("; ");
+                    msg.push_str(&hint);
                 }
                 Err(ShaderError::Lua {
                     message: msg,
@@ -1037,4 +1099,57 @@ fn hash_noise(x: f64, y: f64) -> f64 {
     h = h.wrapping_mul(0xBF58476D1CE4E5B9);
     h ^= h >> 32;
     (h >> 11) as f64 / ((1u64 << 53) as f64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::document::Document;
+
+    fn blank() -> Document {
+        Document::new("test", 16, 16).expect("16x16 within limits")
+    }
+
+    /// 拿内置函数名当局部变量，报错里必须带上「改名」这句话。
+    /// 模型没有这条提示只能把预算烧在瞎改上，一轮就没了。
+    #[test]
+    fn shadowing_a_builtin_gets_a_rename_hint() {
+        let mut doc = blank();
+        let layer = doc.layers[0].id.clone();
+        let err = run_shader(
+            &mut doc,
+            &layer,
+            "local line = \"x\" line(0, 0, 4, 4, \"#FF004D\")",
+            false,
+            &ShaderBudget::default(),
+        )
+        .expect_err("遮蔽内置函数必须报错");
+        let text = err.to_string();
+        assert!(text.contains("hint"), "错误里没有提示：{text}");
+        assert!(
+            text.contains("builtin") && text.contains("rename"),
+            "提示要说清是内置名且要改名：{text}"
+        );
+    }
+
+    /// 提示只在真撞名时出现：普通运行时错误不该被塞一句废话。
+    #[test]
+    fn ordinary_lua_errors_stay_clean() {
+        let mut doc = blank();
+        let layer = doc.layers[0].id.clone();
+        let err = run_shader(
+            &mut doc,
+            &layer,
+            "this_function_does_not_exist(1)",
+            false,
+            &ShaderBudget::default(),
+        )
+        .expect_err("调用不存在的函数必须报错");
+        let text = err.to_string();
+        assert!(!text.contains("hint"), "无关报错被加了提示：{text}");
+        assert!(
+            text.contains("this_function_does_not_exist"),
+            "原文要留住：{text}"
+        );
+    }
 }

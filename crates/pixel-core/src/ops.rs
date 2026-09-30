@@ -22,18 +22,26 @@ pub enum PixelOperation {
         id: Option<String>,
     },
     DeleteFrame {
+        /// 帧号。`frame` 是文档与模型口中的写法，两种都收。
+        #[serde(alias = "frame")]
         id: String,
     },
     /// 整帧复制（所有图层的 cel 一起），插在源帧后面。
     /// 「照着这一帧改」是编辑器与模型都高频的动作，值得一个原子操作。
     DuplicateFrame {
+        #[serde(alias = "frame")]
         id: String,
+        /// 指定落点：插在这一帧号之后；缺省就是源帧后面。
+        #[serde(default)]
+        after: Option<String>,
     },
     MoveFrame {
+        #[serde(alias = "frame")]
         id: String,
         to_index: usize,
     },
     SetFrameDuration {
+        #[serde(alias = "frame")]
         id: String,
         duration_ms: u32,
     },
@@ -43,21 +51,31 @@ pub enum PixelOperation {
         after: Option<String>,
         #[serde(default)]
         name: Option<String>,
+        /// 建层就指一套配色范围；缺省继承邻居那层（见 apply 里的取值）。
+        #[serde(default)]
+        palette_id: Option<String>,
+        /// 建层就上锁；缺省跟着邻居。
+        #[serde(default)]
+        locked: Option<bool>,
         #[serde(default)]
         id: Option<String>,
     },
     DeleteLayer {
+        #[serde(alias = "layer")]
         id: String,
     },
     MoveLayer {
+        #[serde(alias = "layer")]
         id: String,
         to_index: usize,
     },
     RenameLayer {
+        #[serde(alias = "layer")]
         id: String,
         name: String,
     },
     SetLayerProperties {
+        #[serde(alias = "layer")]
         id: String,
         #[serde(default)]
         visible: Option<bool>,
@@ -274,11 +292,24 @@ pub fn apply_one(doc: &mut Document, op: &PixelOperation) -> Result<(), Operatio
                 frames.remove(id);
             }
         }
-        PixelOperation::DuplicateFrame { id } => {
+        PixelOperation::DuplicateFrame { id, after } => {
             let src =
                 doc.frames.iter().position(|f| &f.id == id).ok_or_else(|| {
                     OperationError::Document(DocumentError::UnknownFrame(id.clone()))
                 })?;
+            // 落点：显式指定的那帧之后；没指定就到源帧后面。
+            let pos = match after {
+                Some(after_id) => {
+                    doc.frames
+                        .iter()
+                        .position(|f| &f.id == after_id)
+                        .ok_or_else(|| {
+                            OperationError::Document(DocumentError::UnknownFrame(after_id.clone()))
+                        })?
+                        + 1
+                }
+                None => src + 1,
+            };
             let existing: Vec<String> = doc.frames.iter().map(|f| f.id.clone()).collect();
             let new_id = next_id("F", &existing);
             let duration_ms = doc.frames[src].duration_ms;
@@ -294,7 +325,7 @@ pub fn apply_one(doc: &mut Document, op: &PixelOperation) -> Result<(), Operatio
                 copies.push((layer.id.clone(), cel));
             }
             doc.frames.insert(
-                (src + 1).min(doc.frames.len()),
+                pos.min(doc.frames.len()),
                 Frame {
                     id: new_id.clone(),
                     duration_ms,
@@ -327,7 +358,13 @@ pub fn apply_one(doc: &mut Document, op: &PixelOperation) -> Result<(), Operatio
                 })?;
             frame.duration_ms = *duration_ms;
         }
-        PixelOperation::CreateLayer { after, name, id } => {
+        PixelOperation::CreateLayer {
+            after,
+            name,
+            palette_id,
+            locked,
+            id,
+        } => {
             // 插入位置决定了新图层跟谁做邻居：配色范围和锁不锁都跟着邻居走。
             // 往一叠「都锁在同一套色板」的图层中间插一层，不该突然冒出一个
             // 自由散色班子；插在最顶上就继承栈顶那层。
@@ -355,6 +392,17 @@ pub fn apply_one(doc: &mut Document, op: &PixelOperation) -> Result<(), Operatio
                     &doc.layers.iter().map(|l| l.id.clone()).collect::<Vec<_>>(),
                 )
             });
+            // 显式指定的配色范围必须真的存在，否则模型会拿一个拼错的 id
+            // 建出一层「指向不存在色板」的层，错误直到后面才炸。
+            let palette = match palette_id {
+                Some(pid) => {
+                    if doc.palette_by_id(pid).is_none() {
+                        return Err(OperationError::UnknownPalette(pid.clone()));
+                    }
+                    pid.clone()
+                }
+                None => inherited.0,
+            };
             let layer = Layer {
                 id: new_id.clone(),
                 name: name
@@ -362,8 +410,8 @@ pub fn apply_one(doc: &mut Document, op: &PixelOperation) -> Result<(), Operatio
                     .unwrap_or_else(|| format!("Layer {}", doc.layers.len() + 1)),
                 visible: true,
                 opacity: 255,
-                palette_id: inherited.0,
-                locked: inherited.1,
+                palette_id: palette,
+                locked: locked.unwrap_or(inherited.1),
             };
             doc.layers.insert(pos.min(doc.layers.len()), layer);
             let mut frames = BTreeMap::new();
