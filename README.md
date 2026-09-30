@@ -3,7 +3,7 @@
 <h2>AIPixel</h2>
 </div>
 
-> 开源的像素画 Agent 桌面工具：Tauri 2 + React 18 + antd 5，Rust 主循环，
+> GPL-3.0 开源的像素画 Agent 桌面工具：Tauri 2 + React 18 + antd 5，Rust 主循环，
 > 只用你自己的模型，中间文件是 `.aip`。
 
 ### 一、产品概述
@@ -217,4 +217,10 @@ python3 example/img2aip_converter.py             # refer_img/ -> refer_aip/
 
 两份都是参照而非照抄：格式、主循环与工具名都按我们自己的约束重做，`.aip` 与七个内置工具的边界来自这份仓库自己的取舍。
 
-License: MIT
+### 开源协议
+
+- 本项目采用 **GNU General Public License v3.0（GPL-3.0）**，完整条款见仓库根目录 [LICENSE](./LICENSE)
+- 使用、修改、二次分发都自由，但衍生作品必须以 GPL-3.0 同协议继续开源，并保留原版权与许可声明
+- 分发二进制或安装包时，须同时提供对应的完整源码；本仓库的发布产物与源码始终一一对应
+- `example/` 里的示例、随附脚本与本 README 同样适用本协议
+- `.aip` / `.aipr` 数据格式、七个内置工具的命名与主循环结构都是本仓库自己的取舍，不含受第三方协议约束的代码

@@ -290,6 +290,8 @@ export const zh = {
   "about.publisher_value": "异猫工作群",
   "about.site": "网站",
   "about.repo": "源码仓库",
+  "about.license": "开源协议",
+  "about.license_value": "GPL-3.0",
   "about.blurb":
     "像素资产生成的桌面智能体：模型自带 Provider，本机运行，无登录无计费。",
   "settings.limits": "运行护栏",
@@ -994,6 +996,8 @@ export const en: Record<TKey, string> = {
   "about.publisher_value": "Mutantcat Working Group",
   "about.site": "Website",
   "about.repo": "Source repository",
+  "about.license": "License",
+  "about.license_value": "GPL-3.0",
   "about.blurb":
     "A desktop agent for pixel assets: bring your own provider, everything runs on this machine, no sign-in, no billing.",
   "settings.limits": "Run guard rails",

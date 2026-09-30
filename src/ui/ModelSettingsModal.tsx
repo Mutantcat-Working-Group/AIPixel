@@ -272,6 +272,10 @@ function AboutSection() {
           </a>
         </div>
         <div className="about-row">
+          <span className="about-key">{t("about.license")}</span>
+          <span className="about-val">{t("about.license_value")}</span>
+        </div>
+        <div className="about-row">
           <span className="about-key">{t("about.version")}</span>
           <span className="about-val">{__APP_VERSION__}</span>
         </div>
