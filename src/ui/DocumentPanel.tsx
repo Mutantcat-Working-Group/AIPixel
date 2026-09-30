@@ -86,6 +86,33 @@ function cellFromEvent(
   return { x, y };
 }
 
+/** 离屏烘焙位：把「要贴进帧层的那一帧」先落在这儿。窗口里可复用。 */
+function stageBuffer(
+  ref: { current: HTMLCanvasElement | null },
+  width: number,
+  height: number,
+): HTMLCanvasElement {
+  // window.document：组件里的 document 是像素文档，把 DOM 的那个遮蔽掉了。
+  const canvas = ref.current ?? window.document.createElement("canvas");
+  ref.current = canvas;
+  // 只在尺寸变化时改宽高：改宽高会清空画布，每帧都写等于白擦一遍。
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+  return canvas;
+}
+
+function stagePixels(
+  canvas: HTMLCanvasElement,
+  pixels: Uint8ClampedArray<ArrayBuffer>,
+  width: number,
+  height: number,
+): void {
+  const ctx = canvas.getContext("2d");
+  if (ctx) ctx.putImageData(new ImageData(pixels, width, height), 0, 0);
+}
+
 export default function DocumentPanel() {
   const t = useT();
   const document = useStore((s) => s.document);
@@ -127,6 +154,9 @@ const [hexDraft, setHexDraft] = useState("");
   // 洋葱皮的上一帧先落在离屏画布上，再压低透明度贴到底层，
   // 因为 putImageData 不吃 globalAlpha。
   const ghostRef = useRef<HTMLCanvasElement | null>(null);
+  // 当前帧也占一个离屏位：合成要的是 drawImage 的 source-over，
+  // putImageData 会把刚铺好的幽灵整层覆盖掉。
+  const frameBufRef = useRef<HTMLCanvasElement | null>(null);
   // 左上角 WxH 点开的改尺寸弹窗。新建会话那扇窗是「起步」，这扇窗是「改」，
   // 说的话不一样，其余控件共用 CanvasSizeModal。
   const [sizeOpen, setSizeOpen] = useState(false);
@@ -170,31 +200,29 @@ const [hexDraft, setHexDraft] = useState("");
   function paintFrame(index: number, ghostOf: number | null) {
     if (!document) return;
     const { width, height } = document;
-    // 幽灵只画一次，再贴到每个瓦片：九宫格也不该重算九遍上一帧。
-    let ghost: HTMLCanvasElement | null = null;
-    if (ghostOf !== null && ghostOf >= 0 && ghostOf !== index) {
-      // window.document：组件里的 document 是像素文档，把 DOM 的那个遮蔽掉了。
-      ghost = ghostRef.current ?? window.document.createElement("canvas");
-      ghostRef.current = ghost;
-      ghost.width = width;
-      ghost.height = height;
-      const ghostCtx = ghost.getContext("2d");
-      if (ghostCtx) {
-        ghostCtx.putImageData(new ImageData(compositeFrame(document, ghostOf), width, height), 0, 0);
-      }
+    const wantGhost = ghostOf !== null && ghostOf >= 0 && ghostOf !== index;
+    // 幽灵和当前帧都得各自落在离屏画布上，再交给 drawImage 合成。putImageData
+    // 是不合成、直接覆盖的：先在帧画布上铺好幽灵、再用 putImageData 贴当前帧，
+    // 幽灵会被整层擦掉（只剩当前帧透空的地方漏出一点），洋葱皮看着就像坏了。
+    // 改走 source-over：先铺 24% 的幽灵，再把当前帧整个压上去，才是
+    // 「上一帧淡淡地垫在下面」。九宫格也只烘焙两帧，回声格照样贴。
+    const ghost = stageBuffer(ghostRef, width, height);
+    if (wantGhost) {
+      stagePixels(ghost, compositeFrame(document, ghostOf as number), width, height);
     }
-    const frame = new ImageData(compositeFrame(document, index), width, height);
+    const current = stageBuffer(frameBufRef, width, height);
+    stagePixels(current, compositeFrame(document, index), width, height);
     for (const canvas of tileCanvases("canvas.frame-layer")) {
       const ctx = canvas.getContext("2d");
       if (!ctx) continue;
       ctx.clearRect(0, 0, width, height);
       ctx.imageSmoothingEnabled = false;
-      if (ghost) {
+      if (wantGhost) {
         ctx.globalAlpha = ONION_ALPHA;
         ctx.drawImage(ghost, 0, 0);
         ctx.globalAlpha = 1;
       }
-      ctx.putImageData(frame, 0, 0);
+      ctx.drawImage(current, 0, 0);
     }
   }
 
