@@ -33,6 +33,8 @@
     "targets": ["dmg", "app", "nsis", "appimage", "deb"],
     "category": "DeveloperTool",
     "copyright": "© 2026 异猫工作群 (mutantcat.org)",
+    "license": "GPL-3.0",
+    "licenseFile": "../LICENSE",
     "shortDescription": "Pixel art agent workspace",
     "longDescription": "AIPixel is an open-source pixel art agent workspace. It drives a user-provided LLM through sandboxed Lua shaders and typed pixel operations; the canvas text grid is the only authoritative state.",
     "macOS": {
