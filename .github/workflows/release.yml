@@ -238,7 +238,22 @@ jobs:
           # codesign --verify 打在镜像上必然报 "code object is not signed at all"。
           # 该验的是挂载后的 app 和 /Applications 快捷方式，往下走。
           MOUNT="$(mktemp -d)"
-          hdiutil attach "${images[0]}" -nobrowse -readonly -mountpoint "${MOUNT}" >/dev/null
+          # macOS runner 上 hdiutil attach 偶发 "attach canceled"，挂载点没热起来而已，
+          # 跟产物本身无关。多试几次再下结论，别让一次抖动卡住整轮发版。
+          attached=0
+          for attempt in 1 2 3 4 5; do
+            if hdiutil attach "${images[0]}" -nobrowse -readonly \
+                -mountpoint "${MOUNT}" >/dev/null 2>&1; then
+              attached=1
+              break
+            fi
+            echo "hdiutil attach 第 ${attempt} 次未成功，2 秒后重试"
+            sleep 2
+          done
+          if [ "${attached}" -ne 1 ]; then
+            echo "::error::${images[0]} 挂载 5 次均失败"
+            exit 1
+          fi
           trap 'hdiutil detach "${MOUNT}" >/dev/null || true' EXIT
           if [ ! -L "${MOUNT}/Applications" ]; then
             echo "::error::${images[0]} has no /Applications link"
