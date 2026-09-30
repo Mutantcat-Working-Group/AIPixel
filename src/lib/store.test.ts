@@ -48,6 +48,11 @@ function lastOps(): Array<Record<string, unknown>> {
   return (last?.args.ops as Array<Record<string, unknown>>) ?? [];
 }
 
+/** 往 agent-event 通道上发一条带会话归属的事件，和 Rust 的载荷同形。 */
+function publishAgent(sessionId: string, event: Record<string, unknown>): void {
+  publishLocal(AGENT_EVENT_CHANNEL, { session_id: sessionId, event });
+}
+
 /** 两图层两帧的文档：帧时长与图层排序的边界都要有两个元素才测得出来。 */
 function seedDocument(): PixelDocument {
   const base = blankDocument(8, 8);
@@ -308,7 +313,7 @@ describe("撤销栈只记编辑器自己那一下", () => {
 
     // 正面例子先立规矩：成功的那一笔，撤销栈吃到的是改前的快照。
     await useStore.getState().paintStroke([{ x: 1, y: 1 }]);
-    publishLocal(AGENT_EVENT_CHANNEL, { kind: "document_updated", revision: 5, document: doc });
+    publishAgent("doc-01", { kind: "document_updated", revision: 5, document: doc });
     expect(useStore.getState().undoStack).toEqual([doc]);
 
     // 失败的那一笔不产新文档，旗子却还悬着：下一个到达的 document_updated
@@ -318,7 +323,7 @@ describe("撤销栈只记编辑器自己那一下", () => {
       await useStore.getState().paintStroke([{ x: 2, y: 2 }]);
       expect(useStore.getState().undoStack).toEqual([doc]);
       // 模型自己的一次改动（跑完 Lua 脚本）：现在不该再进撤销栈。
-      publishLocal(AGENT_EVENT_CHANNEL, { kind: "document_updated", revision: 6, document: doc });
+      publishAgent("doc-01", { kind: "document_updated", revision: 6, document: doc });
       expect(useStore.getState().undoStack).toEqual([doc]);
     } finally {
       delete invokeErrors["editor_paint_stroke"];
@@ -997,5 +1002,76 @@ describe("回合只由它自己结束，侧道失败不陪葬", () => {
     expect(state.running).toBe(true);
     expect(state.notice?.isError).toBe(true);
     expect(state.notice?.text).toContain("同步选中项失败");
+  });
+});
+
+describe("切走之后，上一个会话残着的事件不能落到这一轮", () => {
+  /** 一个停在原地的回合：模型那半截话没说完。 */
+  function liveTurn(doc: PixelDocument) {
+    useStore.setState({
+      activeId: "doc-01",
+      document: doc,
+      frameIndex: 0,
+      revision: 3,
+      pngRevision: 3,
+      active: { layer: "L0", frame: "F0", color: null },
+      lang: "zh",
+      entries: [{ key: "p-live", kind: "pending", thinking: true }],
+      notice: null,
+      running: true,
+      runStartedAt: Date.now(),
+      stalled: false,
+    });
+  }
+
+  function texts(state: ReturnType<typeof useStore.getState>): string[] {
+    return state.entries.flatMap((entry) => ("text" in entry ? [entry.text] : []));
+  }
+
+  /** 整段对话拼成一片：token 是逐片追加的，逐条比对会漏掉「被接在尾巴上」。 */
+  function transcript(state: ReturnType<typeof useStore.getState>): string {
+    return texts(state).join("");
+  }
+
+  it("本会话的事件照收，别会话的 token 不往这一轮对话里拼", () => {
+    const doc = seedDocument();
+    liveTurn(doc);
+    // 正面例子兼哨兵：它生效才说明监听器真的挂着，反例才有意义。
+    publishAgent("doc-01", { kind: "token", text: "我这句" });
+    expect(transcript(useStore.getState())).toContain("我这句");
+
+    publishAgent("doc-other", { kind: "token", text: "别家这句" });
+    expect(transcript(useStore.getState())).not.toContain("别家这句");
+    // 正面那边没被动：别家那句话既没接上来，也没把已有内容顶掉。
+    expect(transcript(useStore.getState())).toBe("我这句");
+  });
+
+  it("别会话的 document_updated 盖不掉这一轮的画布", () => {
+    const doc = seedDocument();
+    liveTurn(doc);
+    const stranger = blankDocument(4, 3);
+
+    publishAgent("doc-other", {
+      kind: "document_updated",
+      revision: 99,
+      document: stranger,
+    });
+
+    const state = useStore.getState();
+    expect(state.document).toBe(doc);
+    expect(state.revision).toBe(3);
+  });
+
+  it("别会话的收尾事件不给这一轮封口", () => {
+    const doc = seedDocument();
+    liveTurn(doc);
+    expect(useStore.getState().running).toBe(true);
+
+    publishAgent("doc-other", { kind: "completed", turns: 1 });
+
+    const state = useStore.getState();
+    expect(state.running).toBe(true);
+    expect(state.entries.some((entry) => entry.kind === "pending")).toBe(true);
+    expect(state.runStartedAt).not.toBeNull();
   });
 });

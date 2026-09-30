@@ -410,15 +410,20 @@ function pngFor(frameIndex: number): string {
 
 /** 文档变了就往真机同一条通道报一声，前端的路由一行都不用改。 */
 function fire(channel: string, payload: unknown): void {
+  // 通道是全局的，载荷必须说清是谁的事。mock 只有一份全局文档，事件就挂在
+  // 最近动过它的那个会话名下——用户切走之后，上一段演示流会被前端原样丢弃，
+  // 这正是真机的行为。
+  const envelope =
+    channel === AGENT_EVENT_CHANNEL ? { session_id: ownerSession, event: payload } : payload;
   // 事件桥能用就走 Tauri（真机 / mockIPC 装了 invoke 的时候）；
   // 用不了就落页面内总线，至少订阅方还在。
   const internals = (window as unknown as { __TAURI_INTERNALS__?: { invoke?: unknown } })
     .__TAURI_INTERNALS__;
   if (typeof internals?.invoke === "function") {
-    void emit(channel, payload);
+    void emit(channel, envelope);
     return;
   }
-  publishLocal(channel, payload);
+  publishLocal(channel, envelope);
 }
 
 function broadcast(): void {
@@ -497,9 +502,16 @@ function demoTurn(): void {
 
 type Args = Record<string, unknown>;
 
+/** 演示文档挂在哪条会话名下。mock 没有真机的会话隔离，就用「最近动过它的那个
+ * 会话」顶着，足够让前端按 activeId 分流的那条守卫在浏览器里也演练到。 */
+let ownerSession = "p1";
+
 function handler(cmd: string, raw?: unknown): unknown {
   const payload: Args = (raw ?? {}) as Args;
   const id = String(payload.id ?? "p1");
+  // model_* 的 id 是模型 id 不是会话 id，拿它盖归属会把事件发到一个不存在的
+  // 会话上去，画面就再也不更新了。
+  if (!cmd.startsWith("model_")) ownerSession = id;
   switch (cmd) {
     case "agent_list_models":
       return emptyModels ? { active_id: "", entries: [] } : { active_id: MODEL.id, entries: [MODEL] };

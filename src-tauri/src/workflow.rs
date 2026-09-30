@@ -4,16 +4,16 @@
 //! 同步返回更快也更不容易中途改坏文档；探针类只回答「这段素材长什么样」。
 //!
 // 所有改文档的工作流都走 `AgentSession::with_document_mut`，和 agent 主循环共用同一把锁，
-//! 因此不会出现「主循环正在跑，工作流插进去改了画布」的交织。改完统一发
-//! `AgentEvent::DocumentUpdated`，前端只有一条刷新路径。
+//! 因此不会出现「主循环正在跑，工作流插进去改了画布」的交织。改完统一发带
+//! session_id 的 `AgentEvent::DocumentUpdated`，前端只有一条刷新路径。
 
 use agent_core::video_brief::{
     brief_frame_indices, brief_video as brief_video_flow, source_note, BRIEF_THUMB_MAX_DIM,
 };
 use agent_core::{
     imagegen, refine as refine_flow, video as video_flow, vision, ActiveContext, AgentEvent,
-    AgentSession, Attachment, AttachmentRole, LandSpot, ModelRole, RefineRequest, RefineTarget,
-    UiText,
+    AgentEventEnvelope, AgentSession, Attachment, AttachmentRole, LandSpot, ModelRole,
+    RefineRequest, RefineTarget, UiText,
 };
 use pixel_core::decode;
 use pixel_core::document::Document;
@@ -306,6 +306,7 @@ pub async fn workflow_image_gen(
     };
     emit_status(
         &app,
+        &session,
         UiText::new("status.asking_image", "asking the model for an image"),
     );
     let image = generator
@@ -314,6 +315,7 @@ pub async fn workflow_image_gen(
         .map_err(|e| e.to_string())?;
     emit_status(
         &app,
+        &session,
         UiText::new(
             "status.quantizing",
             "quantizing the generated image onto the grid",
@@ -388,6 +390,7 @@ pub async fn workflow_video_frames(
     for (index, path) in frames.iter().enumerate() {
         emit_status(
             &app,
+            &session,
             UiText::new("status.reading_frame", "reading frame {index} of {total}")
                 .with("index", (index + 1) as u64)
                 .with("total", frames.len() as u64),
@@ -540,6 +543,7 @@ pub async fn video_brief(
         let path = &frames[index];
         emit_status(
             &app,
+            &session,
             UiText::new("status.reading_frame", "reading frame {index} of {total}")
                 .with("index", (index + 1) as u64)
                 // 报的是「要读几帧」，不是素材里一共有多少帧：只读挑中的那一小撮，
@@ -696,13 +700,22 @@ pub(crate) fn emit_document(app: &AppHandle, session: &AgentSession) -> u64 {
     let document = session.document_json();
     let _ = app.emit(
         "agent-event",
-        AgentEvent::DocumentUpdated { revision, document },
+        AgentEventEnvelope {
+            session_id: session.id().to_string(),
+            event: AgentEvent::DocumentUpdated { revision, document },
+        },
     );
     revision
 }
 
-fn emit_status(app: &AppHandle, message: UiText) {
-    let _ = app.emit("agent-event", AgentEvent::Status { message });
+fn emit_status(app: &AppHandle, session: &AgentSession, message: UiText) {
+    let _ = app.emit(
+        "agent-event",
+        AgentEventEnvelope {
+            session_id: session.id().to_string(),
+            event: AgentEvent::Status { message },
+        },
+    );
 }
 
 fn landed_detail(landed: &LandedImage) -> Value {

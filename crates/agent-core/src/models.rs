@@ -467,6 +467,18 @@ pub enum AgentEvent {
     Interrupted,
 }
 
+/// `agent-event` 通道上的载荷：事件本身，加上它属于哪个会话。
+///
+/// 通道是全局的，而会话随时在切。用户切走时上一个回合并不会当场去世——中断要等
+/// 主循环下一次轮询取消旗（百来毫秒），这期间它还在往外发。少了会话标识，那些残
+/// 事件就会落到新会话头上：token 拼进新对话的尾巴，document_updated 把新画布
+/// 整个盖成上一个会话的画面。所以每个事件都必须自己说清楚是谁发的。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentEventEnvelope {
+    pub session_id: String,
+    pub event: AgentEvent,
+}
+
 /// provider 流式事件（由 providers 解析填充，交给 runner 归一）。
 #[derive(Debug, Clone)]
 pub enum LlmEvent {
@@ -549,5 +561,31 @@ mod tests {
         assert_eq!(value, serde_json::json!("snapshot"));
         let value = serde_json::to_value(AttachmentRole::Reference).unwrap();
         assert_eq!(value, serde_json::json!("reference"));
+    }
+
+    #[test]
+    fn the_envelope_carries_the_session_alongside_the_event() {
+        let envelope = AgentEventEnvelope {
+            session_id: "s-1".into(),
+            event: AgentEvent::DocumentUpdated {
+                revision: 7,
+                document: serde_json::json!({ "width": 8 }),
+            },
+        };
+        let value = serde_json::to_value(&envelope).unwrap();
+        // 会话标识与事件平级：前端先看 session_id 再决定要不要展开 event。
+        assert_eq!(value["session_id"], serde_json::json!("s-1"));
+        assert_eq!(
+            value["event"]["kind"],
+            serde_json::json!("document_updated")
+        );
+        assert_eq!(value["event"]["revision"], serde_json::json!(7));
+        // 回程也得通：前端那条路是反序列化，字段名一字都不能差。
+        let back: AgentEventEnvelope = serde_json::from_value(value).unwrap();
+        assert_eq!(back.session_id, "s-1");
+        match back.event {
+            AgentEvent::DocumentUpdated { revision, .. } => assert_eq!(revision, 7),
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 }

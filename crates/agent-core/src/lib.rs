@@ -43,9 +43,9 @@ pub use mcp::{
     MCP_TOOL_PREFIX,
 };
 pub use models::{
-    ActiveContext, AgentEvent, ApprovalDecision, Attachment, AttachmentRole, Capabilities,
-    ChatRequest, ContentBlock, LlmEvent, LoopLimits, Message, ModelConfig, PermissionMode,
-    Protocol, ReferenceMode, Role, RunnerConfig, ToolSpec, UiText,
+    ActiveContext, AgentEvent, AgentEventEnvelope, ApprovalDecision, Attachment, AttachmentRole,
+    Capabilities, ChatRequest, ContentBlock, LlmEvent, LoopLimits, Message, ModelConfig,
+    PermissionMode, Protocol, ReferenceMode, Role, RunnerConfig, ToolSpec, UiText,
 };
 pub use plan::{parse_updates as parse_plan_updates, spec as plan_spec, TurnPlan, PLAN_TOOL};
 pub use providers::{build_provider, EventStream, LlmProvider, ProviderError};

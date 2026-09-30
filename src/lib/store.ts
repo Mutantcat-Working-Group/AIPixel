@@ -672,7 +672,13 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
   /** agent-event 路由：文档事件驱动画布，其余折叠进对话条目。 */
   async function ensureListener() {
     if (unlisten) return;
-    unlisten = await bridge.listenAgentEvents((raw: AgentEvent) => {
+    unlisten = await bridge.listenAgentEvents((raw: AgentEvent, sessionId: string) => {
+      // 别人家会话的事件：切走之后上一个回合要等主循环下一轮轮询（百来毫秒）
+      // 才真的停，这期间它还在往外广播。拦在这儿，它的 token 才不会拼进新
+      // 对话尾巴，document_updated 才不会把新画布盖成旧画面，收尾事件也不
+      // 会替新回合封口。必须早于 touchStallWatch——旧事件照样算「链路活着」
+      // 的话，新回合真卡死就被它掩盖过去了。
+      if (sessionId !== getState().activeId) return;
       const state = getState();
       // 事件一到就说明链路活着：取消卡住提醒，并给静默计时重新打表。
       touchStallWatch();

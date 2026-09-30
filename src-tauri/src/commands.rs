@@ -1,10 +1,11 @@
 //! Tauri 命令层：把 agent-core 的主循环与 pixel-core 的文档能力暴露给前端。
-//! 事件统一走 `agent-event` 通道，`AgentEvent` 自带 kind tag，前端按 kind 分派。
+//! 事件统一走 `agent-event` 通道，载荷是带 session_id 的 `AgentEventEnvelope`，
+//! 里面的 `AgentEvent` 自带 kind tag，前端按 kind 分派。
 
 use agent_core::{
-    ActiveContext, AgentEvent, AgentSession, ApprovalDecision, Attachment, AttachmentRole,
-    Capabilities, ImageSupport, LoopLimits, Message, ModelConfig, ModelRole, PermissionMode,
-    Protocol,
+    ActiveContext, AgentEvent, AgentEventEnvelope, AgentSession, ApprovalDecision, Attachment,
+    AttachmentRole, Capabilities, ImageSupport, LoopLimits, Message, ModelConfig, ModelRole,
+    PermissionMode, Protocol,
 };
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, State};
@@ -326,11 +327,20 @@ pub fn agent_send_message(
     let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
     // 转发任务：把主循环事件搬上 Tauri 事件总线，流式期间不阻塞 UI。
     let forwarder = app.clone();
+    // 会话标识跟着事件一起走：用户切走之后，上一个还没停干净的回合不能把
+    // 它的 token 和 document_updated 落到新会话的对话与画布上。
+    let owner = id.clone();
     // 同步命令跑在主线程（WebView 的 IPC 回调线程），那里没有 tokio 运行时上下文，
     // 直接 tokio::spawn 会 panic 并把整个进程带崩；必须走 Tauri 自己的异步运行时。
     tauri::async_runtime::spawn(async move {
         while let Some(event) = rx.recv().await {
-            let _ = forwarder.emit("agent-event", event);
+            let _ = forwarder.emit(
+                "agent-event",
+                AgentEventEnvelope {
+                    session_id: owner.clone(),
+                    event,
+                },
+            );
         }
     });
     // 主循环跑在独立任务里，命令拿到的是「已受理」而非「已跑完」。

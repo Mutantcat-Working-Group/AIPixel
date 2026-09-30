@@ -9,6 +9,7 @@ import { subscribeLocal } from "./local-bus";
 import type {
   ActiveContext,
   AgentEvent,
+  AgentEventEnvelope,
   Attachment,
   ApprovalDecision,
   BatchEvent,
@@ -17,9 +18,9 @@ import type {
   BatchRecipeEntry,
   BatchScan,
   EditorOperation,
- InkColor,
+  InkColor,
   ImageSupport,
- LoopLimits,
+  LoopLimits,
   Message,
   McpServerConfig,
   McpServersView,
@@ -315,8 +316,17 @@ export function videoBrief(
   return invoke<VideoBrief>("video_brief", { id, params });
 }
 
-export function listenAgentEvents(handler: (event: AgentEvent) => void): Promise<UnlistenFn> {
-  return listenSafe<AgentEvent>(AGENT_EVENT_CHANNEL, handler);
+/** 订阅 agent 主循环与工作流的事件。handler 第二个参数是这条事件的会话归属——
+ * 通道是全局的，别的会话的事件也会到这儿，收不收由 store 按 activeId 定夺。 */
+export function listenAgentEvents(
+  handler: (event: AgentEvent, sessionId: string) => void,
+): Promise<UnlistenFn> {
+  return listenSafe<AgentEventEnvelope>(AGENT_EVENT_CHANNEL, (payload) => {
+    // 解不开说明通道上躺着一份没有 session_id 的旧载荷：当作别人的事丢掉，
+    // 好过凭猜把它算到当前会话头上。
+    if (!payload || typeof payload.session_id !== "string" || !payload.event) return;
+    handler(payload.event, payload.session_id);
+  });
 }
 
 /** Tauri 的事件桥通不通：`listen` 靠 `__TAURI_INTERNALS__.transformCallback` 注册回调，

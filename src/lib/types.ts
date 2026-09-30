@@ -232,6 +232,15 @@ export type AgentEvent =
   | { kind: "error"; message: UiText }
   | { kind: "interrupted" };
 
+/** `agent-event` 是全局通道，一个会话的事件对所有会话都可见，所以载荷必须自带
+ * 是谁发的：用户切走之后上一个回合还要一两百毫秒才停干净，这期间它仍在广播。
+ * 少了 session_id，它的 token 会拼进新对话尾巴，document_updated 会把新画布
+ * 整个盖成上一个会话的画面，收尾事件还会替新回合封口。 */
+export interface AgentEventEnvelope {
+  session_id: string;
+  event: AgentEvent;
+}
+
 export interface Usage {
   input: number | null;
   output: number | null;
