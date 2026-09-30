@@ -23,8 +23,10 @@ import type {
   McpServersView,
   NamedPalette,
   ModelView,
+  ModelsView,
   PixelDocument,
   Rgba,
+  ModelConfig,
   SessionInfo,
   WorkflowEntry,
 } from "./types";
@@ -171,7 +173,7 @@ function makeDocumentSized(width: number, height: number): PixelDocument {
   };
 }
 
-const MODEL: ModelView = {
+const SAMPLE_MODEL: ModelView = {
   id: "m1",
   label: "本地示例模型",
   protocol: "open_ai_compat",
@@ -183,6 +185,48 @@ const MODEL: ModelView = {
   capabilities: { vision: true, image_gen: false, video: false, reasoning: true },
   has_api_key: true,
 };
+
+/**
+ * 预览里的模型簿与默认模型。
+ *
+ * 早期这里是个常量：model_upsert 一律回硬编码的一份，改名、删模型、切默认
+ * 在预览里全无反应，「设置里改了侧栏不跟」这条真机 bug 因此复现不出来。
+ * 现在按真机的规矩记一份账：upsert 真的插入/更新，remove 真的删，
+ * 会话按 model_id 取 label，删掉当前默认时让剩下的顶上。
+ */
+const previewModels: ModelView[] = [{ ...SAMPLE_MODEL }];
+let activeModelId = SAMPLE_MODEL.id;
+/** 密钥只在真机才配，预览里留一份空账本是让人看见「沿用旧的」这条路真的是空的。 */
+const previewApiKeys: Record<string, string> = {};
+// 样例模型自带一个占位密钥，has_api_key 才和 ModelView 上的初始值对得上。
+previewApiKeys[SAMPLE_MODEL.id] = "preview-only-key";
+/** 会话名 -> 模型 id。没记的会话跟着默认模型走，和 Rust 一个规矩。 */
+const sessionModels: Record<string, string> = {};
+
+function modelView(id: string | null | undefined): ModelView {
+  return (
+    previewModels.find((entry) => entry.id === id) ??
+    previewModels.find((entry) => entry.id === activeModelId) ??
+    previewModels[0] ??
+    SAMPLE_MODEL
+  );
+}
+
+function modelsView(): ModelsView {
+  return {
+    active_id: previewModels.some((entry) => entry.id === activeModelId) ? activeModelId : "",
+    entries: previewModels.map((entry) => ({ ...entry })),
+  };
+}
+
+/** 删掉 model_id 之后还挂在空号上的会话，落到当前默认模型上。 */
+function repairOrphanedSessions(): void {
+  for (const sessionId of Object.keys(sessionModels)) {
+    if (!previewModels.some((entry) => entry.id === sessionModels[sessionId])) {
+      delete sessionModels[sessionId];
+    }
+  }
+}
 
 const MCP_TRANSPORT = {
   kind: "http" as const,
@@ -196,16 +240,19 @@ const MCP_TRANSPORT = {
 function makeSession(id: string, revision: number): SessionInfo {
   // 预览里摆两条会话，title 和 order 两项才都测得到：改名和拖动排序都指着它们。
   const title = sessionTitles[id] ?? null;
+  // 跟着模型簿取 label：设置里改名、换默认模型、删模型，侧栏那一行都要跟着变，
+  // 所以这里不能写死某个模型的 label。
+  const model = modelView(sessionModels[id]);
   const roles = (["chat", "image_gen", "vision", "video"] as const).map((role) => ({
     role,
-    model_id: MODEL.id,
-    model_label: MODEL.label,
+    model_id: model.id,
+    model_label: model.label,
     detached: false,
   }));
   return {
     id,
-    model_id: MODEL.id,
-    model_label: MODEL.label,
+    model_id: model.id,
+    model_label: model.label,
     roles,
     // 宽高跟着当前画布走：新建会话选了别的大小，侧栏那一行要如实报出来。
     width: doc.width,
@@ -424,7 +471,7 @@ function catalog(): WorkflowEntry[] {
   return CATALOG.map((info) => ({
     ...info,
     readiness: { state: "ready" as const },
-    served_by_label: MODEL.label,
+    served_by_label: previewModels[0]?.label ?? SAMPLE_MODEL.label,
     served_by_detached: false,
   }));
 }
@@ -553,7 +600,7 @@ function handler(cmd: string, raw?: unknown): unknown {
   if (!cmd.startsWith("model_")) ownerSession = id;
   switch (cmd) {
     case "agent_list_models":
-      return emptyModels ? { active_id: "", entries: [] } : { active_id: MODEL.id, entries: [MODEL] };
+      return emptyModels ? { active_id: "", entries: [] } : modelsView();
     case "agent_loop_limits":
       return LIMITS;
     case "agent_set_loop_limits":
@@ -595,6 +642,9 @@ function handler(cmd: string, raw?: unknown): unknown {
       return makeSession(fresh, revision);
     }
     case "session_bind_model":
+      sessionModels[String(payload.id ?? "p1")] = String(payload.model_id ?? activeModelId);
+      // 改绑完的会话名跟着新模型走，不然侧栏要等下一次刷新才变。
+      return makeSession(String(payload.id ?? "p1"), revision);
     case "session_bind_role":
     case "session_clear_role":
       return makeSession(String(payload.id ?? "p1"), revision);
@@ -619,10 +669,52 @@ function handler(cmd: string, raw?: unknown): unknown {
         return null;
       }
     case "model_set_active":
-    case "model_upsert":
-      return { active_id: MODEL.id, entries: [MODEL] };
-    case "model_remove":
-      return { active_id: "", entries: [] };
+      // 只有簿里的号才算数：点一个刚被删掉的定义，默认就跟着空下来。
+      activeModelId = previewModels.some((entry) => entry.id === payload.id)
+        ? String(payload.id)
+        : "";
+      return modelsView();
+    case "model_upsert": {
+      const config = payload.config as unknown as ModelConfig | undefined;
+      if (!config?.id) return modelsView();
+      const previous = previewModels.find((entry) => entry.id === config.id);
+      // 表单不会把密钥回填出来：空着送过来就是「沿用旧的」，
+      // 拿空串盖上去会让一份本来配好的模型突然变成没密钥。
+      if (config.api_key !== "") previewApiKeys[config.id] = config.api_key;
+      const view: ModelView = {
+        id: config.id,
+        label: config.label || config.model || previous?.label || config.id,
+        protocol: config.protocol,
+        base_url: config.base_url,
+        model: config.model,
+        max_tokens: config.max_tokens ?? null,
+        temperature: config.temperature ?? null,
+        disable_thinking: config.disable_thinking ?? null,
+        capabilities: config.capabilities,
+        has_api_key: (previewApiKeys[config.id] ?? "").trim() !== "",
+      };
+      if (previous) {
+        previewModels.splice(previewModels.indexOf(previous), 1, view);
+      } else {
+        previewModels.push(view);
+        // 簿里原本空着（?mock=empty 之外的常规路径）：新建的第一份自动当默认。
+        if (activeModelId === "" || !previewModels.some((entry) => entry.id === activeModelId)) {
+          activeModelId = view.id;
+        }
+      }
+      return modelsView();
+    }
+    case "model_remove": {
+      const at = previewModels.findIndex((entry) => entry.id === payload.id);
+      if (at >= 0) previewModels.splice(at, 1);
+      delete previewApiKeys[String(payload.id)];
+      repairOrphanedSessions();
+      // 删的正是当前默认：回落到簿里剩下的第一个，和 Rust 一致。
+      if (activeModelId === String(payload.id)) {
+        activeModelId = previewModels[0]?.id ?? "";
+      }
+      return modelsView();
+    }
     case "model_fetch_models":
       return FETCHABLE;
     case "model_probe_image": {
