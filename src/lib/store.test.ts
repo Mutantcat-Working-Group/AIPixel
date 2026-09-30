@@ -1380,3 +1380,32 @@ describe("syncSelection 把选中对齐到后端", () => {
     delete invokeResults["agent_document"];
   });
 });
+
+describe("工具块的展开态按调用 id 记", () => {
+  it("没记过就照默认姿态取反，分流节点默认摊开所以第一下是收起", () => {
+    useStore.setState({ toolOpen: {} });
+
+    useStore.getState().toggleToolOpen("call_plan", true);
+    expect(useStore.getState().toolOpen).toEqual({ call_plan: false });
+    useStore.getState().toggleToolOpen("call_plan", true);
+    expect(useStore.getState().toolOpen).toEqual({ call_plan: true });
+
+    useStore.getState().toggleToolOpen("call_ops", false);
+    expect(useStore.getState().toolOpen).toEqual({ call_plan: true, call_ops: true });
+  });
+
+  // 切会话会把条目列表按 Rust 历史重建，EntryRow 整行重挂载。状态挂在 id 上，
+  // 重建多少次用户的摊开/收起都还在，不会自己合上。
+  it("rebuilds the entry list without forgetting the user's choice", () => {
+    useStore.setState({ toolOpen: {} });
+    useStore.getState().toggleToolOpen("call_ops", false);
+    expect(useStore.getState().toolOpen).toEqual({ call_ops: true });
+
+    useStore.getState().toggleToolOpen("call_ops", false);
+    expect(useStore.getState().toolOpen).toEqual({ call_ops: false });
+    // 换一个 id 不牵连前一个：各条工具块自己记自己的。
+    useStore.getState().toggleToolOpen("call_read", false);
+    expect(useStore.getState().toolOpen).toEqual({ call_ops: false, call_read: true });
+    useStore.setState({ toolOpen: {} });
+  });
+});

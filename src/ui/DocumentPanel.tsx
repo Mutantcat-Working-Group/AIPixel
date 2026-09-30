@@ -473,22 +473,29 @@ const [hexDraft, setHexDraft] = useState("");
     void useStore.getState().setLayerPalette(scopeLayer.id, paletteId);
   }
 
-  /**
-   * 往范围里加色。内置预设改不得，所以两步走：先复制一份（副本顺带接到这一层上），
-   * 再从副本里加。加完之后必须回炉再读一次文档，才知道新 id 是谁。
-   */
+  /** 往范围里加色。内置预设改不得：复制一份副本再往里加，副本顺带接到这一层上。 */
   async function addScopeColor(hex: string) {
     const layer = scopeLayer;
     if (!layer || hex === "") return;
     if (scopeHexes.some((item) => item.toLowerCase() === hex.toLowerCase())) return;
-    let paletteId = layer.palette_id;
     if (scope?.builtin) {
-      await useStore.getState().forkPalette(layer.palette_id, `${scope.name}${copySuffix}`, layer.id);
-      paletteId =
-        useStore.getState().document?.layers.find((item) => item.id === layer.id)?.palette_id ?? "";
-      if (paletteId === "") return;
+      // 内置预设改不得，可「复制一份再往里加」不能拆成两条命令跑：文档是异步事件
+      // 推回来的，第二条命令要先回读才知道副本 id 是谁，那一下回读可能还没到，颜色
+      // 就悄悄丢了。拧成一条 create_palette，from 出副本、colors 加色、layer 把这一
+      // 层接过去，像素按就近色归队，一个空档都不留。
+      const revision = await useStore.getState().runEditorOps([
+        {
+          op: "create_palette",
+          name: `${scope.name}${copySuffix}`,
+          from: layer.palette_id,
+          colors: [hex],
+          layer: layer.id,
+        },
+      ]);
+      if (revision === null) return;
+    } else {
+      await useStore.getState().addPaletteColor(layer.palette_id, hex);
     }
-    await useStore.getState().addPaletteColor(paletteId, hex);
     // 挑完即用：新颜色不当当前墨，这一下就白挑了。
     pickColor(hex);
     setHexDraft("");

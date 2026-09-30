@@ -322,3 +322,42 @@ describe("pushSideNotice", () => {
     expect(assistant?.kind === "assistant" && assistant.live).toBe(false);
   });
 });
+
+describe("工具调用 id 能跨重建认出来", () => {
+  // 工具块的展开态按调用 id 记，就是为了让它在条目列表重建之后还认得自己。
+  // Rust 历史读回来一遍是一条全新列表（连 key 都是新的），只有 id 是同一条调用。
+  const messages: Message[] = [
+    {
+      role: "user",
+      content: [{ type: "text", text: "画一只猫" }],
+    },
+    {
+      role: "assistant",
+      content: [
+        { type: "reasoning", text: "先想一下" },
+        {
+          type: "tool_use",
+          id: "call_01",
+          name: "pixel_apply_operations",
+          input: { ops: [] },
+        },
+        { type: "tool_result", tool_use_id: "call_01", content: "已写入 1 个操作", is_error: false },
+      ],
+    },
+  ];
+
+  it("rebuild keeps the tool call id", () => {
+    const first = historyToTranscript(messages);
+    const second = historyToTranscript(messages);
+
+    const ids = (entries: ReturnType<typeof historyToTranscript>) =>
+      entries.filter((entry) => entry.kind === "tool").map((entry) => (entry.kind === "tool" ? entry.id : ""));
+    expect(ids(first)).toEqual(["call_01"]);
+    expect(ids(second)).toEqual(["call_01"]);
+    // 展示用的 key 每次重建都是新的：不靠 key 记状态，靠的就是 id。
+    expect(first.map((entry) => entry.key)).not.toEqual(second.map((entry) => entry.key));
+
+    const tool = first.find((entry) => entry.kind === "tool");
+    expect(tool?.kind === "tool" && tool.summary).toBe("已写入 1 个操作");
+  });
+});

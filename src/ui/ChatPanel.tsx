@@ -198,16 +198,23 @@ function ApprovalCard() {
 }
 
 function EntryRow({ entry }: { entry: TranscriptEntry }) {
-  // null 表示用户还没手动碰过，此时按默认来；点过一次就以用户的最后一次为准。
-  const [expanded, setExpanded] = useState<boolean | null>(null);
   const t = useT();
   // 等待审批的调用要在对话流里标出来，否则用户不知道停在哪一条。
   const awaitingId = useStore((s) => s.pendingApproval?.callId ?? null);
   // 分流节点是「这一轮被理解成了什么」，整批评判词就摆在眼前才有意义；
   // 折起来等于把这批功能的成果藏进一次点击，所以它默认摊开。
-  const defaultOpen = entry.kind === "tool" && entry.name === "pixel_plan";
-  const open = expanded ?? defaultOpen;
-  const toggle = () => setExpanded((v) => !(v ?? defaultOpen));
+  const autoOpen = entry.kind === "tool" && entry.name === "pixel_plan";
+  // 展开态收在 store 里、按工具调用 id 记，不放在这一行的局部 state 上：条目列表
+  // 一重建（切会话、从 Rust 历史读回），EntryRow 整行重挂载，局部 state 归零，
+  // 用户刚摊开的那段工具 JSON 就自己合上了。按 id 记，换个会话再回来也还摊着。
+  const open = useStore((s) =>
+    entry.kind === "tool" ? (s.toolOpen[entry.id] ?? autoOpen) : false,
+  );
+  const toggleTool = useStore((s) => s.toggleToolOpen);
+  const toggle = () => {
+    if (entry.kind !== "tool") return;
+    toggleTool(entry.id, autoOpen);
+  };
 
   if (entry.kind === "user") {
     return (

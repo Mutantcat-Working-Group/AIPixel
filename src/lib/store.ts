@@ -197,9 +197,14 @@ interface StoreState extends DocumentSnapshot, WorkflowState, BatchState {
   mcpEnabled: boolean;
   /** 设置弹窗停在哪一页：模型 / 行为护栏 / 关于。 */
   settingsTab: SettingsTab;
+  /** 工具块展开状态，按工具调用 id 记。跨会话重载也不丢：用户摊开的 JSON 不该
+   * 因为切走再回来就自己合上。 */
+  toolOpen: Record<string, boolean>;
 }
 
 export interface StoreActions {
+  /** 摊开/收起某条工具调用；autoOpen 是这一条的默认姿态（分流节点默认摊开）。 */
+  toggleToolOpen: (id: string, autoOpen: boolean) => void;
   boot: () => Promise<void>;
   setLang: (lang: Lang) => void;
   selectSession: (id: string) => Promise<void>;
@@ -314,8 +319,6 @@ export interface StoreActions {
   runEditorOps: (ops: EditorOperation[], frameHint?: number) => Promise<number | null>;
   /** 换配色范围：整幅按就近色重映射进新调色板，画面留住、颜色归队。 */
   setPaletteColors: (colors: string[]) => Promise<boolean>;
-  /** 复制一套现成的配色范围当起点（内置预设走副本），再把当前层指过去。 */
-    forkPalette: (fromId: string, name: string, layerId?: string) => Promise<void>;
   /** 从零起一套；不给名字就沿用 Rust 的兜底命名。 */
     createPalette: (name: string, colors: string[], layerId?: string) => Promise<void>;
   /** 删掉一套自定义范围。内置的、还被引用的，Rust 会拒。 */
@@ -863,6 +866,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     // MCP 默认开着：关掉要在设置里明确按一下，而不是因为一次读失败悄悄消失。
     mcpEnabled: true,
     settingsTab: "models",
+    toolOpen: {},
     recipe: DEFAULT_BATCH_RECIPE,
     scan: null,
     scanBusy: false,
@@ -871,6 +875,12 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     recipeName: "",
     recipeBusy: false,
     recipeImport: null,
+
+    toggleToolOpen: (id, autoOpen) => {
+      // 没记过就照默认姿态取反：分流节点默认摊开，第一下按是收起。
+      const now = getState().toolOpen[id] ?? autoOpen;
+      setState({ toolOpen: { ...getState().toolOpen, [id]: !now } });
+    },
 
     boot: async () => {
       if (booting) return booting;
@@ -1771,23 +1781,6 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       if (colors.length === 0) return false;
       const revision = await getState().runEditorOps([{ op: "set_palette", colors }]);
       return revision !== null;
-    },
-
-    forkPalette: async (fromId, name, layerId) => {
-      // layerId 不传就跟着激活层走；配色区伺候的是别层时，显式把它带过来。
-      const target = layerId ?? getState().active.layer;
-      if (!target) return;
-      // 改内置预设的唯一入口：Rust 落点是副本，原套一个色都不动。
-      // 顺带把当前层指过去——用户改的就是眼前这一层的范围。
-      await getState().runEditorOps([
-        {
-          op: "create_palette",
-          name,
-          from: fromId,
-          colors: [],
-          layer: target,
-        },
-      ]);
     },
 
     createPalette: async (name, colors, layerId) => {
