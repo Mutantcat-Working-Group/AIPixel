@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! 三个落地工具的封装，把模型入参翻译成 pixel-core 的类型化操作。
 //! 「不让模型手写矩阵」的契约就在这一层收口。
 
@@ -317,9 +319,21 @@ fn tool_apply_operations(doc: &mut Document, active: &ActiveContext, input: &Val
     for (i, v) in arr.iter().enumerate() {
         let mut patched = v.clone();
         fill_pixel_target(&mut patched, active);
+        // 错误里必须带上 op 名：一整批操作里第几条、是哪一种操作翻的车，
+        // 少了名字模型只能靠猜，猜三遍还是同一处（见配色范围那组）。
+        let op_name = patched
+            .get("op")
+            .and_then(|o| o.as_str())
+            .unwrap_or("?")
+            .to_string();
         match serde_json::from_value::<PixelOperation>(patched) {
             Ok(op) => ops.push(op),
-            Err(e) => return err(format!("operation[{i}] invalid: {e}")),
+            Err(e) => {
+                return err(format!(
+                    "operation[{i}] {op_name} invalid: {e}{}",
+                    op_field_hint(&op_name)
+                ))
+            }
         }
     }
     match ops::apply_batch(doc, &ops) {
@@ -332,6 +346,20 @@ fn tool_apply_operations(doc: &mut Document, active: &ActiveContext, input: &Val
             ok(content)
         }
         Err(e) => err(format!("operation failed: {e}")),
+    }
+}
+
+/// 反序列化失败时补的一句字段提示。配色范围那一组的 id 字段在 schema 里
+/// 别处叫 palette_id，是模型最常写错的一处，单独说清楚。
+fn op_field_hint(op: &str) -> &'static str {
+    match op {
+        "delete_palette" | "rename_palette" | "add_palette_color" | "remove_palette_color" => {
+            " (the color-range id field is `id`, and `palette_id` is accepted too)"
+        }
+        "delete_frame" | "duplicate_frame" | "move_frame" | "set_frame_duration" => {
+            " (the frame field is `id`, and `frame` is accepted too)"
+        }
+        _ => "",
     }
 }
 

@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Mutantcat Working Group
+// SPDX-License-Identifier: GPL-3.0-only
 //! 类型化像素操作。LLM 与 UI 都通过这套操作改文档，
 //! 这是「不让模型手写矩阵」契约的核心。
 
@@ -107,17 +109,22 @@ pub enum PixelOperation {
     },
     /// 删掉一套。内置删不得，且正在被某层引用的删掉之前必须先让引用方改指别的。
     DeletePalette {
+        /// 也收 `palette_id`：schema 里别处一律叫 palette_id，模型照那边写。
+        #[serde(alias = "palette_id")]
         id: String,
     },
     RenamePalette {
+        #[serde(alias = "palette_id")]
         id: String,
         name: String,
     },
     AddPaletteColor {
+        #[serde(alias = "palette_id")]
         id: String,
         color: String,
     },
     RemovePaletteColor {
+        #[serde(alias = "palette_id")]
         id: String,
         index: usize,
     },
@@ -1077,5 +1084,39 @@ mod tests {
         assert!((l - 100.0).abs() < 0.01 && a.abs() < 0.01 && b.abs() < 0.01);
         let (l, a, b) = lab(Rgba::rgb(0, 0, 0));
         assert!(l.abs() < 0.01 && a.abs() < 0.01 && b.abs() < 0.01);
+    }
+
+    /// 配色范围那一组的 id 字段必须也收 palette_id：schema 里别处一律叫
+    /// palette_id，模型照着写过来时整批操作不该因为一个字段名全部失败。
+    #[test]
+    fn palette_range_ops_accept_palette_id_as_well_as_id() {
+        let via_id: PixelOperation =
+            serde_json::from_value(serde_json::json!({"op": "delete_palette", "id": "abc"}))
+                .unwrap();
+        let via_palette_id: PixelOperation = serde_json::from_value(
+            serde_json::json!({"op": "delete_palette", "palette_id": "abc"}),
+        )
+        .unwrap();
+        assert_eq!(format!("{via_id:?}"), format!("{via_palette_id:?}"));
+
+        let op: PixelOperation = serde_json::from_value(serde_json::json!({
+            "op": "add_palette_color",
+            "palette_id": "range-1",
+            "color": "#ff0000"
+        }))
+        .unwrap();
+        assert!(
+            matches!(op, PixelOperation::AddPaletteColor { id, color } if id == "range-1" && color == "#ff0000")
+        );
+
+        let op: PixelOperation = serde_json::from_value(serde_json::json!({
+            "op": "remove_palette_color",
+            "palette_id": "range-1",
+            "index": 2
+        }))
+        .unwrap();
+        assert!(
+            matches!(op, PixelOperation::RemovePaletteColor { id, index } if id == "range-1" && index == 2)
+        );
     }
 }
