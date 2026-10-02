@@ -1,10 +1,11 @@
 // Copyright (C) 2026 Mutantcat Working Group
 // SPDX-License-Identifier: GPL-3.0-only
 import { useRef, useState } from "react";
-import { Button, Input, Tooltip } from "antd";
+import { Button, Input, Modal, Tooltip } from "antd";
 import { Github, Pencil, Plus, Trash2 } from "lucide-react";
 
 import { useStore } from "../lib/store";
+import type { SessionInfo } from "../lib/types";
 import { useT } from "../lib/t";
 import { openContextMenu } from "./ContextMenu";
 import CanvasSizeModal from "./CanvasSizeModal";
@@ -21,8 +22,13 @@ export default function SessionSidebar() {
   const reorderSessions = useStore((s) => s.reorderSessions);
 
   const [sizedOpen, setSizedOpen] = useState(false);
+  // 待确认删除的会话。存整条而不是只存 id：确认弹窗要把名字和画布尺寸一并
+  // 摆给用户看（「删的到底是哪一张」是这类确认唯一有意义的信息）。
+  const [pendingDrop, setPendingDrop] = useState<SessionInfo | null>(null);
   const [width, setWidth] = useState(64);
   const [height, setHeight] = useState(64);
+  // 会话名草稿：新建时才填，可留空（留空走 Rust 默认编号 s1、s2……）。
+  const [newName, setNewName] = useState("");
   // 正在改名的会话与草稿。ref 是权威值：失焦提交时 Input 已卸载，
   // 闭包里读 state 会拿到已经清空的旧值，所以以 ref 为准（图层改名同款打法）。
   const [renamingId, setRenamingId] = useState<string | null>(null);
@@ -52,7 +58,9 @@ export default function SessionSidebar() {
   /** 松手落位：把拖着的会话搬到目标槽位， ids 整批交给 Rust 重排序位。 */
   function dropOn(targetId: string) {
     if (!dragId || dragId === targetId) return;
-    const ids = sessions.map((session) => session.id);
+    // 读实时 state 而不是渲染时的闭包：连着拖两次时，后一次的闭包可能还是
+    // 上一轮 dragstart 时的列表，搬出来的次序就漏掉中间那次。
+    const ids = useStore.getState().sessions.map((session) => session.id);
     const from = ids.indexOf(dragId);
     const to = ids.indexOf(targetId);
     if (from < 0 || to < 0) return;
@@ -73,6 +81,7 @@ export default function SessionSidebar() {
             type="text"
             icon={<Plus size={14} />}
             onClick={() => setSizedOpen(true)}
+            aria-label={t("sidebar.new")}
           />
         </Tooltip>
       </div>
@@ -126,7 +135,7 @@ export default function SessionSidebar() {
                     label: t("sidebar.delete"),
                     icon: <Trash2 size={13} />,
                     danger: true,
-                    onSelect: () => void removeSession(session.id),
+                    onSelect: () => setPendingDrop(session),
                   },
                 ])
               }
@@ -171,6 +180,7 @@ export default function SessionSidebar() {
                       event.stopPropagation();
                       beginRename(session.id, session.title ?? session.id);
                     }}
+                    aria-label={t("sidebar.rename")}
                   />
                 </Tooltip>
                 <Tooltip title={t("sidebar.delete")}>
@@ -181,11 +191,14 @@ export default function SessionSidebar() {
                     icon={<Trash2 size={13} />}
                     onClick={(event) => {
                       event.stopPropagation();
-                      void removeSession(session.id);
+                      setPendingDrop(session);
                     }}
+                    aria-label={t("sidebar.delete")}
                   />
                 </Tooltip>
               </span>
+              {/* 模型名直接占位：没绑定就显示「未绑定」。留空反而像没加载完，
+                  用户会对着它发呆。 */}
               <span className="session-model">{session.model_label || t("sidebar.unbound")}</span>
               <span className="session-meta">
                 <span>
@@ -195,6 +208,9 @@ export default function SessionSidebar() {
               </span>
             </div>
           ))}
+          {sessions.length === 0 ? (
+            <p className="session-empty">{t("sidebar.empty")}</p>
+          ) : null}
         </div>
       </div>
 
@@ -204,6 +220,43 @@ export default function SessionSidebar() {
           {t("sidebar.repo")}
         </a>
       </div>
+
+      {/* 删会话是整个软件里唯一救不回来的操作：聊天记录和画布一起没，
+          撤销栈是编辑器 op 级的，够不着它。所以这里必须先问清楚。 删帧、删图
+          层就不用问，那些走编辑器 op，落撤销栈，一步 undo 就回来了。 */}
+      <Modal
+        open={pendingDrop !== null}
+        title={t("sidebar.delete_title")}
+        okText={t("sidebar.delete_ok")}
+        cancelText={t("sidebar.modal_cancel")}
+        okButtonProps={{ danger: true }}
+        onOk={async () => {
+          const target = pendingDrop;
+          if (!target) return;
+          try {
+            await removeSession(target.id);
+            // 只有真的删掉了才收窗：Rust 那头失败的话 store 会把原因顶成一条通知，
+            // 窗子留着，用户才好接着重试或者干脆收手。
+            setPendingDrop(null);
+          } catch {
+            // 错误已经由 store 转成通知，这里别再说一遍。
+          }
+        }}
+        onCancel={() => setPendingDrop(null)}
+        // 关窗就拆内容：删成功会清掉 pendingDrop，正文那句引用它的插值就不该
+        // 还挂在 DOM 上跑第二遍。和另两个弹窗保持一个写法。
+        destroyOnHidden
+      >
+        {pendingDrop ? (
+          <p className="session-drop-body">
+            {t("sidebar.delete_body", {
+              name: pendingDrop.title ?? pendingDrop.id,
+              width: pendingDrop.width,
+              height: pendingDrop.height,
+            })}
+          </p>
+        ) : null}
+      </Modal>
 
       <CanvasSizeModal
         open={sizedOpen}
@@ -217,13 +270,20 @@ export default function SessionSidebar() {
         presetsLabel={t("sidebar.presets")}
         readout={t("sidebar.size_readout", { width, height, cells: width * height })}
         hint={t("sidebar.size_hint")}
+        nameLabel={t("sidebar.name_label")}
+        namePlaceholder={t("sidebar.name_placeholder")}
+        name={newName}
+        onNameChange={setNewName}
         onChange={(w, h) => {
           setWidth(w);
           setHeight(h);
         }}
         onOk={async () => {
           setSizedOpen(false);
-          await createSession(width, height);
+          const chosen = newName.trim();
+          await createSession(width, height, chosen === "" ? undefined : chosen);
+          // 草稿要清：留着的话下一个新会话会顶上一个的名字。
+          setNewName("");
         }}
         onCancel={() => setSizedOpen(false)}
       />

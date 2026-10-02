@@ -75,6 +75,8 @@ fn transport_view(config: &McpServerConfig) -> McpTransportView {
     }
 }
 
+/// 工具清单 -> 视图。name 一律用命名空间后的全名：模型写进 tool_call 的
+/// 就是这个名字，回执里出现裸工具名会让人对不上是哪个服务器的。
 fn tool_views(server: &str, tools: &[McpTool]) -> Vec<McpToolView> {
     tools
         .iter()
@@ -113,6 +115,8 @@ fn merge_map(existing: &BTreeMap<String, String>, incoming: &mut BTreeMap<String
     }
 }
 
+/// 一个服务器的视图。没连上时 tools 给空数组而不是 null：未握手的服务器
+/// 本来就报不出清单，空数组让前端少判一种形状。
 fn server_view(registry: &McpRegistry, config: &McpServerConfig) -> McpServerView {
     let connected = registry.is_connected(&config.name);
     let tools = if connected {

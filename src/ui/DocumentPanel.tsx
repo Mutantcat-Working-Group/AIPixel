@@ -1,6 +1,7 @@
 // Copyright (C) 2026 Mutantcat Working Group
 // SPDX-License-Identifier: GPL-3.0-only
 import {
+  useCallback,
   useEffect,
   useRef,
   useState,
@@ -23,6 +24,8 @@ import {
   ArrowDown,
   ArrowUp,
   ArrowRight,
+  ChevronsLeft,
+  ChevronsRight,
   Brush,
   Copy,
   Eraser,
@@ -37,18 +40,33 @@ import {
   Play,
   Plus,
   Pencil,
+  Circle,
+  Minus,
+  PenTool,
+  Square,
+  Triangle,
   Trash2,
   Undo2,
+  Redo2,
   X,
 } from "lucide-react";
 
 import { useStore } from "../lib/store";
 import { useT } from "../lib/t";
 import { appendStroke, lineCells } from "../lib/stroke";
+import {
+  shapeCells,
+  smoothPathCells,
+  type ShapeKind,
+} from "../lib/shapes";
 import { compositeFrame } from "../lib/render";
-import { parseHex, rgbaToHex } from "../lib/palette";
+import { parseHex, rgbaToHex, swatchCommitOnClose } from "../lib/palette";
 import { NAMED_COLORS, colorName } from "../lib/colornames";
+import { tryCapturePointer } from "../lib/pointer-capture";
+import PaletteOpsModal, { type PaletteChoice, type PaletteOpRequest } from "./PaletteOpsModal";
 import FrameThumb from "./FrameThumb";
+import HStrip from "./HStrip";
+import { stripScrollFor, type StripEdges } from "./strip";
 import CanvasSizeModal from "./CanvasSizeModal";
 import { openContextMenu, type ContextMenuItem } from "./ContextMenu";
 import type {
@@ -58,6 +76,7 @@ import type {
   PixelDocument,
   StrokeCell,
 } from "../lib/types";
+import type { NamedPalette } from "../lib/types";
 
 const MAX_PREVIEW_HEIGHT = 240;
 /** 洋葱皮的浓度：看得见上一帧的轮廓，但抢不走当前帧的注意力。 */
@@ -117,12 +136,20 @@ export default function DocumentPanel() {
   const t = useT();
   const document = useStore((s) => s.document);
   const pngUrl = useStore((s) => s.pngUrl);
+  const pngFrame = useStore((s) => s.pngFrame);
   const active = useStore((s) => s.active);
   const frameIndex = useStore((s) => s.frameIndex);
   const revision = useStore((s) => s.revision);
   const lang = useStore((s) => s.lang);
   const undoDepth = useStore((s) => s.undoStack.length);
-  const [tool, setTool] = useState<EditorTool>("brush");
+  const redoDepth = useStore((s) => s.redoStack.length);
+ const [tool, setTool] = useState<EditorTool>("brush");
+  // 形状档位：null = 自由笔。和「笔/橡皮/油漆桶」是两个维度——笔决定落什么色，
+  // 形状决定怎么走。油漆桶碰上形状时自动变成「实心形状」而不是泼油漆。
+  const [shape, setShape] = useState<ShapeKind | null>(null);
+  // 形状的圆角量：短边比例，0 = 尖角。只对矩形/三角形有意义——
+  // 椭圆本来就滑，直线滑起来就不是直线了。
+  const [corner, setCorner] = useState(0);
   const [aipText, setAipText] = useState<string | null>(null);
   const [aipOpen, setAipOpen] = useState(false);
   const [budget, setBudget] = useState(300);
@@ -134,20 +161,33 @@ export default function DocumentPanel() {
   // 配色区正在伺候哪一层。null = 跟着激活层走；用户在色板区分区里另挑过
   // 一层时钉住，方便不切激活层也能给底层换范围。
   const [scopeLayerId, setScopeLayerId] = useState<string | null>(null);
-// 取色盘正在挑的草稿值：拖动过程中只预览，落文档等松手（onChangeComplete）。
-const [swatchDraft, setSwatchDraft] = useState<string | null>(null);
-// 手输十六进制的草稿。取色盘拖不出「我就要这个 #hex」，而像素行当里 hex 是通行证。
-const [hexDraft, setHexDraft] = useState("");
+  // 取色盘正在挑的草稿值：拖动过程中只预览，落文档等松手或关弹层。
+  const [swatchDraft, setSwatchDraft] = useState<string | null>(null);
+  // 草稿的镜像副本：关弹层是异步回调，闭包里读 state 会读到关之前那一帧。
+  const swatchDraftRef = useRef<string | null>(null);
+  // 这一轮弹层里已经落过文档的那个色：同一色不许落第二次（拖动会和
+  // 「关弹层收尾」撞车，antd 的 onChangeComplete 只由滑块松手触发，点预设
+  // 和手输都不触发，所以收尾还得靠关弹层）。
+  const swatchDoneRef = useRef<string | null>(null);
+  // 手输十六进制的草稿。取色盘拖不出「我就要这个 #hex」，而像素行当里 hex 是通行证。
+  const [hexDraft, setHexDraft] = useState<string>("");
   // 配色区的行内输入：null = 收起，"new" = 新建一套，"rename" = 给当前套改名。
   // 和图层/会话改名同一套：ref 是权威，失焦提交时 state 已经清了。
   const [scopeEditing, setScopeEditing] = useState<"new" | "rename" | null>(null);
   const [scopeDraftName, setScopeDraftName] = useState("");
   const scopeEditingRef = useRef<"new" | "rename" | null>(null);
+  // 三件「会动画面」的事共用一个确认弹窗：换范围、删色、删整套。
+  // null = 关着。弹窗开着的时候不许顺手再开一个，否则两问的答案会串。
+  const [paletteOp, setPaletteOp] = useState<PaletteOpRequest | null>(null);
   const checkerRef = useRef<HTMLDivElement>(null);
   // 一笔笔画的临时状态全在 ref 里：pointermove 不该触发 React 渲染。
-  const strokeRef = useRef<StrokeCell[]>([]);
-  const lastCellRef = useRef<StrokeCell | null>(null);
-  const paintingRef = useRef(false);
+ const strokeRef = useRef<StrokeCell[]>([]);
+ const lastCellRef = useRef<StrokeCell | null>(null);
+ const paintingRef = useRef(false);
+  // 形状工具的锚点（按下的那一格）和平滑曲线的采样点。放 ref 是因为
+  // pointermove 不该触发 React 渲染：形状预览重算在 drawStroke 里就完成了。
+  const shapeAnchorRef = useRef<StrokeCell | null>(null);
+  const smoothPointsRef = useRef<StrokeCell[]>([]);
   // 瓦片容器。帧层和笔迹层每个瓦片一份，按容器现查：
   // 瓦片数一变 DOM 就重建，缓存句柄会指向已经摘掉的画布。
   const tilesRef = useRef<HTMLDivElement>(null);
@@ -295,10 +335,13 @@ const [hexDraft, setHexDraft] = useState("");
     return () => observer.disconnect();
   }, []);
 
-  useEffect(() => {
-    if (aipOpen) return;
-    setAipText(null);
-  }, [aipOpen]);
+  // 收起就把缓存清掉：aipOpen 由真转假的那次渲染里就地清，不进 effect——
+  // effect 体内同步 setState 要多走一次提交，React 明确不推荐。
+  const [aipSeenOpen, setAipSeenOpen] = useState(aipOpen);
+  if (aipOpen !== aipSeenOpen) {
+    setAipSeenOpen(aipOpen);
+    if (!aipOpen) setAipText(null);
+  }
 
   /** 落笔过程的即时反馈：笔迹画在 PNG 上层的透明画布里，抬笔后由新 PNG 接手。 */
   function drawStroke(cells: StrokeCell[], color: InkColor) {
@@ -320,9 +363,24 @@ const [hexDraft, setHexDraft] = useState("");
     const cells = strokeRef.current;
     strokeRef.current = [];
     lastCellRef.current = null;
+    shapeAnchorRef.current = null;
+    smoothPointsRef.current = [];
     drawStroke([], ink);
     // ink 已经是这一笔该落的颜色：橡皮在取 ink 时就被归一成透明。
     void useStore.getState().paintStroke(cells, ink);
+  }
+
+  /**
+   * 形状档位下「从锚点到现在这一格」该出现哪些格子。
+   *
+   * 实心与否看油漆桶：用户勾着填充再拖矩形，要的就是一块实心；单独拖是描边。
+   * 平滑曲线不吃锚点，采样点自己就是输入。
+   */
+  function shapePreview(anchor: StrokeCell, now: StrokeCell): StrokeCell[] {
+    // 形状的几何全在 shapes.ts 里收口：这里只说明语义（填充与否、圆角多少），
+    // 每加一种形状或一个参数都不用回来改这段 switch。
+    if (!shape) return [];
+    return shapeCells(shape, anchor, now, { filled: tool === "fill", radius: corner });
   }
 
   function onPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
@@ -334,16 +392,28 @@ const [hexDraft, setHexDraft] = useState("");
     }
     const cell = cellFromEvent(event, document);
     if (!cell) return;
-    if (tool === "fill") {
+    // 油漆桶只在没挂形状时才真泼油漆：勾着填充拖矩形，用户要的是一块实心，
+    // 不是把整个封闭区域染一遍。两种「填充」各有各的场合，互不占用。
+    if (tool === "fill" && !shape) {
       // 油漆桶按下就生效，没有「墨迹」要预览。
       void useStore.getState().fillCell(cell.x, cell.y, ink);
       return;
     }
-    event.currentTarget.setPointerCapture(event.pointerId);
     paintingRef.current = true;
     strokeRef.current = [cell];
     lastCellRef.current = cell;
+    // 形状工具把这一格当锚点记下来：拖动途中每帧都从锚点重算整条形状，
+    // 所以「预览 = 落笔结果」，松手时不需要再做第二次换算。
+    shapeAnchorRef.current = cell;
+    smoothPointsRef.current = [cell];
     drawStroke([cell], ink);
+    // 指针捕获放最后，且不许它坏事：capture 只是让指针划出画布外还能继续收到
+    // pointermove，属于锦上添花；而它对「这个 pointerId 不是活动指针」是会
+    // 抛 NotFoundError 的（触屏拖动、合成事件、双指交替都会碰上）。放在这里
+    // 之前，一笔下去整段函数当场中断——既没 preview 也没置 paintingRef，
+    // pointerup 的 flushStroke 又直接 return，于是用户看到「点了没反应」。
+    // 现在顺序反过来：先画上，再试着捕获；拿不到捕获也不过是划出界外不跟手。
+    tryCapturePointer(event.currentTarget, event.pointerId);
   }
 
   function onPointerMove(event: ReactMouseEvent<HTMLDivElement>) {
@@ -352,6 +422,24 @@ const [hexDraft, setHexDraft] = useState("");
     const last = lastCellRef.current;
     if (!cell || !last) return;
     if (cell.x === last.x && cell.y === last.y) return;
+    // 形状工具：锚点不动，整条形状按「锚点 -> 现在这一格」重算，预览即结果。
+    if (shape && shape !== "smooth") {
+      const anchor = shapeAnchorRef.current ?? cell;
+      strokeRef.current = shapePreview(anchor, cell);
+      lastCellRef.current = cell;
+      drawStroke(strokeRef.current, ink);
+      return;
+    }
+    // 平滑曲线：每个采样点都收着，预览直接给平滑后的结果。拖动时看到的就是
+    // 最终会落文档的那条曲线，不会出现「预览是折线、落笔变弧线」的错觉。
+    if (shape === "smooth") {
+      const points = appendStroke(smoothPointsRef.current, lineCells(last, cell));
+      smoothPointsRef.current = points;
+      strokeRef.current = points.length >= 3 ? smoothPathCells(points) : points;
+      lastCellRef.current = cell;
+      drawStroke(strokeRef.current, ink);
+      return;
+    }
     // 两次采样之间补线：指针划得快，格子不许断。
     strokeRef.current = appendStroke(strokeRef.current, lineCells(last, cell));
     lastCellRef.current = cell;
@@ -433,7 +521,51 @@ const [hexDraft, setHexDraft] = useState("");
   const canPlay = frames.length > 1;
   // 播放时高亮跟着本地帧号走，store 的 frameIndex 还停在开播那一帧。
   const shownFrame = playing ? playFrame : frameIndex;
+  const frameStripRef = useRef<HTMLDivElement | null>(null);
   const currentFrame = frames[frameIndex];
+  // 帧条「还能往哪滚」：溢出来才亮翻页按钮，不然空着两个箭头只会显得碍眼。
+  // 状态由 HStrip 回吐——竖滚轮翻成横滚、常驻滚动条、两端渐隐都归它管，
+  // 这里只留「要不要亮箭头」这一件自己用得上的事。
+  const [stripScroll, setStripScroll] = useState<StripEdges>({ canLeft: false, canRight: false });
+  const onFrameEdges = useCallback((next: StripEdges) => {
+    setStripScroll((prev) =>
+      prev.canLeft === next.canLeft && prev.canRight === next.canRight ? prev : next,
+    );
+  }, []);
+
+  // 帧条横向滚：切帧要把那一格滚进视野。播放时每帧都挪，不然用户看的是左边、
+  // 放的是右边。手算 scrollLeft 而不叫 chip.scrollIntoView——那个连外层
+  // panel-body 一起滚，画面会跟着帧条上下蹦。
+  //   偏移量只认「格子和条子左上角差多少」，不碰 offsetLeft：帧条自己没
+  // position:relative，芯片的 offsetLeft 会顺着 offsetParent 一路退到上了
+  // position 的右栏容器，量出来的是绝对位置——首帧也能算出七百多像素，
+  // 被浏览器夹到最右端，一开软件整条蹦到末尾只剩最后四帧在场，用户根本
+  // 看不出这儿做了横向滚动。矩形差与定位层级无关，换布局也不漂。
+  //   播放中不减速：83ms 一跳还要 smooth，条子永远追不上当前帧。
+  useEffect(() => {
+    const strip = frameStripRef.current;
+    const chip = strip?.children[shownFrame];
+    if (!strip || !(chip instanceof HTMLElement)) return;
+    const target = stripScrollFor(
+      {
+        scrollWidth: strip.scrollWidth,
+        clientWidth: strip.clientWidth,
+        scrollLeft: strip.scrollLeft,
+      },
+      // 换算成内容坐标：视口差加上当前滚动量，才是格子在内容里的位置。
+      chip.getBoundingClientRect().left - strip.getBoundingClientRect().left + strip.scrollLeft,
+      chip.offsetWidth,
+    );
+    if (target === strip.scrollLeft) return;
+    strip.scrollTo({ left: target, behavior: playing ? "auto" : "smooth" });
+  }, [shownFrame, frames.length, playing]);
+
+  /** 帧条按「一页」翻：一页就是一条条子的宽，翻过去看得见整屏新帧。 */
+  function pageFrameStrip(dir: -1 | 1) {
+    const strip = frameStripRef.current;
+    if (!strip) return;
+    strip.scrollBy({ left: dir * strip.clientWidth, behavior: "smooth" });
+  }
   /** 选色即回画笔：刚挑的颜色总得有个工具把它落下去。 */
   function pickColor(color: InkColor) {
     if (tool === "eraser") setTool("brush");
@@ -451,9 +583,6 @@ const [hexDraft, setHexDraft] = useState("");
   const scopeHexes = scope ? scope.colors.map(rgbaToHex) : [];
   // 复制内置预设时的名字后缀：用户得看得出手上这「一套」是抄来的。
   const copySuffix = t("palette.copy_suffix");
-  const scopeInUse = scope
-    ? (document?.layers ?? []).some((layer) => layer.palette_id === scope.id)
-    : false;
   // 取色建议：当前范围全量排在前面，再从色名表补一批常见色，补到二十来个收手，
   // 不然预设条会长到看不见框。
   const suggestHexes = [...scopeHexes];
@@ -467,17 +596,65 @@ const [hexDraft, setHexDraft] = useState("");
     return t("palette.swatch", { hex: colorName(hex, lang), index: index + 1 });
   }
 
-  /** 换范围：换的是这一层的边界，已有像素由 Rust 按就近色归队。 */
+  /** 色块上的右键：换个墨色、或者把这个色从范围里去掉。内置的一个都不动。 */
+  function openSwatchMenu(event: ReactMouseEvent, hex: string, index: number) {
+    const locked = !scope || scope.builtin || scope.colors.length <= 1;
+    openContextMenu(event, [
+      {
+        key: "use",
+        label: t("palette.menu_use", { name: colorName(hex, lang) }),
+        checked: active.color === hex,
+        onSelect: () => pickColor(hex),
+      },
+      {
+        key: "remove",
+        label: t("palette.remove_color"),
+        danger: true,
+        disabled: locked,
+        onSelect: () => removeScopeColor(index),
+      },
+    ]);
+  }
+
+  /** 删整套时的接盘候选：除自己以外的所有范围，内置的排在前面当默认。 */
+  function paletteFallbackChoices(selfId: string): PaletteChoice[] {
+    const items: NamedPalette[] = document?.palettes ?? [];
+    const sorted = [
+      ...items.filter((item) => item.builtin && item.id !== selfId),
+      ...items.filter((item) => !item.builtin && item.id !== selfId),
+    ];
+    return sorted.map((item) => ({
+      id: item.id,
+      name: item.name,
+      dots: item.colors.slice(0, 4).map(rgbaToHex),
+    }));
+  }
+
+  /** 换范围：换的是这一层的边界，已有像素会按就近色重排。先问再动。 */
   function pickScope(paletteId: string) {
     if (!scopeLayer || paletteId === "" || paletteId === scopeLayer.palette_id) return;
-    void useStore.getState().setLayerPalette(scopeLayer.id, paletteId);
+    const from = document?.palettes.find((item) => item.id === scopeLayer.palette_id);
+    const to = document?.palettes.find((item) => item.id === paletteId);
+    if (!from || !to) return;
+    setPaletteOp({
+      kind: "switch",
+      layerId: scopeLayer.id,
+      layerName: scopeLayer.name,
+      fromName: from.name,
+      toId: to.id,
+      toName: to.name,
+    });
   }
 
   /** 往范围里加色。内置预设改不得：复制一份副本再往里加，副本顺带接到这一层上。 */
   async function addScopeColor(hex: string) {
     const layer = scopeLayer;
     if (!layer || hex === "") return;
-    if (scopeHexes.some((item) => item.toLowerCase() === hex.toLowerCase())) return;
+    // 重名色要说出来：不管的话用户点一下没反应，会以为色块坏了。
+    if (scopeHexes.some((item) => item.toLowerCase() === hex.toLowerCase())) {
+      useStore.getState().warnKey("palette.duplicated");
+      return;
+    }
     if (scope?.builtin) {
       // 内置预设改不得，可「复制一份再往里加」不能拆成两条命令跑：文档是异步事件
       // 推回来的，第二条命令要先回读才知道副本 id 是谁，那一下回读可能还没到，颜色
@@ -499,6 +676,20 @@ const [hexDraft, setHexDraft] = useState("");
     // 挑完即用：新颜色不当当前墨，这一下就白挑了。
     pickColor(hex);
     setHexDraft("");
+    useStore.getState().noteKey("palette.color_added", { color: colorName(hex, lang) });
+  }
+
+  /**
+   * 取色盘的落库口子。滑块松手和关弹层收尾都走这儿。
+   *
+   * antd 的 `onChangeComplete` 只由滑块松手触发，点预设色块、在面板里手输
+   * hex 都只发 `onChange`——不收这一刀，那两条路全是「点了没反应」。
+   */
+  function commitSwatch(hex: string) {
+    swatchDraftRef.current = null;
+    swatchDoneRef.current = hex;
+    setSwatchDraft(null);
+    void addScopeColor(hex);
   }
 
   /** 手输的十六进制入表。加色那一步（含内置预设 fork）addScopeColor 里已经办了。 */
@@ -515,10 +706,28 @@ const [hexDraft, setHexDraft] = useState("");
     setHexDraft("");
   }
 
-  /** 从范围里去掉一个颜色，画面上的像素由 Rust 就近归队。 */
+  /**
+   * 从范围里去掉一个颜色。颜色是按索引记在像素上的，删一格等于后面全往前挪一
+   * 格，所以画面上用到它的像素必须有个接手色。少了这一问，静默毁画面。
+   */
   function removeScopeColor(index: number) {
     if (!scope || scope.builtin || scope.colors.length <= 1) return;
-    void useStore.getState().removePaletteColor(scope.id, index);
+    const hex = scopeHexes[index];
+    if (hex === undefined) return;
+    // 接手色只能是范围里剩下的：给个表外的颜色，等于偷偷越狱改配色表。
+    const choices = scopeHexes.filter((_item, position) => position !== index);
+    if (choices.length === 0) {
+      useStore.getState().warnKey("palette.one_left");
+      return;
+    }
+    setPaletteOp({
+      kind: "remove",
+      paletteId: scope.id,
+      paletteName: scope.name,
+      index,
+      hex,
+      choices,
+    });
   }
 
   function openScopeEdit(mode: "new" | "rename") {
@@ -546,9 +755,24 @@ const [hexDraft, setHexDraft] = useState("");
     else if (mode === "rename" && scope && !scope.builtin) void useStore.getState().renamePalette(scope.id, name);
   }
 
+  /**
+   * 删整套。有图层在用不再拦死：那是死循环（想删得先切走，切走要先删）。
+   * 改成让用户指定一套接盘范围，引用的层先改指过去，再删。
+   */
   function deleteScope() {
-    if (!scope || scope.builtin || scopeInUse) return;
-    void useStore.getState().deletePalette(scope.id);
+    if (!scope || scope.builtin) return;
+    const choices = paletteFallbackChoices(scope.id);
+    if (choices.length === 0) {
+      // 整个文档只有这一套，删了就没人可指。只能靠「复制一份」破局。
+      useStore.getState().warnKey("palette.delete_last");
+      return;
+    }
+    setPaletteOp({
+      kind: "delete",
+      paletteId: scope.id,
+      paletteName: scope.name,
+      choices,
+    });
   }
 
   /** 图层行尾的配色小片：一眼看出这一层认领哪套范围，点一下就把配色区切过去。 */
@@ -621,6 +845,13 @@ const [hexDraft, setHexDraft] = useState("");
         icon: <Undo2 size={13} />,
         disabled: undoDepth === 0,
         onSelect: () => void useStore.getState().undoEdit(),
+      },
+      {
+        key: "redo",
+        label: t("menu.redo"),
+        icon: <Redo2 size={13} />,
+        disabled: redoDepth === 0,
+        onSelect: () => void useStore.getState().redoEdit(),
       },
       {
         key: "onion",
@@ -748,16 +979,95 @@ const [hexDraft, setHexDraft] = useState("");
                   </span>
                 ),
               },
-              {
-                value: "eraser",
-                label: (
-                  <span className="tool-label">
-                    <Eraser size={13} /> {t("doc.eraser")}
-                  </span>
-                ),
-              },
-            ]}
-          />
+             {
+               value: "eraser",
+               label: (
+                 <span className="tool-label">
+                   <Eraser size={13} /> {t("doc.eraser")}
+                 </span>
+               ),
+             },
+           ]}
+         />
+          {/* 形状档位：和笔/橡皮/填充各管一件事。选了下拉形状就按「锚点 -> 松手」
+              那一格出结果，选「自由」回到原来的随手画。填充勾着时形状自动变实心。 */}
+          <Tooltip title={t("doc.shape_tip")}>
+            <Segmented
+              size="small"
+              value={shape ?? "free"}
+              onChange={(value) =>
+                setShape(value === "free" ? null : (value as ShapeKind))
+              }
+              options={[
+                {
+                  value: "free",
+                  label: (
+                    <span className="tool-label">
+                      <Pencil size={13} /> {t("doc.shape_free")}
+                    </span>
+                  ),
+                },
+                {
+                  value: "line",
+                  label: (
+                    <span className="tile-label" aria-label={t("doc.shape_line")}>
+                      <Minus size={14} />
+                    </span>
+                  ),
+                },
+                {
+                  value: "rect",
+                  label: (
+                    <span className="tile-label" aria-label={t("doc.shape_rect")}>
+                      <Square size={14} />
+                    </span>
+                  ),
+                },
+                {
+                  value: "ellipse",
+                  label: (
+                    <span className="tile-label" aria-label={t("doc.shape_ellipse")}>
+                      <Circle size={14} />
+                    </span>
+                  ),
+                },
+                {
+                  value: "triangle",
+                  label: (
+                    <span className="tile-label" aria-label={t("doc.shape_triangle")}>
+                      <Triangle size={14} />
+                    </span>
+                  ),
+                },
+                {
+                  value: "smooth",
+                  label: (
+                    <span className="tile-label" aria-label={t("doc.shape_smooth")}>
+                      <PenTool size={14} />
+                    </span>
+                  ),
+                },
+              ]}
+            />
+          </Tooltip>
+          {/* 圆角档：跟在形状后面，只在该圆角有意义的形状上出现。
+              用户提过「基础图形太突兀，画细节要平滑曲线」——矩形和三角的尖角
+              是突兀感的来源，这里把它们让成圆弧；椭圆和直线不给这个档。 */}
+          {(shape === "rect" || shape === "triangle") && (
+            <Tooltip title={t("doc.corner_tip")}>
+              <Segmented
+                size="small"
+                value={corner}
+                onChange={(value) => setCorner(value as number)}
+                options={[
+                  { value: 0, label: <span className="tile-label">{t("doc.corner_sharp")}</span> },
+                  { value: 0.2, label: <span className="tile-label">{t("doc.corner_small")}</span> },
+                  { value: 0.35, label: <span className="tile-label">{t("doc.corner_mid")}</span> },
+                  { value: 0.5, label: <span className="tile-label">{t("doc.corner_big")}</span> },
+                ]}
+              />
+            </Tooltip>
+          )}
           {/* 瓦片底图：平铺开才看得出接缝。选项格号就是倍率，不用再多解释。 */}
           <Tooltip title={t("doc.tile_tip")}>
             <Segmented
@@ -775,6 +1085,7 @@ const [hexDraft, setHexDraft] = useState("");
             <Button
               size="small"
               type="text"
+              aria-label={playing ? t("menu.pause") : t("doc.play")}
               icon={playing ? <Pause size={14} /> : <Play size={14} />}
               disabled={!canPlay}
               onClick={togglePlay}
@@ -784,6 +1095,7 @@ const [hexDraft, setHexDraft] = useState("");
             <Button
               size="small"
               type="text"
+              aria-label={t("doc.onion")}
               icon={<Ghost size={14} />}
               className={onion ? "tool-on" : ""}
               disabled={!canPlay}
@@ -799,9 +1111,28 @@ const [hexDraft, setHexDraft] = useState("");
             <Button
               size="small"
               type="text"
+              aria-label={
+                undoDepth > 0 ? t("doc.undo", { count: undoDepth }) : t("doc.undo_none")
+              }
               icon={<Undo2 size={14} />}
               disabled={undoDepth === 0}
               onClick={() => void useStore.getState().undoEdit()}
+            />
+          </Tooltip>
+          <Tooltip
+            title={
+              redoDepth > 0 ? t("doc.redo", { count: redoDepth }) : t("doc.redo_none")
+            }
+          >
+            <Button
+              size="small"
+              type="text"
+              aria-label={
+                redoDepth > 0 ? t("doc.redo", { count: redoDepth }) : t("doc.redo_none")
+              }
+              icon={<Redo2 size={14} />}
+              disabled={redoDepth === 0}
+              onClick={() => void useStore.getState().redoEdit()}
             />
           </Tooltip>
         </div>
@@ -837,6 +1168,10 @@ const [hexDraft, setHexDraft] = useState("");
                       alt={live ? t("doc.canvas_alt") : ""}
                       width={document.width * scale}
                       height={document.height * scale}
+                      // 权威 PNG 属于哪一帧和现在停在那一帧对不上时先请下去：
+                      // 帧层已经同步画好了新帧，旧图还挂在这儿就是两张脸叠着。
+                      // 换帧、撤销、AI 落笔之后的往返窗口里全靠这一手兜住。
+                      data-stale={pngFrame !== frameIndex ? "true" : undefined}
                     />
                     <canvas
                       className="frame-layer"
@@ -894,41 +1229,45 @@ const [hexDraft, setHexDraft] = useState("");
             {t("doc.layers")}
             <span className="grow" />
             <Tooltip title={t("doc.new_layer")}>
-              <Button
-                size="small"
-                type="text"
-                icon={<Plus size={13} />}
-                disabled={!document}
-                onClick={() => void useStore.getState().addLayer()}
-              />
-            </Tooltip>
-            <Tooltip title={t("doc.delete_layer")}>
-              <Button
-                size="small"
-                type="text"
-                icon={<Trash2 size={13} />}
-                disabled={layerCount <= 1}
-                onClick={() => void useStore.getState().deleteLayer(active.layer)}
-              />
-            </Tooltip>
-            <Tooltip title={t("doc.layer_up")}>
-              <Button
-                size="small"
-                type="text"
-                icon={<ArrowUp size={13} />}
-                disabled={topLayer}
-                onClick={() => void useStore.getState().moveLayer(1)}
-              />
-            </Tooltip>
-            <Tooltip title={t("doc.layer_down")}>
-              <Button
-                size="small"
-                type="text"
-                icon={<ArrowDown size={13} />}
-                disabled={bottomLayer}
-                onClick={() => void useStore.getState().moveLayer(-1)}
-              />
-            </Tooltip>
+            <Button
+              size="small"
+              type="text"
+              aria-label={t("doc.new_layer")}
+              icon={<Plus size={13} />}
+              disabled={!document}
+              onClick={() => void useStore.getState().addLayer()}
+            />
+          </Tooltip>
+          <Tooltip title={t("doc.delete_layer")}>
+            <Button
+              size="small"
+              type="text"
+              aria-label={t("doc.delete_layer")}
+              icon={<Trash2 size={13} />}
+              disabled={layerCount <= 1}
+              onClick={() => void useStore.getState().deleteLayer(active.layer)}
+            />
+          </Tooltip>
+          <Tooltip title={t("doc.layer_up")}>
+            <Button
+              size="small"
+              type="text"
+              aria-label={t("doc.layer_up")}
+              icon={<ArrowUp size={13} />}
+              disabled={topLayer}
+              onClick={() => void useStore.getState().moveLayer(1)}
+            />
+          </Tooltip>
+          <Tooltip title={t("doc.layer_down")}>
+            <Button
+              size="small"
+              type="text"
+              aria-label={t("doc.layer_down")}
+              icon={<ArrowDown size={13} />}
+              disabled={bottomLayer}
+              onClick={() => void useStore.getState().moveLayer(-1)}
+            />
+          </Tooltip>
           </div>
           {/* 最上层排在最前面，和 Aseprite / Photoshop 的图层列表同一约定：
               箭头向上就是往栈顶走，方向不需要在脑子里换算一次。 */}
@@ -1028,64 +1367,108 @@ const [hexDraft, setHexDraft] = useState("");
             {t("doc.frames")}
             <span className="grow" />
             <Tooltip title={t("doc.new_frame")}>
+            <Button
+              size="small"
+              type="text"
+              aria-label={t("doc.new_frame")}
+              icon={<Plus size={13} />}
+              onClick={() => void useStore.getState().addFrame()}
+            />
+          </Tooltip>
+          <Tooltip title={t("doc.duplicate_frame")}>
+            <Button
+              size="small"
+              type="text"
+              aria-label={t("doc.duplicate_frame")}
+              icon={<Copy size={13} />}
+              onClick={() => void useStore.getState().duplicateFrame()}
+            />
+          </Tooltip>
+          <Tooltip title={t("doc.delete_frame")}>
+            <Button
+              size="small"
+              type="text"
+              aria-label={t("doc.delete_frame")}
+              icon={<Trash2 size={13} />}
+              disabled={frames.length <= 1}
+              onClick={() => void useStore.getState().deleteFrame()}
+            />
+          </Tooltip>
+          <Tooltip title={t("doc.move_earlier")}>
+            <Button
+              size="small"
+              type="text"
+              aria-label={t("doc.move_earlier")}
+              icon={<ArrowLeft size={13} />}
+              disabled={firstFrame}
+              onClick={() => void useStore.getState().moveFrame(-1)}
+            />
+          </Tooltip>
+          <Tooltip title={t("doc.move_later")}>
+            <Button
+              size="small"
+              type="text"
+              aria-label={t("doc.move_later")}
+              icon={<ArrowRight size={13} />}
+              disabled={lastFrame}
+              onClick={() => void useStore.getState().moveFrame(1)}
+            />
+          </Tooltip>
+            {/* 帧条横滚的明示：滚轮和触控板之外，还得有两个能点的箭头。
+                用双尖括号而不是单箭头：左边那对 ← → 挪的是「这一帧的位置」，
+                这对翻的是「这一条还能往哪看」，长得一样用户必然点错。 */}
+            {/* 这两个箭头常驻、到边变灰：帧条一溢出不溢出的那一刻按钮忽隐忽现，
+                用户根本记不住东西长在哪儿；要的就是「这一行右边还有东西」这件事
+                在还没滚之前就看得见。 */}
+            <Tooltip title={t("doc.strip_scroll_left")}>
               <Button
                 size="small"
                 type="text"
-                icon={<Plus size={13} />}
-                onClick={() => void useStore.getState().addFrame()}
+                aria-label={t("doc.strip_scroll_left")}
+                icon={<ChevronsLeft size={13} />}
+                disabled={!stripScroll.canLeft}
+                onClick={() => pageFrameStrip(-1)}
               />
             </Tooltip>
-            <Tooltip title={t("doc.duplicate_frame")}>
+            <Tooltip title={t("doc.strip_scroll_right")}>
               <Button
                 size="small"
                 type="text"
-                icon={<Copy size={13} />}
-                onClick={() => void useStore.getState().duplicateFrame()}
-              />
-            </Tooltip>
-            <Tooltip title={t("doc.delete_frame")}>
-              <Button
-                size="small"
-                type="text"
-                icon={<Trash2 size={13} />}
-                disabled={frames.length <= 1}
-                onClick={() => void useStore.getState().deleteFrame()}
-              />
-            </Tooltip>
-            <Tooltip title={t("doc.move_earlier")}>
-              <Button
-                size="small"
-                type="text"
-                icon={<ArrowLeft size={13} />}
-                disabled={firstFrame}
-                onClick={() => void useStore.getState().moveFrame(-1)}
-              />
-            </Tooltip>
-            <Tooltip title={t("doc.move_later")}>
-              <Button
-                size="small"
-                type="text"
-                icon={<ArrowRight size={13} />}
-                disabled={lastFrame}
-                onClick={() => void useStore.getState().moveFrame(1)}
+                aria-label={t("doc.strip_scroll_right")}
+                icon={<ChevronsRight size={13} />}
+                disabled={!stripScroll.canRight}
+                onClick={() => pageFrameStrip(1)}
               />
             </Tooltip>
           </div>
-          <div className="frame-strip">
+          <HStrip
+            scrollerRef={frameStripRef}
+            className="frame-strip"
+            label={t("doc.frames")}
+            onEdges={onFrameEdges}
+          >
             {frames.map((frame, index) => (
-              <button
-                type="button"
+              <Tooltip
                 key={frame.id}
-                className={`frame-chip ${index === shownFrame ? "active" : ""}`}
-                onClick={() => jumpToFrame(index)}
-                onContextMenu={(event) => openFrameMenu(event, index)}
+                title={t("doc.frame_chip", {
+                  index: index + 1,
+                  ms: frame.duration_ms,
+                  id: frame.id,
+                })}
               >
-                {document ? <FrameThumb document={document} index={index} /> : null}
-                <span className="frame-chip-id">{frame.id}</span>
-                <span className="frame-chip-ms">{frame.duration_ms}ms</span>
-              </button>
+                <button
+                  type="button"
+                  className={`frame-chip ${index === shownFrame ? "active" : ""}`}
+                  onClick={() => jumpToFrame(index)}
+                  onContextMenu={(event) => openFrameMenu(event, index)}
+                >
+                  {document ? <FrameThumb document={document} index={index} /> : null}
+                  <span className="frame-chip-id">{index + 1}</span>
+                  <span className="frame-chip-ms">{frame.duration_ms}ms</span>
+                </button>
+              </Tooltip>
             ))}
-          </div>
+          </HStrip>
           <div className="frame-duration">
             <span className="frame-duration-label">{t("doc.frame_duration")}</span>
             <InputNumber
@@ -1109,6 +1492,7 @@ const [hexDraft, setHexDraft] = useState("");
               <Button
                 size="small"
                 type="text"
+                aria-label={t("palette.new_hint")}
                 icon={<Plus size={13} />}
                 disabled={!scopeLayer}
                 onClick={() => openScopeEdit("new")}
@@ -1176,17 +1560,18 @@ const [hexDraft, setHexDraft] = useState("");
                   <Button
                     size="small"
                     type="text"
+                    aria-label={t("palette.rename")}
                     icon={<Pencil size={13} />}
                     onClick={() => openScopeEdit("rename")}
                   />
                 </Tooltip>
-                <Tooltip title={scopeInUse ? t("palette.delete_used") : t("palette.delete")}>
+                <Tooltip title={t("palette.delete")}>
                   <Button
                     size="small"
                     type="text"
+                    aria-label={t("palette.delete")}
                     danger
                     icon={<Trash2 size={13} />}
-                    disabled={scopeInUse}
                     onClick={deleteScope}
                   />
                 </Tooltip>
@@ -1221,15 +1606,25 @@ const [hexDraft, setHexDraft] = useState("");
             <Tooltip title={t("doc.transparent")}>
               <button
                 type="button"
+                aria-label={t("doc.transparent")}
                 className={`swatch eraser ${active.color === null ? "active" : ""}`}
                 onClick={() => pickColor(null)}
               />
             </Tooltip>
             {scopeHexes.map((hex, index) => (
-              <span className="swatch-cell" key={`${hex}-${index}`}>
+              <span
+                className="swatch-cell"
+                key={`${hex}-${index}`}
+                // 右键出菜单：改墨色、把这个色从范围里去掉。挂在格子上而不是色块上，
+                // 连带那个小叉一起接管，整个格子右击都是这一套。
+                onContextMenu={(event) => openSwatchMenu(event, hex, index)}
+              >
                 <Tooltip title={swatchTip(hex, index)}>
                   <button
                     type="button"
+                    // 色块本身没有文字，读屏里报的是「未标记按钮」；把悬停那句
+                    // （色名 + 序号）同时给它当名字，两边一句话对齐。
+                    aria-label={swatchTip(hex, index)}
                     className={`swatch ${active.color === hex ? "active" : ""}`}
                     style={{ background: hex }}
                     onClick={() => pickColor(hex)}
@@ -1244,7 +1639,7 @@ const [hexDraft, setHexDraft] = useState("");
                       aria-label={t("palette.remove_color")}
                       onClick={() => removeScopeColor(index)}
                     >
-                      <X size={10} />
+                      <X size={7} />
                     </button>
                   </Tooltip>
                 ) : null}
@@ -1273,18 +1668,37 @@ const [hexDraft, setHexDraft] = useState("");
                       colors: NAMED_COLORS.slice(0, 18).map((item) => item.hex),
                     },
                   ]}
-                  onChange={(value) => setSwatchDraft(value.toHexString())}
-                  onChangeComplete={(value) => {
-                    const hex = value.toHexString();
-                    // 拖完松手才落文档：拖动中途一路加色，撤销栈会糊成一锅粥。
-                    setSwatchDraft(null);
-                    void addScopeColor(hex);
+                  onChange={(value) => {
+                    // 拖动途中只更新草稿：一路加色的话，撤销栈会糊成一锅粥。
+                    swatchDraftRef.current = value.toHexString();
+                    setSwatchDraft(value.toHexString());
                   }}
-                  onClear={() => setSwatchDraft(null)}
-               />
-             </div>
-           </Tooltip>
-         </div>
+                  onChangeComplete={(value) => commitSwatch(value.toHexString())}
+                  onClear={() => {
+                    swatchDraftRef.current = null;
+                    setSwatchDraft(null);
+                  }}
+                  onOpenChange={(open) => {
+                    if (open) {
+                      // 新开一轮：草稿和「这一轮落过谁」都清零，不然上一轮
+                      // 的色会在这一轮被误判成重复而跳过。
+                      swatchDraftRef.current = null;
+                      swatchDoneRef.current = null;
+                      setSwatchDraft(null);
+                      return;
+                    }
+                    // 收尾：点预设、面板里手输都只发 onChange，不在这里落库
+                    // 就白挑了。同一轮里落过的色不重复落第二次。
+                    const draft = swatchDraftRef.current;
+                    swatchDraftRef.current = null;
+                    setSwatchDraft(null);
+                    const commit = swatchCommitOnClose(draft, swatchDoneRef.current);
+                    if (commit !== null) commitSwatch(commit);
+                  }}
+                />
+              </div>
+            </Tooltip>
+          </div>
           {/* 手输十六进制：拖拽取色应对不了「我要的就是这一串 hex」，
               配色行当里这个通行证必须留。回车即加，加完顺手当当前墨。 */}
           <div className="palette-hex-row">
@@ -1340,6 +1754,25 @@ const [hexDraft, setHexDraft] = useState("");
           void useStore.getState().resizeCanvas(sizeDraft.width, sizeDraft.height);
         }}
         onCancel={() => setSizeOpen(false)}
+      />
+      <PaletteOpsModal
+        request={paletteOp}
+        onClose={() => setPaletteOp(null)}
+        onSwitch={(layerId, toId) => {
+          setPaletteOp(null);
+          void useStore.getState().setLayerPalette(layerId, toId);
+        }}
+        onRemove={(request, replacement) => {
+          // 先把要动的表和格子号取出来再关窗：关窗之后问的就是下一件事了。
+          const { paletteId, index } = request;
+          setPaletteOp(null);
+          void useStore.getState().removePaletteColor(paletteId, index, replacement);
+        }}
+        onDelete={(request, fallbackId) => {
+          const { paletteId } = request;
+          setPaletteOp(null);
+          void useStore.getState().deletePalette(paletteId, fallbackId);
+        }}
       />
     </aside>
   );

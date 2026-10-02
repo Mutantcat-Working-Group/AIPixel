@@ -25,6 +25,7 @@ import {
 import { open } from "@tauri-apps/plugin-dialog";
 
 import { Field, QuantizeFields } from "./QuantizeFields";
+import { NumberWithUnit } from "./NumberWithUnit";
 import FramePicker from "./FramePicker";
 import LayerPicker from "./LayerPicker";
 import * as bridge from "../lib/bridge";
@@ -116,6 +117,7 @@ function PathField({
   onPick: (path: string) => void;
   onClear: () => void;
 }) {
+  const t = useT();
   if (value) {
     return (
       <Field label={label}>
@@ -123,7 +125,13 @@ function PathField({
           <span className="grow" title={value}>
             {baseName(value)}
           </span>
-          <Button size="small" type="text" icon={<X size={12} />} onClick={onClear} />
+          <Button
+            size="small"
+            type="text"
+            aria-label={t("batch.clear")}
+            icon={<X size={12} />}
+            onClick={onClear}
+          />
         </div>
       </Field>
     );
@@ -364,7 +372,11 @@ export default function WorkflowDock() {
   );
 }
 
-/** 聊天那条没有 Run 按钮：它本身就是聊天面板，这里只负责把用户引过去。 */
+/**
+ * 智能体绘制条目。聊天那条没有 Run 按钮：它本身就是中间那张聊天面板，
+ * 这里的按钮只是把一句引导词塞进输入框（requestCompose），用户改不改都随他。
+ * 引导词里刻意要求「先读画布再动手」：直接的画笔改法是增量，覆盖式重画要用户自己开口。
+ */
 function AgentPanel() {
   const requestCompose = useStore((s) => s.requestCompose);
   const t = useT();
@@ -390,6 +402,11 @@ function AgentPanel() {
   );
 }
 
+/**
+ * 提示词微调：把一句大白话改写成模型更容易执行到位的结构化提示词。
+ * 产出物是文本不是帧——refinedDraft 留给用户过目、改动，再自己决定送去哪儿
+ * （生图表单或聊天），所以面板里没有任何按钮宣称「这就是最终稿」。
+ */
 function RefinePanel({ gated }: { gated: boolean }) {
   const t = useT();
   const idea = useStore((s) => s.dockDraft.idea);
@@ -475,6 +492,12 @@ function RefinePanel({ gated }: { gated: boolean }) {
   );
 }
 
+/**
+ * 图像生成：模型渲染一张位图，再经 pixelize 量化落进画布网格。
+ * 三条入口共用同一份画风/收尾钉选项（主循环、微调、这里），改动一处三处生效。
+ * 尺寸三模式的口径：preset 用生图模型的固定档位；canvas 跟着当前画布等比缩放；
+ * custom 由用户直填，但会 snap 到 32 的整数倍——多数生图模型只认这个粒度。
+ */
 function ImageGenPanel({ gated }: { gated: boolean }) {
   const t = useT();
   const draft = useStore((s) => s.dockDraft);
@@ -483,6 +506,10 @@ function ImageGenPanel({ gated }: { gated: boolean }) {
   const busy = useStore((s) => s.workflowBusy);
   const patchDraft = useStore((s) => s.patchDraft);
   const runWorkflow = useStore((s) => s.runWorkflow);
+  // 这一句钉的画风与收尾预设：主循环、微调、这里三条链共用同一份选择，
+  // 规矩不该因为换了入口就悄悄丢一条。
+  const style = useStore((s) => s.styleOverride);
+  const presets = useStore((s) => s.presetOverrides);
 
   // 帧 id 属于文档，换会话后旧选择会失效：直接推导合法值，不做同步 effect。
   const frameIds = (document?.frames ?? []).map((frame) => frame.id);
@@ -624,14 +651,13 @@ function ImageGenPanel({ gated }: { gated: boolean }) {
         />
       </Field>
       <Field label={t("dock.frame_duration")}>
-        <InputNumber
-          size="small"
-          style={{ width: "100%" }}
+        <NumberWithUnit
           min={16}
           max={2000}
           value={draft.durationMs}
-          addonAfter="ms"
-          onChange={(next) => patchDraft({ durationMs: next ?? 83 })}
+          fallback={83}
+          unit="ms"
+          onChange={(next) => patchDraft({ durationMs: next })}
         />
       </Field>
       <QuantizeFields
@@ -649,6 +675,10 @@ function ImageGenPanel({ gated }: { gated: boolean }) {
           void runWorkflow("image_gen", {
             prompt: draft.prompt,
             size: resolvedSize,
+            // 输入区钉的画风与收尾预设也走这一张：手动生图和主循环问的是同一个
+            // 问题，规矩只该有一份。解析与顶替规则在 Rust 的 pins / plan。
+            style,
+            presets,
             // 只把选中的那一源发出去：两个都给会让 Rust 报歧义，那是调用方的错。
             reference_frame: draft.genSource === "frame" ? referenceFrame : null,
             reference_path: draft.genSource === "file" ? draft.genPath : null,
@@ -666,6 +696,12 @@ function ImageGenPanel({ gated }: { gated: boolean }) {
   );
 }
 
+/**
+ * 参考图简报：视觉模型把一张参考图读成结构化简报（BriefView 渲染）。
+ * 简报有两个出口——「照着画」把文本填进生图表单并把原图设为垫图，
+ * 「发给聊天」只把文本推进输入框。选完图就自动读（briefReference），
+ * 不让用户多点一下「开始识别」：结果区就在下面，失败会自己现身。
+ */
 function VisionPanel({ gated }: { gated: boolean }) {
   const t = useT();
   const path = useStore((s) => s.dockDraft.visionPath);
@@ -716,6 +752,12 @@ function VisionPanel({ gated }: { gated: boolean }) {
   );
 }
 
+/**
+ * 视频抽帧：ffprobe 在本机把视频拆成帧，逐帧纯本机量化，全程不调模型。
+ * 所以它挂在能力目录之外也跑得动；count 填 0 表示「全部抽」，上限 256 是
+ * 为了防止一个长视频把几十兆帧一次性拍进文档。选完文件先探一次（probeVideo），
+ * 帧率/时长就印在输入区上方，用户按它估自己会得到多少帧。
+ */
 function VideoPanel({ gated }: { gated: boolean }) {
   const t = useT();
   const draft = useStore((s) => s.dockDraft);
@@ -743,15 +785,14 @@ function VideoPanel({ gated }: { gated: boolean }) {
           {baseName(draft.videoPath)} - {probeSummary(probe.probe, probe.source)}
         </p>
       ) : null}
-      <Field label={t("dock.frames_to_pull")}>
-        <InputNumber
-          size="small"
-          style={{ width: "100%" }}
+        <Field label={t("dock.frames_to_pull")}>
+        <NumberWithUnit
           min={0}
           max={256}
           value={draft.videoCount}
-          addonAfter={draft.videoCount === 0 ? t("dock.all_frames") : t("dock.frames_unit")}
-          onChange={(next) => patchDraft({ videoCount: next ?? 0 })}
+          fallback={0}
+          unit={draft.videoCount === 0 ? t("dock.all_frames") : t("dock.frames_unit")}
+          onChange={(next) => patchDraft({ videoCount: next })}
         />
       </Field>
       <QuantizeFields
@@ -816,14 +857,13 @@ function VideoBriefPanel({ gated }: { gated: boolean }) {
         </p>
       ) : null}
       <Field label={t("dock.frames_to_pull")}>
-        <InputNumber
-          size="small"
-          style={{ width: "100%" }}
+        <NumberWithUnit
           min={1}
           max={12}
           value={count}
-          addonAfter={t("dock.frames_unit")}
-          onChange={(next) => patchDraft({ briefCount: next ?? 8 })}
+          fallback={8}
+          unit={t("dock.frames_unit")}
+          onChange={(next) => patchDraft({ briefCount: next })}
         />
       </Field>
       <Button
@@ -866,6 +906,12 @@ function VideoBriefPanel({ gated }: { gated: boolean }) {
   );
 }
 
+/**
+ * 补间帧：在两帧之间本机插值，产出的是中间帧而不是位图。
+ * from/to 默认取文档最后两帧，帧 id 会在换文档后失效，所以这里只推导不缓存。
+ * sameEnd（起止同一帧，或 from 未定）时必须禁用插入——插一段原地踏步的动画没有意义。
+ * 三种模式的取舍写在 t 字典里；order 只在 migrate 下有意义，其他模式整段禁用。
+ */
 function TweenPanel({ gated, frameCount }: { gated: boolean; frameCount: number }) {
   const t = useT();
   const document = useStore((s) => s.document);
@@ -980,6 +1026,11 @@ function TweenPanel({ gated, frameCount }: { gated: boolean; frameCount: number 
   );
 }
 
+/**
+ * 量化：把一张位图栅格化成 .aip 能吃的像素内容，是本坞唯一不走模型的流程。
+ * 位图必须先过 readImageContext：base64 与 media_type 都由 Rust 判定，
+ * 前端不猜编码格式，也就不会把 webp 当 png 塞进去。多图层时才显示落点选择。
+ */
 function QuantizePanel({ gated }: { gated: boolean }) {
   const t = useT();
   const document = useStore((s) => s.document);
@@ -1007,24 +1058,24 @@ function QuantizePanel({ gated }: { gated: boolean }) {
   }
 
   return (
-    <>
-      <PathField
-      label={t("dock.source")}
-      buttonLabel={t("dock.pick_image")}
-      extensions={IMAGE_EXTENSIONS}
-      value={path}
-      onPick={(picked) => patchDraft({ quantizePath: picked })}
-      onClear={() => patchDraft({ quantizePath: null })}
-    />
-    {document && document.layers.length > 1 ? (
+      <>
+        <PathField
+          label={t("dock.source")}
+          buttonLabel={t("dock.pick_image")}
+          extensions={IMAGE_EXTENSIONS}
+          value={path}
+          onPick={(picked) => patchDraft({ quantizePath: picked })}
+          onClear={() => patchDraft({ quantizePath: null })}
+        />
+        {document && document.layers.length > 1 ? (
       <Field label={t("dock.gen_layer")}>
         <LayerPicker
           document={document}
           value={layer}
           onChange={(next) => patchDraft({ quantizeLayer: next })}
         />
-      </Field>
-    ) : null}
+        </Field>
+      ) : null}
       <QuantizeFields value={options} onChange={(next) => patchDraft({ options: next })} />
       <Button
         block

@@ -60,9 +60,16 @@ export default function ContextMenuHost() {
     const node = boxRef.current;
     if (!node) return;
     const box = node.getBoundingClientRect();
-    const flipX = Math.max(0, request.x + box.width + 8 - window.innerWidth);
-    const flipY = Math.max(0, request.y + box.height + 8 - window.innerHeight);
-    if (flipX !== shift.x || flipY !== shift.y) setShift({ x: flipX, y: flipY });
+    const margin = 8;
+    const flipX = Math.max(0, request.x + box.width + margin - window.innerWidth);
+    const flipY = Math.max(0, request.y + box.height + margin - window.innerHeight);
+    // 翻面之后还要夹回视口：菜单本身比可视区还高时（项特别多的右键菜单），
+    // 只翻面会把上边距翻成负数，头几项就永远点不到了。
+    const limitX = Math.max(margin, window.innerWidth - box.width - margin);
+    const limitY = Math.max(margin, window.innerHeight - box.height - margin);
+    const nextX = request.x - Math.min(Math.max(request.x - flipX, margin), limitX);
+    const nextY = request.y - Math.min(Math.max(request.y - flipY, margin), limitY);
+    if (nextX !== shift.x || nextY !== shift.y) setShift({ x: nextX, y: nextY });
   }, [request, shift]);
 
   useEffect(() => {

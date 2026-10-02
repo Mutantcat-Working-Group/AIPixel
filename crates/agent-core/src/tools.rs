@@ -1,7 +1,12 @@
 // Copyright (C) 2026 Mutantcat Working Group
 // SPDX-License-Identifier: GPL-3.0-only
-//! 三个落地工具的封装，把模型入参翻译成 pixel-core 的类型化操作。
+//! 六个工具的封装，把模型入参翻译成 pixel-core 的类型化操作。
 //! 「不让模型手写矩阵」的契约就在这一层收口。
+//!
+//! 六个的分工：结构 ops（文档结构 + 微补丁）、read_canvas（回读）、
+//! run_shader（一切美术，沙箱 Lua）、tween_frames（本机插帧）、
+//! pixelize_image（垫图量化）。生图（pixel_generate_image）在 specs 里
+//! 挂个名供模型发现，执行走 runner 的异步链路，不经 execute。
 
 use super::craft;
 use super::imagegen::LandSpot;
@@ -18,13 +23,14 @@ use pixel_core::decode;
 use pixel_core::pixelize::{self, FitMode, PixelizeOptions};
 use pixel_core::tween::{self, MigrateOrder, TweenMode, TweenOptions};
 
-/// `pixel_run_shader` 的工具描述。
+/// `pixel_run_shader` 的描述前半：全局量、颜色助手、画布 API、预算。
 /// 之所以写这么长：模型拿到的就是这一段，写得太省，
 /// 它只能猜 `rect` 是角对角还是 x/y/宽/高、猜 `circle` 的参数顺序，
 /// 猜错一次就白烧一整个输出预算。下面每个签名都跟 runtime 对齐。
-const RUN_SHADER_DESCRIPTION: &str = r##"PREFER THIS TOOL for freeform artwork - shapes, characters, scenes, patterns, textures, symmetry, gradients. Draw by running ONE sandboxed Lua script: its size stays small no matter how big the canvas is, because loops, noise and interpolation run in the runtime instead of being spelled out as pixel arrays. Draws on the active cel by default; pass `layer` to target another layer.
+const RUN_SHADER_DESCRIPTION_BODY: &str = r##"PREFER THIS TOOL for freeform artwork - shapes, characters, scenes, patterns, textures, symmetry, gradients. Draw by running ONE sandboxed Lua script: its size stays small no matter how big the canvas is, because loops, noise and interpolation run in the runtime instead of being spelled out as pixel arrays. Draws on the active cel by default; pass `layer` to target another layer.
 
-GLOBALS: width, height (canvas size), time (seconds at this frame's start), phase (0..1 across the timeline), frame_index, frame_count, layer. Animate by passing animate=true: the runtime runs the script once per timeline frame with time/phase set for that frame, exactly like a shader time uniform, and writes every frame for you.
+GLOBALS: width, height (canvas size; canvas_w / canvas_h are accepted aliases and canvas.width / canvas.height also work), time (seconds at this frame's start), phase (0..1 across the timeline), frame_index, frame_count, layer. Animate by passing animate=true: the runtime runs the script once per timeline frame with time/phase set for that frame, exactly like a shader time uniform, and writes every frame for you.
+CANVAS SIZE HELPERS: canvas.cx / canvas.cy -> the exact canvas centre (width/height over two, never eyeballed), canvas.min / canvas.max -> the shorter and the longer side, canvas.scale(k) -> k times the long-side-over-64 ratio so a constant tuned at 64px keeps its proportions on any canvas (scale(12) is a 12px body at 64 and 24px at 128), canvas.grid(cols, rows) -> integer cell width, height of a cols x rows grid, which is the honest way to centre a subject in a tile-map cell, an isometric cell or a nine-slice panel. Derive every radius and offset from these; a hard-coded size is what leaves a drawing half empty on a canvas it was not tuned for.
 
 COLOR HELPERS: pal(i) -> palette color (1-based, 0 or nil = transparent), hex('#RRGGBB[AA]') -> validated color, mix(c1, c2, t) -> blend (t in 0..1, gradients and glows), hsv(h, s, v[, a]) -> color (h in degrees, s/v/a in 0..1), alpha(c, a) -> color with new alpha, rand() -> float 0..1, rand(a, b) -> integer in a..b inclusive, noise(x, y, scale?) -> float 0..1 (scale spreads the lattice out: 0.3 gives long soft streaks, 1 gives per-pixel grit). Colors are plain Lua values: keep them in locals, pass them around, format with string.format. Standard math.* and string.* are available; math.random is disabled, use rand(). rand and noise are deterministic per script and per frame.
 
@@ -45,18 +51,24 @@ CANVAS API (each of these also works as canvas.pset, canvas.line, ... - both for
   stamp(rows, legend, x, y)  rows are strings of legend symbols, '.' and space are transparent (they ERASE), legend maps symbol -> color; all rows must share one length. Because '.' erases, stamping over art that is already on the cel punches holes in it - open with clear() when you want a clean slate.
 Shapes clip to the canvas, so a circle larger than the canvas is safe. color is a palette index or "#RRGGBB"/"#RRGGBBAA"; alpha 00 or nil erases. pset does not clip, so pset outside the canvas is a hard error.
 
+AA* ANTI-ALIASED AND CURVED - the SAME coordinates as the hard-edged twin of each name, but drawn at partial coverage, so the line blends with whatever is already on the cel instead of stair-stepping. Lay flat base passes with the hard-edged helpers and spend these on the detail layer:
+  aaline(x0,y0,x1,y1,c)   alias aaseg                aacurve(x0,y0,x1,y1,cx,cy,c)   alias aaquad (quadratic through the control point)
+  aacubic(x0,y0,x1,y1,cx0,cy0,cx1,cy1,c)   alias aabez
+  aapoly(points,c[,closed])  alias aapath            aapolyfill(points,c)   alias aafill
+      points is a table of {x=,y=} pairs (a flat x,y,x,y list works too); a triangle is just three points
+  aacircle(cx,cy,r,c[,filled])  alias aacirc          aaellipse(x0,y0,x1,y1,c[,filled]) (BOUNDING-BOX CORNERS, like ellipse)
+  aarect(x0,y0,x1,y1,c[,filled])
+  blend(x,y,c,a)    ONE pixel already placed, softened at alpha a     dither(x,y,c,a)    ONE pixel from an ordered pattern at ratio a
+On a layer with a locked palette every blended colour snaps back into the range, so a soft edge never widens the palette.
+
 BUDGETS: ~20M Lua instructions, 5 seconds, one changed-pixel cap. When the script has a mistake the error names the exact line - fix that line and resubmit; never resubmit the same script unchanged.
 
-EXAMPLE - static sprite with a ramp, a highlight and an outline: four lines that would otherwise be 400 hand-placed pixels.
-  local skin = pal(1)
-  local shadow = mix(skin, '#000000', 0.35)
-  local rim = mix(skin, '#FFFFFF', 0.25)
-  circfill(32, 30, 11, skin)
-  circfill(34, 32, 8, shadow)
-  circfill(26, 24, 3, rim)
-  outline(mix(shadow, '#000000', 0.6))
+SHADING RECIPE - copy this and scale the numbers to your canvas; do not re-invent it. The two mistakes that flatten a drawing are (1) dropping a second filled shape on top of a finished body, which erases the first one's detail, and (2) mixing the shadow toward '#000000' and the highlight toward '#FFFFFF', which reads as dirt instead of shade. The recipe does neither: build ONE hue-shifted ramp, lay a single flat base pass in its MIDDLE step, then re-shade the body pixel by pixel from its own form normal with a pget test. Scale the ramp length with the canvas (3 steps under 32px, 5 above) and scale the band thresholds to taste; the pattern is what matters.
+"##;
 
-EXAMPLE - hand-written rows for ONE small sprite, for when there is no loop to write: shorter than the equivalent script and every pixel placed deliberately. All rows must share one length, so pad the right of each row with '.'.
+/// 描述后半：两个示例。手写行那份保留原样——它讲的是另一条路径（小图手写），
+/// 跟上色配方各管一头，互不替代。
+const RUN_SHADER_EXAMPLES: &str = r##"EXAMPLE - hand-written rows for ONE small sprite, for when there is no loop to write: shorter than the equivalent script and every pixel placed deliberately. All rows must share one length, so pad the right of each row with '.'.
   stamp({
       '.hd.xx..',
       'hhxxxxx.',
@@ -77,6 +89,28 @@ EXAMPLE - animate=true bob (phase drives everything; create the frames with pixe
 
 Write ONE script per transaction: draw, then let the tool result show you the updated grid."##;
 
+/// 拼好的 `pixel_run_shader` 描述：主体 + 老配方 + 新配方说明 + 新配方 + 示例。
+/// 分段拼而不是一段常量，是因为 `format!` 的 `{}` 替代位和 Lua 示例里满地的
+/// 花括号打架；各段各自原样拼起来就不用转义。两段配方都来自 pixel-core，由
+/// pixel-core 自己的测试保证它们在真实沙箱里跑得通，那边改了 API 这边会跟着知道。
+static RUN_SHADER_DESCRIPTION: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        "{body}\n{recipe}\n{note}\n{form}\n\n{examples}",
+        body = RUN_SHADER_DESCRIPTION_BODY,
+        recipe = pixel_core::SHADING_RECIPE,
+        note = FORM_SHADING_NOTE,
+        form = pixel_core::FORM_SHADING_RECIPE,
+        examples = RUN_SHADER_EXAMPLES,
+    )
+});
+
+/// 第二份上色配方的说明段，夹在老配方和新配方代码之间。它和 `pixel-core` 的
+/// `FORM_SHADING_RECIPE` 一起拼进描述里，那边由沙箱测试保证跑得通、球体上
+/// 与老配方逐像素一致。写清楚「什么时候换用它」比多写一条禁令有用：躯干、
+/// 树干、瓦片、矩形尾巴这些正是老配方那句「报出圆心和半径」办不到的形状。
+const FORM_SHADING_NOTE: &str = r#"FORM SHADING RECIPE (any contour) - use this instead of SHADING RECIPE above for ANY form that is not a round body - a cat torso, a tree trunk, a tile, a rectangular tail - because the normal is read off the pixels instead of a guessed centre and radius. The discipline is the same (one hue-shifted ramp, ONE flat base pass in the middle step, then band the body pixel by pixel with a pget test), but pass one scans the rows for the base colour and records each row's left/right edge plus the body's top/bottom, and pass two bands every base-coloured pixel by that normal against the same top-left light. On a sphere it gives the same steps as SHADING RECIPE above; on a flat or composite form it still gets layers, which a guessed centre cannot. Pixels drawn in any OTHER colour are outside the scan, so stripes, eyes and whiskers layered on top of the base pass survive. Shade ONE flat base region per run, then run it again with the next base colour, and scale the ramp length to the canvas the same way (3 steps under 32px, 5 above).
+"#;
+
 /// `pixel_apply_operations` 的工具描述：一条事务，加上每个 op 的字段说明。
 /// 名字列在 enum 里，字段却要猜，是这个工具最容易翻车的地方。
 const OPS_DESCRIPTION: &str = r##"Apply ONE transaction of typed pixel/layer/frame/palette operations. Use it for document STRUCTURE and for tiny precise patches; use pixel_run_shader for everything that is artwork. Batch every structural change of a turn into this ONE call. Fails atomically if any operation is invalid and the error names the failing operation index.
@@ -91,8 +125,10 @@ STRUCTURE:
 
 COLOR RANGES: every layer points at exactly one named palette.
   create_palette {name, from?, colors[], layer?}           `from` copies an existing range as the starting point
-  rename_palette {id, name}    delete_palette {id}         delete is refused while a layer still points at it
-  add_palette_color {id, color}  remove_palette_color {id, index}
+  rename_palette {id, name}    delete_palette {id, fallback?}
+  while a layer still points at a range, deleting it needs `fallback` (another range id): those layers move over first, then the range goes. Omitting it keeps the refusal.
+  add_palette_color {id, color}  remove_palette_color {id, index, replacement?}
+  when painted pixels use the color being removed, name a `replacement` color and those pixels are repainted with it before the color goes.
   set_layer_palette {layer, palette_id}  set_layer_locked {layer, locked}
   add_palette_colors {colors[]} extends the document palette itself; set_palette {colors[]} replaces it and remaps already-painted pixels to the nearest color.
   Builtin ranges are read-only: to change one, create_palette with from=<builtin id> to fork it, then set_layer_palette.
@@ -138,7 +174,15 @@ fn err(content: String) -> ToolOutcome {
     }
 }
 
-/// 三个工具的对外规格（协议无关，schema 为 JSON Schema）。
+/// 脚本错时塞给模型的处置要求。不写这句，模型常把脚本错当成「画布坏了」，
+/// 干脆认输回头跟用户说画不了，白白浪费一轮。
+const SHADER_SCRIPT_HINT: &str = "\nFix that exact spot and call pixel_run_shader again with the corrected script; never resubmit the same broken script unchanged. Do not tell the user the drawing failed until you have retried at least once with a different script. When the message names a coordinate, clamp it instead of guessing: math.max(0, math.min(width - 1, x)) keeps every x inside the canvas, and an empty loop body (a lower bound below the upper bound) is a coordinate bug, not a harmless no-op.";
+
+/// 预算烧穿：脚本跑不完，不是画不出来。把活儿拆小才是正路。
+const SHADER_BUDGET_HINT: &str = "\nThe script ran out of time or instructions, so nothing was kept. Shrink the work: fewer per-pixel iterations, drop the anti-alias pass, or split the drawing into two scripts (background first, then the subject), then resubmit.";
+
+/// 六个工具的对外规格（协议无关，schema 为 JSON Schema）。
+/// 顺序即推荐度：模型挑花眼时，靠前的就是引擎更希望它用的那条。
 pub fn specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
@@ -209,7 +253,7 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "pixel_run_shader".into(),
-            description: RUN_SHADER_DESCRIPTION.into(),
+            description: RUN_SHADER_DESCRIPTION.clone().into(),
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -458,7 +502,26 @@ fn tool_run_shader(doc: &mut Document, active: &ActiveContext, input: &Value) ->
             content.push_str(&active_grid(doc, layer, &active.frame));
             ok(content)
         }
-        Err(e) => err(format!("shader error: {e}")),
+        Err(e) => {
+            let mut content = format!("shader error: {e}");
+            match &e {
+                // 行号点名到第几行，再把「改脚本再跑一次」说死：不补这两句，
+                // 模型很可能把脚本错当成画布有问题，直接回头跟用户认输。
+                shader::ShaderError::Lua { line, .. } => {
+                    if let Some(line) = line {
+                        content.push_str(&format!(
+                            "\nfault in your script at line {line}; the canvas was rolled back, nothing partial was kept."
+                        ));
+                    } else {
+                        content.push_str("\nfault in your script; the canvas was rolled back, nothing partial was kept.");
+                    }
+                    content.push_str(SHADER_SCRIPT_HINT);
+                }
+                shader::ShaderError::Budget(_) => content.push_str(SHADER_BUDGET_HINT),
+                _ => content.push_str(SHADER_SCRIPT_HINT),
+            }
+            err(content)
+        }
     }
 }
 
@@ -772,6 +835,103 @@ mod tests {
         ActiveContext::default()
     }
 
+    /// 三段拼接出来的 `pixel_run_shader` 描述，任何一段掉了都要能发现。
+    /// 这里守的不只是「拼上了」：示例一旦回到「第二个填充盖在身体上」和
+    /// 「阴影往黑里掺」那套写法，模型会照着抄，成品就永远是平的。
+    #[test]
+    fn the_shader_description_carries_the_shading_recipe() {
+        let spec = specs()
+            .into_iter()
+            .find(|s| s.name == "pixel_run_shader")
+            .expect("pixel_run_shader 在规格表里");
+        let text = spec.description.into_owned();
+        assert!(text.contains("SHADING RECIPE"), "配方段没拼上");
+        assert!(
+            text.contains("circfill(32, 30, 11, R[3])"),
+            "配方本体没拼上"
+        );
+        // 任意轮廓版配方：一类形状一份。少了它，模型在躯干、树干、矩形尾巴上
+        // 只能回头猜圆心和半径，抄完还是平涂。
+        assert!(text.contains("FORM SHADING RECIPE"), "任意轮廓配方段没拼上");
+        assert!(
+            text.contains("local top, bot, rows = nil, nil, {}"),
+            "任意轮廓配方的扫描段没拼上"
+        );
+        // 反面示例不能回来：第二个填充盖上身体、阴影往纯黑里掺。
+        assert!(
+            !text.contains("mix(skin, '#000000'"),
+            "阴影往纯黑里掺的示例又回来了"
+        );
+        assert!(
+            !text.contains("circfill(34, 32, 8, shadow)"),
+            "用第二个填充盖上身体的示例又回来了"
+        );
+        // 手写行路径是另一条腿，和配方各管一头，不能因为加配方被删掉。
+        assert!(
+            text.contains("EXAMPLE - hand-written rows"),
+            "手写行示例没了"
+        );
+        assert!(text.contains("EXAMPLE - animate=true bob"), "动画示例没了");
+    }
+
+    /// 柔边这组接口必须在工具描述里点名。少一个名字，模型就少一条路，
+    /// 只能继续用 line() 画台阶——用户看到的就是「三角形很突兀」。
+    #[test]
+    fn the_shader_description_documents_the_aa_family() {
+        let spec = specs()
+            .into_iter()
+            .find(|s| s.name == "pixel_run_shader")
+            .expect("pixel_run_shader 在规格表里");
+        let text = spec.description.into_owned();
+        for name in [
+            "aaline",
+            "aaseg",
+            "aacurve",
+            "aaquad",
+            "aacubic",
+            "aabez",
+            "aapoly",
+            "aapolyfill",
+            "aacircle",
+            "aaellipse",
+            "aarect",
+            "blend(",
+            "dither(",
+        ] {
+            assert!(text.contains(name), "工具描述里没有 {name}");
+        }
+        // 配色锁那一句得在：模型要知道柔边不会把调色板撑宽。
+        assert!(text.contains("locked palette"), "没说柔边在配色锁下的行为");
+    }
+
+    /// 尺寸适配助手在工具描述里也得逐个点到。
+    /// 系统提示词和工具描述是两个入口，模型读哪一份都可能；只改一处，
+    /// 它就还是会按 64x64 写死常量，换画布回来一半是空的。
+    #[test]
+    fn the_shader_description_documents_the_size_helpers() {
+        let spec = specs()
+            .into_iter()
+            .find(|s| s.name == "pixel_run_shader")
+            .expect("pixel_run_shader 在规格表里");
+        let text = spec.description.into_owned();
+        assert!(
+            text.contains("CANVAS SIZE HELPERS"),
+            "工具描述里缺尺寸适配这一节"
+        );
+        for helper in [
+            "canvas.cx",
+            "canvas.cy",
+            "canvas.min",
+            "canvas.max",
+            "canvas.scale(",
+            "canvas.grid(",
+        ] {
+            assert!(text.contains(helper), "工具描述里没有 {helper}");
+        }
+        // 比例按长边折算这点不能丢：写成「按比例」它会拿短边算，宽画布主体偏小。
+        assert!(text.contains("long-side-over-64"), "没说 scale 按长边折算");
+    }
+
     /// 两帧不同内容的文档：F0 是左上角一块，F1 是右下角一块。
     fn two_pose_doc() -> Document {
         let mut doc = Document::new("test", 16, 16).expect("16x16");
@@ -977,6 +1137,30 @@ mod tests {
         assert!(
             out.content.contains("pixel_pixelize_image"),
             "{}",
+            out.content
+        );
+    }
+
+    /// 脚本报错回给模型的话里要带行号，还要带「改完再跑一次」的要求：
+    /// 少了这两样，模型容易把脚本错当成画布坏了，直接认输不画。
+    #[test]
+    fn a_broken_shader_script_comes_back_with_its_line_and_repair_orders() {
+        let mut doc = Document::new("test", 16, 16).expect("16x16");
+        let out = execute(
+            &mut doc,
+            &active(),
+            "pixel_run_shader",
+            &json!({"script": "local a = 1\nnope(2)\n"}),
+        );
+        assert!(out.is_error, "{}", out.content);
+        assert!(
+            out.content.contains("line 2"),
+            "行号要点名：{}",
+            out.content
+        );
+        assert!(
+            out.content.contains("call pixel_run_shader again"),
+            "要说清改完再跑：{}",
             out.content
         );
     }

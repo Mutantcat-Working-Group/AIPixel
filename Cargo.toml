@@ -7,6 +7,9 @@ version = "1.0.20261007"
 edition = "2021"
 license = "GPL-3.0"
 repository = "https://github.com/Mutantcat-Working-Group/AIPixel"
+homepage = "https://www.mutantcat.org/"
+# 发行商：异猫工作群（Mutantcat Working Group）。Cargo 的 authors 不支持 URL 形式，官方站点见 homepage。
+authors = ["Mutantcat Working Group"]
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

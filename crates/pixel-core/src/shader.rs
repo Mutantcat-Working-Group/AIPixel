@@ -5,7 +5,8 @@
 //!
 //! 预算（经验值）：20M 指令 / 5 秒 / 64KB 脚本。
 
-use super::document::{Document, Rgba};
+use super::aa;
+use super::document::{Cel, Document, Rgba};
 use mlua::{Function, Lua, Table, Value};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -14,6 +15,9 @@ use std::time::{Duration, Instant};
 pub const MAX_SCRIPT_BYTES: usize = 64 * 1024;
 pub const DEFAULT_MAX_INSTRUCTIONS: u64 = 20_000_000;
 pub const DEFAULT_MAX_SECONDS: u64 = 5;
+/// Lua 侧内存上限。字符串拼接是在一条 C 调用里完成的，指令预算和时间预算
+/// 都拦不住它，只能靠分配器本身收口。
+pub const LUA_MEMORY_LIMIT: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct ShaderBudget {
@@ -52,11 +56,23 @@ pub struct ShaderOutcome {
 
 impl From<mlua::Error> for ShaderError {
     fn from(e: mlua::Error) -> Self {
-        ShaderError::Lua {
-            message: e.to_string(),
-            line: None,
-        }
+        let message = e.to_string();
+        let line = lua_error_line(&message);
+        ShaderError::Lua { message, line }
     }
+}
+
+/// 从 Lua 原文里把行号抠出来：`[string "shader"]:12: attempt to ...`。
+/// 抠不到就返回 None——没行号的报错照样能读，只是模型要多找一圈。
+/// 只认第一个 `]:`：那段位置前缀永远排在消息最前面，往后正文里的方括号
+/// 一律不管，免得把报错文本本身当成位置。
+fn lua_error_line(message: &str) -> Option<i32> {
+    let at = message.find("]:")? + 2;
+    let digits: String = message[at..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
 }
 
 /// 沙箱里注册的 helper 与注入全局。模型最容易栽的坑就是拿这些名字当局部
@@ -86,6 +102,23 @@ const LUA_BUILTINS: &[&str] = &[
     "outline",
     "clear",
     "stamp",
+    "aaline",
+    "aaseg",
+    "aacurve",
+    "aaquad",
+    "aacubic",
+    "aabez",
+    "aapoly",
+    "aapath",
+    "aapolyfill",
+    "aafill",
+    "aacircle",
+    "aacirc",
+    "aaellipse",
+    "aarect",
+    "blend",
+    "aablend",
+    "dither",
     "width",
     "height",
     "canvas_w",
@@ -135,6 +168,25 @@ pub fn run_shader(
         return Err(ShaderError::Document(format!("unknown layer {layer}")));
     }
 
+    // 脚本可能碰到的 cel 先备一份：animate 会把整个图层全清一遍，所以每帧都备；
+    // 单帧只碰那一帧，只备它就够，不必 clone 整份文档。
+    // 为什么单帧也必须备：脚本跑到一半报错时，前半截画的东西已经落在 cel 上，
+    // 而错误路径同样会 bump。前端比 revision 会当真，把半截画坏的玩意儿画上屏；
+    // 模型从结果里读到「画了多少个像素」，也以为自己已经画上了，接着在错的
+    // 底子上往下补。留半截在画布上，比一个像素都不留更难收拾。
+    // 只备沙盒可能碰到的部分：目标图层的 cel 和调色板（大文档整份 clone 太贵）。
+    let touched: Vec<String> = if animate {
+        doc.frames.iter().map(|f| f.id.clone()).collect()
+    } else {
+        vec![first_frame.clone()]
+    };
+    let mut cel_backup: Vec<(String, Cel)> = Vec::new();
+    for frame_id in &touched {
+        if let Some(cel) = doc.cel(layer, frame_id) {
+            cel_backup.push((frame_id.clone(), cel.clone()));
+        }
+    }
+    let palette_backup = doc.palette.clone();
     let palette_before = doc.palette.len();
     let frame_count = doc.frames.len().max(1);
     let frames_to_render = if animate { frame_count } else { 1 };
@@ -155,7 +207,20 @@ pub fn run_shader(
         }
         sandbox.set_target(layer, &frame_id);
         sandbox.set_frame_globals(fi, frames_to_render, doc.frames[fi].duration_ms);
-        sandbox.exec(script)?;
+        if let Err(e) = sandbox.exec(script) {
+            drop(sandbox);
+            // 还原被清空、或只画了一半的那些帧，并把沙盒新塞进调色板的颜色撤掉。
+            for (frame_id, cel) in &cel_backup {
+                if let Some(slot) = doc.cel_mut(layer, frame_id) {
+                    slot.indices = cel.indices.clone();
+                }
+            }
+            doc.palette = palette_backup;
+            // 撤干净了就是撤干净了，连 revision 都不该动：它还停在原来的地方，
+            // 前端比 revision 才知道「画布没变」。留个 bump 在这儿，等于告诉
+            // 全世界「画布变了」，前端白刷一次，重放记忆也跟着失效。
+            return Err(e);
+        }
     }
     drop(sandbox);
 
@@ -192,6 +257,9 @@ unsafe impl Send for Sandbox {}
 impl Sandbox {
     fn new(doc: &mut Document, layer: String, budget: ShaderBudget) -> Result<Self, ShaderError> {
         let lua = Lua::new();
+        // 超限时让分配动作本身失败：`('x'):rep(2e8)` 这类写法会在一条指令里
+        // 吃掉几百兆，指令钩子和墙钟都来不及反应。
+        let _ = lua.set_memory_limit(LUA_MEMORY_LIMIT);
         // 显式移除文件/进程面，双保险
         for name in [
             "io", "os", "package", "debug", "require", "dofile", "loadfile", "load",
@@ -255,15 +323,13 @@ impl Sandbox {
                 }
                 // 报错点名的往往正是被自家局部变量遮蔽的内置函数，
                 // 这句话替模型省掉一整轮「报错-瞎改-再报错」。
+                let line = lua_error_line(&msg);
                 let mut msg = msg;
                 if let Some(hint) = lua_hint(&msg) {
                     msg.push_str("; ");
                     msg.push_str(&hint);
                 }
-                Err(ShaderError::Lua {
-                    message: msg,
-                    line: None,
-                })
+                Err(ShaderError::Lua { message: msg, line })
             }
         }
     }
@@ -357,6 +423,23 @@ impl Sandbox {
             "outline",
             "clear",
             "stamp",
+            "aaline",
+            "aaseg",
+            "aacurve",
+            "aaquad",
+            "aacubic",
+            "aabez",
+            "aapoly",
+            "aapath",
+            "aapolyfill",
+            "aafill",
+            "aacircle",
+            "aacirc",
+            "aaellipse",
+            "aarect",
+            "blend",
+            "aablend",
+            "dither",
         ] {
             let value: Value = globals.get(name)?;
             if !value.is_nil() {
@@ -373,7 +456,7 @@ impl Sandbox {
         // pal(i) -> "#rrggbb"
         let pal = self.lua.create_function(move |lua, idx: Value| {
             let doc = unsafe { &*(doc_ptr as *const Document) };
-            let i = index_from(&idx);
+            let i = index_from(&idx, doc.palette.len())?;
             match doc.color_of(i) {
                 // 索引 0 在 Lua 侧表达为 transparent，避免被当成黑色
                 Some(c) if c == Rgba::TRANSPARENT => {
@@ -565,7 +648,25 @@ impl Sandbox {
             let idx = resolve_color(doc, color)?;
             let (w, h) = (doc.width, doc.height);
             let cel = cel_mut(doc, layer, frame)?;
-            super::ops::draw_line(cel, w, h, x0 as u32, y0 as u32, x1 as u32, y1 as u32, idx);
+            // line 的两端可以落在画布外：夹到包围盒即可，别按原值跑 Bresenham，
+            // 否则一个 u32::MAX 的端点能让这条线在超时预算内跑不完。
+            let clamp = |v: f64, max: u32| -> u32 {
+                if !v.is_finite() || v < 0.0 {
+                    0
+                } else {
+                    (v.round().min(max as f64 - 1.0).max(0.0)) as u32
+                }
+            };
+            super::ops::draw_line(
+                cel,
+                w,
+                h,
+                clamp(x0, w),
+                clamp(y0, h),
+                clamp(x1, w),
+                clamp(y1, h),
+                idx,
+            );
             Ok(())
         })?;
         globals.set("line", line)?;
@@ -704,6 +805,204 @@ impl Sandbox {
         // 两种写法都收，别为一次命名出入白吃一个来回。
         globals.set("circfill", circfill.clone())?;
         globals.set("circlefill", circfill)?;
+
+        // ---- 平滑绘制（抗锯齿）----
+        //
+        // 上面那组基本图形把几何四舍五入到整数格，画出来是硬的：一条 46° 的
+        // 斜线碎成台阶，一个 r=5 的圆在 64px 画布上只剩六个方向可去。用户要
+        // 的是「画细节的地方有平滑曲线可用」，所以这一组按格心到几何的连续
+        // 距离算覆盖率，一格一格掺色。坐标写法和硬边那组完全一样。
+        //
+        // 颜色统一走 resolve_color_for_layer：层上着配色锁时，掺出来的中间色
+        // 也得归到范围里去，不然一条柔边就能把文档调色板撑满。
+        let aaline = self.canvas_fn(|doc, layer, frame, args: mlua::MultiValue| {
+            let mut it = args.into_iter();
+            let nums: Vec<f64> = (0..4)
+                .map(|_| num_arg(it.next()))
+                .collect::<mlua::Result<_>>()?;
+            let color = it.next().unwrap_or(Value::Nil);
+            let idx = resolve_color_for_layer(doc, layer, color)?;
+            let mut buf = aa::Coverage::for_canvas(doc.width, doc.height);
+            aa::stroke_segment(&mut buf, nums[0], nums[1], nums[2], nums[3]);
+            aa::apply(doc, layer, frame, buf, idx).map_err(doc_err)
+        })?;
+        globals.set("aaline", aaline.clone())?;
+        globals.set("aaseg", aaline)?;
+
+        let aacurve = self.canvas_fn(|doc, layer, frame, args: mlua::MultiValue| {
+            let mut it = args.into_iter();
+            let nums: Vec<f64> = (0..4)
+                .map(|_| num_arg(it.next()))
+                .collect::<mlua::Result<_>>()?;
+            let (cx, cy) = (num_arg(it.next())?, num_arg(it.next())?);
+            let color = it.next().unwrap_or(Value::Nil);
+            let idx = resolve_color_for_layer(doc, layer, color)?;
+            let mut buf = aa::Coverage::for_canvas(doc.width, doc.height);
+            aa::quad_curve(&mut buf, nums[0], nums[1], nums[2], nums[3], cx, cy);
+            aa::apply(doc, layer, frame, buf, idx).map_err(doc_err)
+        })?;
+        globals.set("aacurve", aacurve.clone())?;
+        globals.set("aaquad", aacurve)?;
+
+        let aacubic = self.canvas_fn(|doc, layer, frame, args: mlua::MultiValue| {
+            let mut it = args.into_iter();
+            let nums: Vec<f64> = (0..4)
+                .map(|_| num_arg(it.next()))
+                .collect::<mlua::Result<_>>()?;
+            let (c0x, c0y) = (num_arg(it.next())?, num_arg(it.next())?);
+            let (c1x, c1y) = (num_arg(it.next())?, num_arg(it.next())?);
+            let color = it.next().unwrap_or(Value::Nil);
+            let idx = resolve_color_for_layer(doc, layer, color)?;
+            let mut buf = aa::Coverage::for_canvas(doc.width, doc.height);
+            aa::cubic_curve(
+                &mut buf,
+                nums[0],
+                nums[1],
+                nums[2],
+                nums[3],
+                (c0x, c0y),
+                (c1x, c1y),
+            );
+            aa::apply(doc, layer, frame, buf, idx).map_err(doc_err)
+        })?;
+        globals.set("aacubic", aacubic.clone())?;
+        globals.set("aabez", aacubic)?;
+
+        let aapoly = self.canvas_fn(|doc, layer, frame, args: mlua::MultiValue| {
+            let mut it = args.into_iter();
+            let first = it.next().unwrap_or(Value::Nil);
+            let points = points_from_lua(&first)?;
+            let color = it.next().unwrap_or(Value::Nil);
+            let closed = it.next().and_then(|v| v.as_boolean()).unwrap_or(false);
+            if points.len() < 2 {
+                return Ok(0usize);
+            }
+            let idx = resolve_color_for_layer(doc, layer, color)?;
+            let mut buf = aa::Coverage::for_canvas(doc.width, doc.height);
+            aa::stroke_polyline(&mut buf, &points, closed);
+            aa::apply(doc, layer, frame, buf, idx).map_err(doc_err)
+        })?;
+        globals.set("aapoly", aapoly.clone())?;
+        globals.set("aapath", aapoly)?;
+
+        let aapolyfill = self.canvas_fn(|doc, layer, frame, args: mlua::MultiValue| {
+            let mut it = args.into_iter();
+            let first = it.next().unwrap_or(Value::Nil);
+            let points = points_from_lua(&first)?;
+            let color = it.next().unwrap_or(Value::Nil);
+            if points.len() < 3 {
+                return Ok(0usize);
+            }
+            let idx = resolve_color_for_layer(doc, layer, color)?;
+            let mut buf = aa::Coverage::for_canvas(doc.width, doc.height);
+            aa::fill_polygon(&mut buf, &points);
+            aa::apply(doc, layer, frame, buf, idx).map_err(doc_err)
+        })?;
+        globals.set("aapolyfill", aapolyfill.clone())?;
+        globals.set("aafill", aapolyfill)?;
+
+        let aacircle = self.canvas_fn(|doc, layer, frame, args: mlua::MultiValue| {
+            let mut it = args.into_iter();
+            let (cx, cy, r) = (
+                num_arg(it.next())?,
+                num_arg(it.next())?,
+                num_arg(it.next())?,
+            );
+            let color = it.next().unwrap_or(Value::Nil);
+            let filled = it.next().and_then(|v| v.as_boolean()).unwrap_or(false);
+            let idx = resolve_color_for_layer(doc, layer, color)?;
+            let mut buf = aa::Coverage::for_canvas(doc.width, doc.height);
+            if filled {
+                aa::ellipse_fill(&mut buf, cx, cy, r, r);
+            } else {
+                aa::ellipse_ring(&mut buf, cx, cy, r, r);
+            }
+            aa::apply(doc, layer, frame, buf, idx).map_err(doc_err)
+        })?;
+        globals.set("aacircle", aacircle.clone())?;
+        globals.set("aacirc", aacircle)?;
+
+        let aaellipse = self.canvas_fn(|doc, layer, frame, args: mlua::MultiValue| {
+            let mut it = args.into_iter();
+            let nums: Vec<f64> = (0..4)
+                .map(|_| num_arg(it.next()))
+                .collect::<mlua::Result<_>>()?;
+            let color = it.next().unwrap_or(Value::Nil);
+            let filled = it.next().and_then(|v| v.as_boolean()).unwrap_or(false);
+            let idx = resolve_color_for_layer(doc, layer, color)?;
+            // 跟 ellipse 一样按「两个角都算」的盒子收，模型换写法不用改坐标。
+            let cx = (nums[0] + nums[2]) / 2.0;
+            let cy = (nums[1] + nums[3]) / 2.0;
+            let rx = ((nums[2] - nums[0]) / 2.0).abs();
+            let ry = ((nums[3] - nums[1]) / 2.0).abs();
+            let mut buf = aa::Coverage::for_canvas(doc.width, doc.height);
+            if filled {
+                aa::ellipse_fill(&mut buf, cx, cy, rx, ry);
+            } else {
+                aa::ellipse_ring(&mut buf, cx, cy, rx, ry);
+            }
+            aa::apply(doc, layer, frame, buf, idx).map_err(doc_err)
+        })?;
+        globals.set("aaellipse", aaellipse)?;
+
+        let aarect = self.canvas_fn(|doc, layer, frame, args: mlua::MultiValue| {
+            let mut it = args.into_iter();
+            let nums: Vec<f64> = (0..4)
+                .map(|_| num_arg(it.next()))
+                .collect::<mlua::Result<_>>()?;
+            let color = it.next().unwrap_or(Value::Nil);
+            let filled = it.next().and_then(|v| v.as_boolean()).unwrap_or(false);
+            let idx = resolve_color_for_layer(doc, layer, color)?;
+            let mut buf = aa::Coverage::for_canvas(doc.width, doc.height);
+            if filled {
+                aa::rect_fill(&mut buf, nums[0], nums[1], nums[2], nums[3]);
+            } else {
+                let closed = [
+                    (nums[0], nums[1]),
+                    (nums[2], nums[1]),
+                    (nums[2], nums[3]),
+                    (nums[0], nums[3]),
+                ];
+                aa::stroke_polyline(&mut buf, &closed, true);
+            }
+            aa::apply(doc, layer, frame, buf, idx).map_err(doc_err)
+        })?;
+        globals.set("aarect", aarect)?;
+
+        // blend(x, y, color, a)：只动一格，按 a 掺。给「差半格就够」的场合用，
+        // 不必为一次局部调整铺一条覆盖缓冲的流程。
+        let blend = self.canvas_fn(|doc, layer, frame, args: mlua::MultiValue| {
+            let mut it = args.into_iter();
+            let x = num_arg(it.next())?;
+            let y = num_arg(it.next())?;
+            let color = it.next().unwrap_or(Value::Nil);
+            let a = it
+                .next()
+                .and_then(num_arg_opt)
+                .unwrap_or(1.0)
+                .clamp(0.0, 1.0);
+            let idx = resolve_color_for_layer(doc, layer, color)?;
+            // 单格函数跟 pset 一样要自己夹：负坐标 as u32 会绕到画布另一头。
+            let (x, y) = (coord(x, doc.width)?, coord(y, doc.height)?);
+            let mut buf = aa::Coverage::for_canvas(doc.width, doc.height);
+            buf.plot(x, y, a as f32);
+            aa::apply(doc, layer, frame, buf, idx).map_err(doc_err)
+        })?;
+        globals.set("blend", blend.clone())?;
+        globals.set("aablend", blend)?;
+
+        // dither(x, y, color, a)：单格有序抖动。上着配色锁的层不许扩色板，
+        // 但想留一点柔边——落下去的色全在原范围里，出来的是颗粒过渡。
+        let dither = self.canvas_fn(|doc, layer, frame, args: mlua::MultiValue| {
+            let mut it = args.into_iter();
+            let x = num_arg(it.next())?;
+            let y = num_arg(it.next())?;
+            let color = it.next().unwrap_or(Value::Nil);
+            let a = it.next().and_then(num_arg_opt).unwrap_or(1.0);
+            let idx = resolve_color_for_layer(doc, layer, color)?;
+            aa::dither_dot(doc, layer, frame, x, y, idx, a as f32).map_err(doc_err)
+        })?;
+        globals.set("dither", dither)?;
 
         let flood = self.canvas_fn(|doc, layer, frame, args: mlua::MultiValue| {
             let mut it = args.into_iter();
@@ -904,13 +1203,38 @@ impl Drop for Sandbox {
 
 // ---------- helpers ----------
 
-fn index_from(v: &Value) -> u16 {
-    match v {
-        Value::Integer(i) => *i as u16,
-        Value::Number(n) => n.round() as u16,
-        Value::String(s) => s.to_str().map(|t| t.parse().unwrap_or(0)).unwrap_or(0),
-        _ => 0,
+/// Lua 值 -> 调色板下标，0 是透明。
+///
+/// 负数和超界都按「用户写下的那个数」报错。`as u16` 会把 -1 绕成 65535、
+/// 把 70000 绕成 4464，报错里出现的下标和脚本里写的对不上，照着报错改脚本
+/// 的人只会越改越糊涂。合法区间是 0..=palette.len()：0 透明，1 起是调色板。
+fn index_from(v: &Value, palette_len: usize) -> mlua::Result<u16> {
+    let raw: i64 = match v {
+        Value::Integer(i) => *i,
+        Value::Number(n) => n.round() as i64,
+        Value::String(s) => {
+            let text = s.to_str()?.to_string();
+            return text.parse::<u16>().map_err(|_| {
+                mlua::Error::RuntimeError(format!(
+                    "palette index \"{text}\" is not a whole number - want 0..{palette_len}, \
+                     0 is transparent"
+                ))
+            });
+        }
+        other => {
+            return Err(mlua::Error::RuntimeError(format!(
+                "palette index must be a number 0..{palette_len} (0 is transparent), got {other:?}"
+            )));
+        }
+    };
+    if raw < 0 || raw as usize > palette_len {
+        return Err(mlua::Error::RuntimeError(format!(
+            "palette index {raw} out of range (0..{palette_len}, 0 is transparent) - \
+             add colors first with pixel_apply_operations add_palette_colors, \
+             or use a \"#RRGGBB\" string, which every drawing call also takes"
+        )));
     }
+    Ok(raw as u16)
 }
 
 /// 颜色助手共用的入口：把 Lua 侧的颜色值解析成绝对颜色。
@@ -975,6 +1299,81 @@ fn num_arg_opt(v: Value) -> Option<f64> {
     }
 }
 
+/// 解析 Lua 侧的点表。三种写法都收：`{{x=3,y=4},{x=20,y=6}}`、
+/// `{{3,4},{20,6}}`、扁平 `{3,4,20,6}`。
+///
+/// 为什么要这么宽容：模型写点表的习惯差得离谱，而 aapoly 报一次错就白烧
+/// 一整个请求。这里多认一种写法，比在提示词里多写三行规定便宜得多。
+fn points_from_lua(value: &Value) -> mlua::Result<Vec<(f64, f64)>> {
+    let table = value.as_table().ok_or_else(|| {
+        mlua::Error::RuntimeError(
+            "expected a table of points, e.g. {{x=3,y=4},{x=20,y=6}}".to_string(),
+        )
+    })?;
+    let len = table.raw_len();
+    // 单点表 {x=?,y=?} 也收：raw_len 对纯键表返回 0，按 1..=0 取什么都取不到。
+    if len == 0 {
+        let single = (|| -> mlua::Result<Option<(f64, f64)>> {
+            let x = table.raw_get::<Value>(1)?;
+            let y = table.raw_get::<Value>(2)?;
+            if matches!(x, Value::Nil) || matches!(y, Value::Nil) {
+                return Ok(None);
+            }
+            Ok(Some((num_arg(Some(x))?, num_arg(Some(y))?)))
+        })()?;
+        return match single {
+            Some(point) => Ok(vec![point]),
+            None => Err(mlua::Error::RuntimeError(
+                "point table is empty - list points like {{x=3,y=4},{x=20,y=6}}".to_string(),
+            )),
+        };
+    }
+    let mut entries = Vec::with_capacity(len);
+    let mut all_numbers = true;
+    for i in 1..=len {
+        let entry = table.raw_get::<Value>(i)?;
+        if matches!(entry, Value::Nil) {
+            return Err(mlua::Error::RuntimeError(format!(
+                "point table has a hole at index {i} - list points without gaps"
+            )));
+        }
+        if !matches!(entry, Value::Number(_) | Value::Integer(_)) {
+            all_numbers = false;
+        }
+        entries.push(entry);
+    }
+    let mut out = Vec::with_capacity(entries.len());
+    if all_numbers {
+        // 扁平写法：坐标两两成对，落单一个说明中间少写了一个数。
+        if entries.len() % 2 != 0 {
+            return Err(mlua::Error::RuntimeError(
+                "flat point table needs an even number of coordinates".to_string(),
+            ));
+        }
+        for pair in entries.chunks(2) {
+            out.push((
+                num_arg(Some(pair[0].clone()))?,
+                num_arg(Some(pair[1].clone()))?,
+            ));
+        }
+    } else {
+        for entry in &entries {
+            let inner = entry.as_table().ok_or_else(|| {
+                mlua::Error::RuntimeError(
+                    "point entries must be {x=?,y=?} tables or plain numbers".to_string(),
+                )
+            })?;
+            // 先按下标取，取不到再按键取：两种点表写法都放过。
+            let (x, y) = match (inner.raw_get::<Value>(1), inner.raw_get::<Value>(2)) {
+                (Ok(x), Ok(y)) if !matches!(x, Value::Nil) && !matches!(y, Value::Nil) => (x, y),
+                _ => (inner.raw_get::<Value>("x")?, inner.raw_get::<Value>("y")?),
+            };
+            out.push((num_arg(Some(x))?, num_arg(Some(y))?));
+        }
+    }
+    Ok(out)
+}
+
 /// 圆心 + 浮动半径换算成夹好界的盒子：`cx < r` 时下界为负，
 /// 直接 `as u32` 会翻成 40 亿，把绘制循环拖死。
 fn circle_box(cx: f64, cy: f64, r: f64, w: u32, h: u32) -> (u32, u32, u32, u32) {
@@ -982,16 +1381,28 @@ fn circle_box(cx: f64, cy: f64, r: f64, w: u32, h: u32) -> (u32, u32, u32, u32) 
     (lo(cx - r, w), lo(cy - r, h), lo(cx + r, w), lo(cy + r, h))
 }
 
+/// 把像素层的错误翻成 Lua 错误。沙箱里只认得一种错误类型，但参数错、
+/// cel 缺失这类原文一个字都不能丢——模型改脚本全靠这句话定位。
+fn doc_err<E: std::fmt::Display>(e: E) -> mlua::Error {
+    mlua::Error::RuntimeError(e.to_string())
+}
+
 fn coord(v: f64, max: u32) -> mlua::Result<u32> {
+    // 负坐标是模型最常犯的错（for i=-10,-2,4、一个减过头的偏移），而 mlua
+    // 拿不到行号。报错不带可修的信息，模型就只能把同一份脚本原样重发：
+    // 白白烧掉几轮请求，画布还是一片空白。所以把合法范围和常见成因塞进
+    // 文案，等于替它把 bug 指出来。
     if !v.is_finite() || v < 0.0 {
         return Err(mlua::Error::RuntimeError(format!(
-            "coordinate {v} is not inside the canvas"
+            "coordinate {v} is not inside the canvas (this axis is {max} wide, legal range 0..={};              a loop lower bound below zero or a negative offset is the usual cause)",
+            max.saturating_sub(1)
         )));
     }
     let r = v.round() as u32;
     if r >= max {
         return Err(mlua::Error::RuntimeError(format!(
-            "coordinate {r} is outside canvas bound {max}"
+            "coordinate {v} rounds to {r}, outside canvas bound {max} (legal range 0..={})",
+            max.saturating_sub(1)
         )));
     }
     Ok(r)
@@ -1053,10 +1464,24 @@ pub fn resolve_color_for_layer(doc: &mut Document, layer: &str, value: Value) ->
 }
 
 /// 只读解析：同样接受索引与 #hex，但未知 hex 映射到 0（用于 replace 的 from）。
+///
+/// 下标负了或超界要报错，不能绕：`as u16` 把 -1 绕成 65535，而 65535 在 cel 里
+/// 永远匹配不到，`replace` 就成了一个悄悄什么都不做的调用——模型以为自己改了
+/// 色，画面一点没动，下一轮它照样照着那个错下标写。合法区间 0..=palette.len()，
+/// 0（透明）在 replace 里是有意义的替换对象。
 fn resolve_color_readonly(doc: &Document, value: Value) -> mlua::Result<u16> {
     match value {
-        Value::Integer(i) => Ok(i as u16),
-        Value::Number(n) => Ok(n.round() as u16),
+        Value::Integer(i) => {
+            if i < 0 || i as usize > doc.palette.len() {
+                let top = doc.palette.len();
+                return Err(mlua::Error::RuntimeError(format!(
+                    "color index {i} outside palette (0..{top}, 0 is transparent) - \
+                     pass a \"#RRGGBB\" string to match by color instead"
+                )));
+            }
+            Ok(i as u16)
+        }
+        Value::Number(n) => resolve_color_readonly(doc, Value::Integer(n.round() as i64)),
         Value::String(s) => {
             let text = s.to_str()?.to_string();
             if text == "transparent" || text == "nil" || text == "." {
@@ -1163,13 +1588,247 @@ fn hash_noise(x: f64, y: f64) -> f64 {
     (h >> 11) as f64 / ((1u64 << 53) as f64)
 }
 
+/// 提示词里「照着抄」的那份上色配方：一条色相偏移的色阶，加一次按形体自身法线
+/// 逐像素取带的重写法。抽成常量而不是只写进提示词字符串里，是为了它能被下面那个
+/// 测试真跑一遍——提示词承诺的东西必须在沙箱里跑得通，并且真的把受光侧提亮、
+/// 背光侧压暗。谁改了 `mix` / `pget` 的语义，这个测试第一个喊。
+pub const SHADING_RECIPE: &str = r#"local function ramp(c, n) local d, l, o = mix(c, '#2a1f3d', 0.45), mix(mix(c, '#ffffff', 0.45), '#ffd9a8', 0.35), {}
+  for i = 1, n do local t = (i - 1) / (n - 1)
+    o[i] = t < 0.5 and mix(d, c, t / 0.5) or mix(c, l, (t - 0.5) / 0.5) end
+  return o end
+local R = ramp('#e8823a', 5)
+circfill(32, 30, 11, R[3])
+for y = 19, 41 do for x = 21, 43 do
+  if pget(x, y) == R[3] then
+    local nx, ny = (x - 32) / 11, (y - 30) / 11
+    local nl = (nx * -0.7 + ny * -0.7) / math.sqrt(nx * nx + ny * ny)
+    pset(x, y, nl > 0.62 and R[5] or nl > 0.25 and R[4] or nl > -0.25 and R[3] or nl > -0.6 and R[2] or R[1])
+  end end end
+outline(mix(R[1], '#e8823a', 0.35))"#;
+
+/// 上色配方的任意轮廓版：法线不再从「圆心 + 半径」猜。
+///
+/// 老配方要模型自己报出主体中心和半径，这句话一离开球体就废：猫身子是扁的、
+/// 尾巴是条矩形、树干上细下粗，按一个圆心算出来的法线在边缘上全错，画面还是平的。
+/// 这份配方把法线改从像素自己推——第一遍扫出每一行基色的左右边界和整体的上下范围，
+/// 第二遍把「行心的横向偏移」和「整体的纵向偏移」都除以主体的半高当法线点光向量。
+/// 半高而不是半宽除法线：球体上这么算与老配方逐像素重合（短行不会被放大成法线），
+/// 而宽身子读成一颗被水平拉长的球，正好是躯干该有的光。代价是每行多扫一遍，
+/// 换回来是任意轮廓、任意多个连通块都吃得到层次，而且扫的范围只看基色，
+/// 后来盖上去的条纹、眼睛、胡须不在扫描里，不会被重写掉。
+///
+/// 圆心边界情况：nx 与 ny 同时为 0（宽主体正中那一列）时老配方会算出 0/0，
+/// 落进最暗一档，在矩形上就是一条从上到下的暗带；这里显式取中性档。
+pub const FORM_SHADING_RECIPE: &str = r#"local function ramp(c, n) local d, l, o = mix(c, '#2a1f3d', 0.45), mix(mix(c, '#ffffff', 0.45), '#ffd9a8', 0.35), {}
+  for i = 1, n do local t = (i - 1) / (n - 1)
+    o[i] = t < 0.5 and mix(d, c, t / 0.5) or mix(c, l, (t - 0.5) / 0.5) end
+  return o end
+local R = ramp('#e8823a', 5)
+local base, W, H = R[3], canvas.width, canvas.height
+-- ONE flat base pass in the middle step, any contour you like; this is the line you swap
+-- for your own subject. Everything drawn in another colour stays outside the scan.
+circfill(32, 30, 11, base)
+-- pass one: the left/right edge of every base-coloured row plus the body's top/bottom.
+-- the normal is read off the pixels, so no centre and no radius has to be guessed.
+local top, bot, rows = nil, nil, {}
+for y = 0, H - 1 do
+  local xa, xb = nil, nil
+  for x = 0, W - 1 do
+    if pget(x, y) == base then if not xa then xa = x end xb = x end
+  end
+  if xa then rows[y] = {xa, xb} if not top then top = y end bot = y end
+end
+-- pass two: band every base-coloured pixel by a normal read off the form itself
+-- (row centre offset and body offset, both over the half height) against a top-left light.
+-- Every loop-invariant is hoisted: a pget already costs a colour string and a 1024px
+-- canvas has a million of them, so the fixed ones stay out of the inner loop.
+local hh = bot and (bot - top) or 0
+if top then
+for y = top, bot do local r = rows[y] if r then
+  local ra, rb = r[1], r[2]
+  local ny = (hh > 0) and 2 * (y - top) / hh - 1 or 0
+  for x = ra, rb do
+    if pget(x, y) == base then
+      local nx = (hh > 0 and rb > ra) and (2 * x - ra - rb) / hh or 0
+      local n = math.sqrt(nx * nx + ny * ny)
+      local nl = (n > 0) and (nx * -0.7 + ny * -0.7) / n or 0
+      pset(x, y, nl > 0.62 and R[5] or nl > 0.25 and R[4] or nl > -0.25 and R[3] or nl > -0.6 and R[2] or R[1])
+    end
+  end
+end end
+end
+outline(mix(R[1], '#e8823a', 0.35))"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::document::Document;
+    use std::collections::BTreeSet;
 
     fn blank() -> Document {
         Document::new("test", 16, 16).expect("16x16 within limits")
+    }
+
+    /// 锁了配色范围的层跑 aa*：掺色前的解析必须先归队，柔边不许把用户的
+    /// 配色表撑开。文档里那句「锁色板下 blend 会归回范围」靠的就是这条路径，
+    /// aa* 三个坐标写法都走同一个 resolve_color_for_layer，测一条曲线就够。
+    #[test]
+    fn a_soft_curve_on_a_locked_layer_stays_inside_the_range() {
+        let mut doc = blank();
+        let layer = doc.layers[0].id.clone();
+        let frame = doc.frames[0].id.clone();
+        // 窄范围两色 + 上锁：#808080 不在范围内，归队只能落回这两色之一。
+        doc.palettes = vec![crate::document::NamedPalette {
+            id: "lock-test".to_string(),
+            name: "lock test".to_string(),
+            colors: vec![Rgba::rgb(255, 0, 0), Rgba::rgb(0, 0, 255)],
+            builtin: false,
+        }];
+        doc.layers[0].palette_id = "lock-test".to_string();
+        doc.layers[0].locked = true;
+        run_shader(
+            &mut doc,
+            &layer,
+            "aacurve(1, 8, 14, 8, 8, 2, '#808080')\n",
+            false,
+            &ShaderBudget::default(),
+        )
+        .expect("锁色板上的曲线不该报错");
+        let cel = doc.cel(&layer, &frame).expect("cel");
+        assert!(cel.indices.iter().any(|i| *i != 0), "曲线没有落到画布上");
+        let stray = Rgba::rgb(0x80, 0x80, 0x80);
+        assert!(
+            !doc.palette.contains(&stray),
+            "范围外的灰色被 intern 进了文档调色板：{:?}",
+            doc.palette
+        );
+        for index in cel.indices.iter().filter(|i| **i != 0) {
+            let color = doc.palette[(*index - 1) as usize];
+            assert!(
+                doc.palettes[0].colors.contains(&color),
+                "画出去的颜色 {color:?} 不在锁定范围内"
+            );
+        }
+    }
+
+    /// 没锁的层照旧放行：归队只发生在上锁的层，否则「独立范围」会把自由层
+    /// 也绑死，用户就没法在别的层上试色了。
+    #[test]
+    fn a_soft_curve_on_an_unlocked_layer_keeps_its_own_color() {
+        let mut doc = blank();
+        let layer = doc.layers[0].id.clone();
+        doc.palettes = vec![crate::document::NamedPalette {
+            id: "lock-test".to_string(),
+            name: "lock test".to_string(),
+            colors: vec![Rgba::rgb(255, 0, 0), Rgba::rgb(0, 0, 255)],
+            builtin: false,
+        }];
+        doc.layers[0].palette_id = "lock-test".to_string();
+        doc.layers[0].locked = false;
+        run_shader(
+            &mut doc,
+            &layer,
+            "aacurve(1, 8, 14, 8, 8, 2, '#808080')\n",
+            false,
+            &ShaderBudget::default(),
+        )
+        .expect("没锁的层不该报错");
+        assert!(
+            doc.palette.contains(&Rgba::rgb(0x80, 0x80, 0x80)),
+            "没锁的层被归队了：{:?}",
+            doc.palette
+        );
+    }
+
+    /// 平滑落实的证据：同一条 45° 对角线，硬边只落一个色，柔边必须掺出多档
+    /// 中间色。「基础图形太突兀」能拿数字说话的形式正是这个——突兀来自整格
+    /// 要么全上要么全不上，所以中间档多出来才算柔边真的在起作用。
+    /// 顺带钉住两姐妹的脚印：硬边那一档必须整个落在柔边铺开的格子里，
+    /// 否则「aa* 和硬边孪生函数同一个坐标」这句承诺就是假的。
+    #[test]
+    fn a_soft_diagonal_lands_more_tones_than_the_hard_one() {
+        fn tones_of(script: &str) -> BTreeSet<u16> {
+            let mut doc = blank();
+            let layer = doc.layers[0].id.clone();
+            run_shader(&mut doc, &layer, script, false, &ShaderBudget::default())
+                .expect("直线要在沙箱里跑通");
+            let cel = doc.cel(&layer, "F0").expect("cel");
+            cel.indices.iter().copied().filter(|i| *i != 0).collect()
+        }
+        let hard = tones_of("line(2, 2, 13, 13, '#808080')\n");
+        let soft = tones_of("aaline(2, 2, 13, 13, '#808080')\n");
+        assert_eq!(hard.len(), 1, "硬边直线只该有一档色：{hard:?}");
+        assert!(
+            soft.len() > hard.len(),
+            "柔边直线该掺出多档中间色，实际 {} 档：{soft:?}",
+            soft.len()
+        );
+        assert!(
+            hard.is_subset(&soft),
+            "硬边那一档没落在柔边范围内：{hard:?}"
+        );
+    }
+
+    /// 画布说明文档承诺的每个画图函数名都必须在沙箱里真的注册着。
+    ///
+    /// 模型照文档调一个没注册的名字，只拿到一句 lua error，一轮输出预算
+    /// 就废在瞎改名字上——文档与实现之间最贵的裂缝就是这种。所以逐个点名
+    /// 验一次存在与类型，真参数调用由各函数的专项测试负责。
+    /// 覆盖范围跟着 prompt.rs 里那段 SOFT EDGES AND SMOOTH CURVES 走：
+    /// 硬边孪生函数、平滑家族全部别名、单格柔化，一个不漏。
+    #[test]
+    fn every_documented_drawing_helper_is_actually_registered() {
+        const DOCUMENTED: &[&str] = &[
+            // 硬边孪生函数：aa* 承诺「同样的坐标」，所以两套都得在。
+            "pset",
+            "pget",
+            "line",
+            "rect",
+            "rectfill",
+            "ellipse",
+            "ellipfill",
+            "ellipsefill",
+            "circle",
+            "circfill",
+            "circlefill",
+            "flood",
+            "replace",
+            "outline",
+            "clear",
+            "stamp",
+            // 平滑家族与它在文档里点名的每个别名。
+            "aaline",
+            "aaseg",
+            "aacurve",
+            "aaquad",
+            "aacubic",
+            "aabez",
+            "aapoly",
+            "aapath",
+            "aapolyfill",
+            "aafill",
+            "aacircle",
+            "aacirc",
+            "aaellipse",
+            "aarect",
+            // 单格柔化：差半格就够的场合用，不为它铺一条覆盖缓冲。
+            "blend",
+            "aablend",
+            "dither",
+        ];
+        let mut probe = String::from("local missing = {}\n");
+        for name in DOCUMENTED {
+            probe.push_str(&format!(
+                "if type(_G[{name:?}]) ~= 'function' then missing[#missing + 1] = {name:?} end\n"
+            ));
+        }
+        probe.push_str(
+            "if #missing > 0 then error('missing: ' .. table.concat(missing, ', ')) end\n",
+        );
+        let mut doc = blank();
+        let layer = doc.layers[0].id.clone();
+        run_shader(&mut doc, &layer, &probe, false, &ShaderBudget::default())
+            .expect("文档承诺的画图函数都该注册在沙箱里");
     }
 
     /// 拿内置函数名当局部变量，报错里必须带上「改名」这句话。
@@ -1194,6 +1853,38 @@ mod tests {
         );
     }
 
+    /// 尺寸适配助手：装进沙盒的这六个数必须和提示词承诺的一模一样。
+    /// 用长方形画布（120x48）是刻意的——正方形上 min == max == cx == cy，
+    /// scale 少除了 64、cx 取了短边，全都会被对称性藏过去，专挑这种形状才炸得出来。
+    /// 断言写在脚本里而不是逐个 get：模型拿不到 map 之外的键，assert 一失败
+    /// run_shader 直接把消息带出来，比在 Rust 侧反推坐标直观。
+    #[test]
+    fn the_size_helpers_report_what_the_prompt_promises() {
+        let mut doc = Document::new("sizes", 120, 48).expect("120x48 within limits");
+        let layer = doc.layers[0].id.clone();
+        let script = concat!(
+            "assert(canvas.max == 120, 'max 要取长边: ' .. tostring(canvas.max))\n",
+            "assert(canvas.min == 48, 'min 要取短边: ' .. tostring(canvas.min))\n",
+            "assert(canvas.cx == 60, 'cx 要按长边取中: ' .. tostring(canvas.cx))\n",
+            "assert(canvas.cy == 24, 'cy 要按短边取中: ' .. tostring(canvas.cy))\n",
+            "assert(canvas.scale(32) == 60, 'scale 按长边 / 64 折算: ' .. tostring(canvas.scale(32)))\n",
+            "local cw, ch = canvas.grid(4, 3)\n",
+            "assert(cw == 30 and ch == 16, 'grid 要给出整数格宽高: ' .. tostring(cw) .. 'x' .. tostring(ch))\n",
+            "local ow, oh = canvas.grid(0, 3)\n",
+            "assert(ow == 120 and oh == 16, '格子数低于 1 按 1 算: ' .. tostring(ow))\n",
+            "local zw, zh = canvas.grid(400, 3)\n",
+            "assert(zw == 1 and zh == 16, '格子比画布还窄时至少留 1px: ' .. tostring(zw))\n",
+            "pset(60, 24, '#ff004d')\n",
+        );
+        run_shader(&mut doc, &layer, script, false, &ShaderBudget::default())
+            .expect("尺寸助手不该报错");
+        let cel = doc.cel(&layer, &doc.frames[0].id.clone()).expect("cel");
+        assert!(
+            cel.indices.iter().any(|i| *i != 0),
+            "断言全过了但画布是空的"
+        );
+    }
+
     /// 提示只在真撞名时出现：普通运行时错误不该被塞一句废话。
     #[test]
     fn ordinary_lua_errors_stay_clean() {
@@ -1213,6 +1904,58 @@ mod tests {
             text.contains("this_function_does_not_exist"),
             "原文要留住：{text}"
         );
+    }
+
+    /// 脚本跑到一半报错：前半截已经画在 cel 上，报错就得把它撤干净。
+    /// 留半截在画布上比什么都不留更糟——用户看不出哪儿是画坏的，模型读到
+    /// 「画了多少个像素」也以为自己已经画上了，接着在错的底子上往下补。
+    #[test]
+    fn a_script_that_fails_half_way_paints_nothing() {
+        let mut doc = blank();
+        let layer = doc.layers[0].id.clone();
+        let frame = doc.frames[0].id.clone();
+        let err = run_shader(
+            &mut doc,
+            &layer,
+            "pset(0, 0, hex('#ff004d'))\npset(-1, 0, hex('#00e436'))\n",
+            false,
+            &ShaderBudget::default(),
+        )
+        .expect_err("负坐标必须报错");
+        let text = err.to_string();
+        assert!(
+            text.contains("legal range 0..=15"),
+            "报错得把合法范围说清，模型才知道往哪儿改：{text}"
+        );
+        let painted = doc
+            .cel(&layer, &frame)
+            .unwrap()
+            .indices
+            .iter()
+            .filter(|i| **i != 0)
+            .count();
+        assert_eq!(painted, 0, "报错的脚本不许在画布上留半截：{painted}");
+    }
+
+    /// 行号得从原文里抠出来：报错回给模型时要点名第几行，不然它只能整篇重读
+    /// 自己的脚本，瘸着改。
+    #[test]
+    fn lua_errors_carry_their_line() {
+        let mut doc = blank();
+        let layer = doc.layers[0].id.clone();
+        let err = run_shader(
+            &mut doc,
+            &layer,
+            "local a = 1\nlocal b = 2\nnope(3)\n",
+            false,
+            &ShaderBudget::default(),
+        )
+        .expect_err("调用不存在的函数必须报错");
+        let text = format!("{err:?}");
+        match err {
+            ShaderError::Lua { line, .. } => assert_eq!(line, Some(3), "第三行才调错的：{text}"),
+            other => panic!("不该是别的变体：{other:?}"),
+        }
     }
 
     /// 提示词写着 `hsv(h, s, v[, a])`。第四个参数曾经被 mlua 的元组解构静默
@@ -1301,5 +2044,235 @@ mod tests {
             .expect_err("第 16 行调用不存在的函数必须报错");
         let text = err.to_string();
         assert!(text.contains(":16"), "行号没进报错：{text}");
+    }
+
+    /// `pal()` 的下标绕位：负数被 `as u16` 绕成 65535，报错里就成了一个用户
+    /// 从没写过的数字。照那个数字改脚本，只会把对的写成错的。
+    #[test]
+    fn pal_reports_the_index_the_script_actually_wrote() {
+        let mut doc = blank();
+        doc.intern_color(crate::document::Rgba::rgb(255, 0, 77))
+            .expect("one color");
+        let layer = doc.layers[0].id.clone();
+        let err = run_shader(
+            &mut doc,
+            &layer,
+            "local c = pal(-1)",
+            false,
+            &ShaderBudget::default(),
+        )
+        .expect_err("负数下标必须报错");
+        let text = err.to_string();
+        assert!(text.contains("-1"), "报错要留住用户写的那个数：{text}");
+        assert!(!text.contains("65535"), "下标被绕位了：{text}");
+    }
+
+    /// `replace` 的 from 绕位更坏：匹配永远落空，调用变成悄悄什么都不做。
+    /// 模型以为自己改了色，画面一点没动，下一轮还照着错下标写。
+    #[test]
+    fn replace_refuses_an_out_of_range_index_instead_of_doing_nothing() {
+        let mut doc = blank();
+        doc.intern_color(crate::document::Rgba::rgb(255, 0, 77))
+            .expect("one color");
+        let layer = doc.layers[0].id.clone();
+        let err = run_shader(
+            &mut doc,
+            &layer,
+            "canvas.replace(-1, '#00E436')",
+            false,
+            &ShaderBudget::default(),
+        )
+        .expect_err("越界 from 必须报错");
+        let text = err.to_string();
+        assert!(text.contains("-1"), "报错要留住用户写的那个数：{text}");
+        assert!(!text.contains("65535"), "下标被绕位了：{text}");
+    }
+
+    /// 提示词里那份上色配方必须真跑得通，而且方向不能反。配方跑不动，模型照着
+    /// 抄完只拿到一个 lua error，一轮输出预算就没了；方向画反了，整张图的受光面
+    /// 全部颠倒，比不画还糟。所以这里拿真实沙箱验一次：受光侧亮、背光侧暗、
+    /// 中档只剩在明暗交界附近。
+    #[test]
+    fn the_documented_shading_recipe_lights_the_top_left() {
+        let mut doc = Document::new("t", 64, 64).expect("64x64 within limits");
+        let layer = doc.layers[0].id.clone();
+        let out = run_shader(
+            &mut doc,
+            &layer,
+            SHADING_RECIPE,
+            false,
+            &ShaderBudget::default(),
+        )
+        .expect("配方要在沙箱里跑通");
+        assert!(out.opaque_pixels > 300, "球体该真的画上去了");
+
+        let cel = doc.cel(&layer, "F0").expect("F0 cel");
+        let lum = |x: u32, y: u32| -> f64 {
+            let px = cel
+                .get(doc.width, x, y)
+                .and_then(|i| doc.color_of(i))
+                .unwrap_or(crate::document::Rgba::TRANSPARENT);
+            (0.299 * px.r as f64 + 0.587 * px.g as f64 + 0.114 * px.b as f64) / 255.0
+        };
+        // 球心 (32,30) 半径 11：左上 (26,24) 迎着 (-0.7,-0.7) 的光，
+        // 右下 (38,36) 背着它。两点都在球内，且都在 outline 那一像素之外。
+        let lit = lum(26, 24);
+        let core = lum(38, 36);
+        assert!(lit > core + 0.25, "受光侧 {lit} 该明显亮于背光侧 {core}");
+        // 「整颗球被取过带」要能被数出来：球内至少出现四档颜色，
+        // 而且没有任何一档占到一半以上——占了一半就说明还是平涂。
+        let mut spread: std::collections::HashMap<u16, usize> = std::collections::HashMap::new();
+        for y in 19..=41u32 {
+            for x in 21..=43u32 {
+                if let Some(i) = cel.get(doc.width, x, y) {
+                    *spread.entry(i).or_default() += 1;
+                }
+            }
+        }
+        let solid: usize = spread.values().sum();
+        let top = spread.values().copied().max().unwrap_or(0);
+        assert!(
+            spread.len() >= 4,
+            "球内至少四档色阶，实际 {} 档：{spread:?}",
+            spread.len()
+        );
+        assert!(
+            top * 2 < solid,
+            "任一档不该占到一半以上（{top}/{solid}），否则仍是平涂"
+        );
+    }
+
+    /// 任意轮廓配方在球体上要和老配方逐像素一致。同一颗球、同一个 ramp，
+    /// 只是法线的来路不同（半径归一化 vs 行归一化）——退化情形若对不上，
+    /// 说明行归一化把曲面的方向算歪了，那它在猫身上也只会更歪。
+    #[test]
+    fn the_form_recipe_degenerates_to_the_round_one_on_a_sphere() {
+        let mut doc = Document::new("t", 64, 64).expect("64x64 within limits");
+        let layer = doc.layers[0].id.clone();
+        let out = run_shader(
+            &mut doc,
+            &layer,
+            FORM_SHADING_RECIPE,
+            false,
+            &ShaderBudget::default(),
+        )
+        .expect("任意轮廓配方要在沙箱里跑通");
+        assert!(out.opaque_pixels > 300, "球体该真的画上去了");
+
+        let mut old = Document::new("t", 64, 64).expect("64x64 within limits");
+        let old_layer = old.layers[0].id.clone();
+        run_shader(
+            &mut old,
+            &old_layer,
+            SHADING_RECIPE,
+            false,
+            &ShaderBudget::default(),
+        )
+        .expect("老配方要能跑");
+        let fresh = doc.cel(&layer, "F0").expect("新配方的 cel");
+        let stale = old.cel(&old_layer, "F0").expect("老配方的 cel");
+        // 比的是颜色不是下标：两次运行里 ramp 各档的 intern 顺序本来就不同，
+        // 拿下标比等于拿记账顺序比画面。
+        for y in 0..64u32 {
+            for x in 0..64u32 {
+                // 球心那一个像素是唯一的例外：老配方在圆心算出 0/0，NaN 比不过任何
+                // 阈值，那一像素被推进最暗一档（单像素瑕疵）；新版显式取中性档。
+                if x == 32 && y == 30 {
+                    continue;
+                }
+                let here = fresh.get(doc.width, x, y).and_then(|i| doc.color_of(i));
+                let there = stale.get(old.width, x, y).and_then(|i| old.color_of(i));
+                assert_eq!(here, there, "球体同一像素 ({x},{y}) 两个配方给出的色阶不同");
+            }
+        }
+    }
+
+    /// 模型照抄的流程就是把配方里那一行 circfill 换成自己的平涂底。换成矩形之后
+    /// 层次必须还在：老配方在矩形上按圆心取带，四角和边缘的阶全是错的，
+    /// 这正是「换个身子就废」要修掉的东西。
+    #[test]
+    fn a_flat_rectangle_takes_layers_from_the_form_recipe() {
+        let mut doc = Document::new("t", 64, 64).expect("64x64 within limits");
+        let layer = doc.layers[0].id.clone();
+        let script = FORM_SHADING_RECIPE.replace(
+            "circfill(32, 30, 11, base)",
+            "rectfill(14, 22, 50, 42, R[3])",
+        );
+        run_shader(&mut doc, &layer, &script, false, &ShaderBudget::default())
+            .expect("矩形上任意轮廓配方要跑通");
+        let cel = doc.cel(&layer, "F0").expect("F0 cel");
+        let lum = |x: u32, y: u32| -> f64 {
+            let px = cel
+                .get(doc.width, x, y)
+                .and_then(|i| doc.color_of(i))
+                .unwrap_or(crate::document::Rgba::TRANSPARENT);
+            (0.299 * px.r as f64 + 0.587 * px.g as f64 + 0.114 * px.b as f64) / 255.0
+        };
+        // 矩形左上 (16,24) 迎着左上光源，右下 (48,40) 背着它。
+        let lit = lum(16, 24);
+        let core = lum(48, 40);
+        assert!(lit > core + 0.25, "受光侧 {lit} 该明显亮于背光侧 {core}");
+
+        let mut spread: std::collections::HashMap<u16, usize> = std::collections::HashMap::new();
+        for y in 22..=42u32 {
+            for x in 14..=50u32 {
+                if let Some(i) = cel.get(doc.width, x, y) {
+                    *spread.entry(i).or_default() += 1;
+                }
+            }
+        }
+        let solid: usize = spread.values().sum();
+        let top = spread.values().copied().max().unwrap_or(0);
+        assert!(
+            spread.len() >= 4,
+            "矩形内至少四档色阶，实际 {} 档：{spread:?}",
+            spread.len()
+        );
+        assert!(
+            top * 2 < solid,
+            "任一档不该占到一半以上（{top}/{solid}），否则仍是平涂"
+        );
+    }
+
+    /// 复合主体：一次平涂画出椭圆身子和矩形尾巴（猫的样子）。第一遍扫到的是并集的
+    /// 包围盒，每行按自己的左右边界归一化，所以身子的左上还是要亮、右下还是要暗，
+    /// 尾巴作为同一个主体的一部分也一起吃到光。
+    #[test]
+    fn a_composite_body_takes_layers_from_the_form_recipe() {
+        let mut doc = Document::new("t", 64, 64).expect("64x64 within limits");
+        let layer = doc.layers[0].id.clone();
+        let script = FORM_SHADING_RECIPE.replace(
+            "circfill(32, 30, 11, base)",
+            "ellipfill(18, 26, 46, 42, R[3]) rectfill(6, 30, 22, 34, R[3])",
+        );
+        run_shader(&mut doc, &layer, &script, false, &ShaderBudget::default())
+            .expect("复合主体上任意轮廓配方要跑通");
+        let cel = doc.cel(&layer, "F0").expect("F0 cel");
+        let lum = |x: u32, y: u32| -> f64 {
+            let px = cel
+                .get(doc.width, x, y)
+                .and_then(|i| doc.color_of(i))
+                .unwrap_or(crate::document::Rgba::TRANSPARENT);
+            (0.299 * px.r as f64 + 0.587 * px.g as f64 + 0.114 * px.b as f64) / 255.0
+        };
+        // 椭圆身子 bbox 18..46 x 26..42：左上取 (24,29)，右下取 (40,39)，
+        // 两点都在椭圆内且在 outline 那一像素之外。
+        let lit = lum(24, 29);
+        let core = lum(40, 39);
+        assert!(lit > core + 0.25, "身子左上 {lit} 该亮于右下 {core}");
+
+        let mut spread: std::collections::HashMap<u16, usize> = std::collections::HashMap::new();
+        for y in 26..=42u32 {
+            for x in 6..=46u32 {
+                if let Some(i) = cel.get(doc.width, x, y) {
+                    *spread.entry(i).or_default() += 1;
+                }
+            }
+        }
+        assert!(
+            spread.len() >= 3,
+            "复合主体内至少三档色阶，实际 {} 档：{spread:?}",
+            spread.len()
+        );
     }
 }

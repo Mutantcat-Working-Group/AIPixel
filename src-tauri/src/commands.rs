@@ -5,9 +5,9 @@
 //! 里面的 `AgentEvent` 自带 kind tag，前端按 kind 分派。
 
 use agent_core::{
-    ActiveContext, AgentEvent, AgentEventEnvelope, AgentSession, ApprovalDecision, Attachment,
-    AttachmentRole, Capabilities, ImageSupport, LoopLimits, Message, ModelConfig, ModelRole,
-    PermissionMode, Protocol,
+    pins, ActiveContext, AgentEvent, AgentEventEnvelope, AgentSession, ApprovalDecision,
+    Attachment, AttachmentRole, Capabilities, ImageSupport, LoopLimits, Message, ModelConfig,
+    ModelRole, PermissionMode, Protocol,
 };
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, State};
@@ -162,6 +162,8 @@ pub struct SessionInfo {
     pub order: u64,
 }
 
+/// 会话 -> 前端视图。前后端契约的唯一出口：Arc、文档原文、api_key
+/// 都在这一层截断，后端形状再怎么变，前端拿到的一直是这份扁平结构。
 fn session_info(session: &AgentSession) -> SessionInfo {
     let config = session.model_config();
     let doc = session.document();
@@ -183,13 +185,18 @@ fn session_info(session: &AgentSession) -> SessionInfo {
 pub fn session_create(
     state: State<'_, AppState>,
     document: Option<Value>,
+    title: Option<String>,
 ) -> Result<SessionInfo, String> {
     let doc = match document {
         Some(value) => serde_json::from_value::<pixel_core::document::Document>(value)
             .map_err(|e| format!("invalid document: {e}"))?,
         None => default_document(),
     };
-    let session = state.create_session(doc);
+    // 前端传什么都能进来，宽高不校验的话后面一次 width*height 分配就能打死进程。
+    let doc = doc
+        .validated()
+        .map_err(|e| format!("invalid document: {e}"))?;
+    let session = state.create_session(doc, title);
     Ok(session_info(&session))
 }
 
@@ -310,6 +317,9 @@ pub fn agent_set_permission(
 }
 
 /// 发一条消息并跑一个 agent turn。命令立即返回，过程事件经 `agent-event` 广播。
+// 签名即 IPC 契约：每个参数都从桥那边按名字递进来。收成结构体就要改前端调用
+// 形状和 mock，收益只是一处 lint 安静，不值当。
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub fn agent_send_message(
     app: AppHandle,
@@ -318,12 +328,20 @@ pub fn agent_send_message(
     text: String,
     attachments: Option<Vec<Attachment>>,
     model_id: Option<String>,
+    style: Option<String>,
+    presets: Option<Vec<String>>,
 ) -> Result<(), String> {
     let session = state.session(&id)?;
     if let Some(model_id) = model_id.filter(|m| !m.trim().is_empty()) {
         let config = state.model_config(&model_id)?;
         session.rebind_provider(config);
     }
+    // 风格锁定与提示词预设都走 pins 那一份解析：微调和工作流坞问的是同一个问题，
+    // 三处各写一遍就意味着补了一处、另外两处还在原地——用户选了「写实渲染」，
+    // 成品却不带这条规矩，查的就是那种地方。报错语义（认不出就拒绝、超额就拒绝、
+    // 「不限」放行）见 pins 模块自己的说明。
+    let pinned_style = pins::pinned_style(style.as_deref())?;
+    let pinned_presets = pins::pinned_presets(presets.unwrap_or_default())?;
     let attachments = attachments.unwrap_or_default();
 
     let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
@@ -346,8 +364,12 @@ pub fn agent_send_message(
         }
     });
     // 主循环跑在独立任务里，命令拿到的是「已受理」而非「已跑完」。
+    // 走守门员那层：主循环万一崩在半路，也要给这一回合补一个收口事件，
+    // 不然前端的 running 永远不收，用户按什么都没反应。
     tauri::async_runtime::spawn(async move {
-        session.run_turn(text, attachments, tx).await;
+        session
+            .run_turn_guarded_with_preset(text, attachments, tx, pinned_style, pinned_presets)
+            .await;
     });
     Ok(())
 }
@@ -380,6 +402,9 @@ pub fn agent_sync_document(
 ) -> Result<Value, String> {
     let session = state.session(&id)?;
     let doc = serde_json::from_value::<pixel_core::document::Document>(document)
+        .map_err(|e| format!("invalid document: {e}"))?;
+    let doc = doc
+        .validated()
         .map_err(|e| format!("invalid document: {e}"))?;
     session.sync_document(doc);
     Ok(serde_json::json!({ "revision": session.revision() }))

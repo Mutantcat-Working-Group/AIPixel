@@ -13,6 +13,20 @@
 /** 行里一个「这一项不限」的说法。和 Rust 侧 `plan::NONE_WORDS` 对齐。 */
 const NONE_WORDS = ["none", "null", "clear", "auto", "unset", "any"];
 
+/**
+ * Rust 用这个英文串写「这件事是界面钉的，不是用户原话说的」（`plan::PINNED_HIT`）。
+ * 它不是一句判据：渲染时该显示成「界面已锁定」，而不是一句夹在中文里的英文。
+ */
+export const PINNED_HIT = "pinned in the composer";
+
+/**
+ * Rust 用这个英文串写「这条预设是画风自带的行李，不是用户点的」
+ * （`plan::COMPANION_HIT`）。同样不是一句判据，显示时换成「随画风联动」。
+ * 和 `PINNED_HIT` 分开是有必要的：用户想弄清「这条是谁加的」，
+ * 两种来源写成同一句，他就得去猜。
+ */
+export const COMPANION_HIT = "riding along with the art style";
+
 /** 一行：左边一个标签，右边一列值，外加写下这件事的原话。 */
 export type PlanRow = {
   /** 标签的文案键。 */
@@ -126,6 +140,22 @@ function readKnowledge(value: unknown): PlanRow | null {
   };
 }
 
+/** 收尾规矩：界面可以叠几条，一行读完，值用「、」连起来。
+ * 数组和单个都认——模型自己纠正常常只写一条光秃秃的 id。 */
+function readPresets(value: unknown): PlanRow | null {
+  const entries = Array.isArray(value) ? value : [value];
+  const row: PlanRow = { labelKey: "plan.preset", keys: [], raws: [] };
+  for (const entry of entries) {
+    const read = readId(entry);
+    if (!read) continue;
+    row.raws.push(read.id);
+    row.keys.push(isNone(read.id) ? "plan.any" : `preset.${read.id.toLowerCase()}`);
+    // 判据取第一条有的：几条一起钉上去时它们共享同一个由来，重复几遍只是噪音。
+    if (read.because && row.because === undefined) row.because = read.because;
+  }
+  return row.keys.length === 0 ? null : row;
+}
+
 /** 把节点入参读成行。读不出任何一行就返回空数组，调用方照原样显示 JSON。 */
 export function parsePlanRows(input: unknown): PlanRow[] {
   const obj = asObject(input);
@@ -142,6 +172,13 @@ export function parsePlanRows(input: unknown): PlanRow[] {
   }
   if ("knowledge" in obj) {
     const row = readKnowledge(obj.knowledge);
+    if (row) rows.push(row);
+  }
+  if ("presets" in obj || "preset" in obj) {
+    // 收尾规矩排在知识后面：它是这一轮最后一颗要拧的螺丝，位置贴近「发下去
+    // 之前还加了什么」。界面发的是数组（能叠几条），模型纠正常常只写一条，
+    // 两种形状都读。判据恒为界面点击，不会有原话，所以 because 多半是空的。
+    const row = readPresets("presets" in obj ? obj.presets : obj.preset);
     if (row) rows.push(row);
   }
   return rows;

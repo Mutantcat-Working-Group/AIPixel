@@ -10,6 +10,7 @@
 //! - 索引 0 恒为透明，调色板从 0 开始编号
 //! - 图层各自认领一套命名配色范围（palettes），锁着的那层只肯用范围里的颜色
 
+pub mod aa;
 pub mod aip;
 pub mod ase;
 pub mod context;
@@ -17,6 +18,7 @@ pub mod decode;
 pub mod document;
 pub mod ops;
 pub mod palettes;
+pub mod patch;
 pub mod pixelize;
 pub mod png;
 pub mod rle;
@@ -27,4 +29,7 @@ pub mod tween;
 pub use document::{Cel, Document, Frame, Layer, NamedPalette, Rgba};
 pub use ops::{OperationError, PixelOperation};
 pub use palettes::{builtin_palettes, MAX_PALETTES};
+pub use patch::DocPatch;
 pub use pixelize::{pixelize_rgba, PixelizeOptions, PixelizeReport};
+pub use shader::FORM_SHADING_RECIPE;
+pub use shader::SHADING_RECIPE;

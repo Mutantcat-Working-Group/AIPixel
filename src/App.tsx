@@ -2,17 +2,17 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import { useEffect, useState } from "react";
 import { Button, Dropdown, Segmented, Select, Spin, Tooltip } from "antd";
-import { Download, FolderOpen, ImagePlus, Plug, Save, Settings2, X } from "lucide-react";
+import { Download, FolderOpen, ImagePlus, Save, Settings2, X } from "lucide-react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 
 import ChatPanel from "./ui/ChatPanel";
 import DocumentPanel from "./ui/DocumentPanel";
 import BatchPanel from "./ui/BatchPanel";
 import ModelSettingsModal from "./ui/ModelSettingsModal";
-import McpPanel from "./ui/McpPanel";
 import SessionSidebar from "./ui/SessionSidebar";
 import WorkflowDock from "./ui/WorkflowDock";
 import ContextMenuHost from "./ui/ContextMenu";
+import useEditShortcuts from "./ui/useEditShortcuts";
 import { useStore } from "./lib/store";
 import { useT } from "./lib/t";
 import type { PermissionMode } from "./lib/types";
@@ -56,6 +56,9 @@ export default function App() {
     // store 是模块级单例，只在挂载时启动一次
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // 撤销 / 重做的键盘入口：画布改一步就能一键反悔，不依赖右上角那两个小方块。
+  useEditShortcuts();
 
   if (!store.booted) {
     return (
@@ -205,10 +208,24 @@ export default function App() {
 
         <div className="topbar-group">
           <Tooltip title={t("topbar.open_aip")}>
-            <Button size="small" type="text" icon={<FolderOpen size={14} />} onClick={pickAndOpenAip} />
+            {/* aria-label 与悬停提示同文：纯图标按钮对读屏软件得有个名字，
+                光靠 Tooltip 的话鼠标没点上去之前它什么都不是。 */}
+            <Button
+              size="small"
+              type="text"
+              aria-label={t("topbar.open_aip")}
+              icon={<FolderOpen size={14} />}
+              onClick={pickAndOpenAip}
+            />
           </Tooltip>
           <Tooltip title={t("topbar.save_aip")}>
-            <Button size="small" type="text" icon={<Save size={14} />} onClick={pickAndSaveAip} />
+            <Button
+              size="small"
+              type="text"
+              aria-label={t("topbar.save_aip")}
+              icon={<Save size={14} />}
+              onClick={pickAndSaveAip}
+            />
           </Tooltip>
           <Tooltip title={t("topbar.export")}>
             <Dropdown
@@ -227,6 +244,7 @@ export default function App() {
               <Button
                 size="small"
                 type="text"
+                aria-label={t("topbar.export")}
                 icon={<Download size={14} />}
                 disabled={!store.document || store.busy}
               />
@@ -238,22 +256,16 @@ export default function App() {
               type="text"
               icon={<ImagePlus size={14} />}
               onClick={pickReferenceImages}
+              aria-label={t("topbar.attach_reference")}
             />
           </Tooltip>
           <Tooltip title={t("topbar.settings")}>
             <Button
               size="small"
               type="text"
+              aria-label={t("topbar.settings")}
               icon={<Settings2 size={14} />}
               onClick={store.openSettings}
-            />
-          </Tooltip>
-          <Tooltip title={t("topbar.mcp")}>
-            <Button
-              size="small"
-              type="text"
-              icon={<Plug size={14} />}
-              onClick={store.openMcp}
             />
           </Tooltip>
         </div>
@@ -271,7 +283,13 @@ export default function App() {
       {store.notice ? (
         <div className={`notice-bar ${store.notice.isError ? "error" : ""}`}>
           <span className="grow">{store.notice.text}</span>
-          <Button size="small" type="text" icon={<X size={13} />} onClick={store.clearNotice} />
+          <Button
+            size="small"
+            type="text"
+            aria-label={t("notice.dismiss")}
+            icon={<X size={13} />}
+            onClick={store.clearNotice}
+          />
         </div>
       ) : null}
 
@@ -294,7 +312,6 @@ export default function App() {
       </div>
 
       <ModelSettingsModal />
-      <McpPanel />
       <ContextMenuHost />
     </div>
   );

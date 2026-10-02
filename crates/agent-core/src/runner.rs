@@ -25,8 +25,10 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 
+use super::artstyle;
 use super::craft;
 use super::imagegen::{self, ImageGenParams, LandSpot};
+use super::intent;
 use super::knowledge;
 use super::limits;
 use super::mcp::{self, McpRegistry};
@@ -36,12 +38,14 @@ use super::models::{
     UiText,
 };
 use super::plan::{self, TurnPlan, PLAN_TOOL};
+use super::presets;
 use super::prompt;
 use super::providers::{self, LlmProvider, ProviderError};
 use super::roles::{ModelRole, RoleBinding};
 use super::tools::{self, ToolOutcome, IMAGE_GEN_TOOL};
 use pixel_core::decode;
 use pixel_core::document::Document;
+use pixel_core::DocPatch;
 
 /// 一次待执行的工具调用（JSON 解析失败的也排进来，让模型收到可修复的错误）。
 struct PlannedCall {
@@ -66,6 +70,9 @@ struct LastShader {
     /// 这一发跑完之后 document 的 revision。任何别的改动都会挪它，
     /// 挪开了这份记忆就自然失效——包括用户在编辑器里动过的手笔。
     revision: u64,
+    /// 这一发跑成了没有。跑挂的那份同样值得记住：原样重发一遍坏的脚本，
+    /// 结果只会再坏一次，而完整问一轮模型要几十秒到两分钟。
+    ok: bool,
 }
 
 /// 整个响应流允许静默多久。
@@ -91,6 +98,11 @@ const HEADERS_TIMEOUT: Duration = Duration::from_secs(45);
 /// 写法或者如实告诉用户，都比让 turn 卡死强。
 const IMAGE_GEN_TIMEOUT: Duration = Duration::from_secs(180);
 
+/// 取消标志的轮询间隔。停止按钮的手感全看这一条：间隔越长，用户点了
+/// 停止之后界面「没反应」的时间就越长。await_approval、流式收尾、
+/// 以及长工具的可中断等待共用它，别各处写死一个数。
+const CANCEL_POLL: Duration = Duration::from_millis(120);
+
 /// 「整轮一个工具都没调」时最多催几次。
 ///
 /// 模型偶尔会犯一种很亏的毛病：用户让它画东西，它动嘴不动手，讲两句
@@ -108,6 +120,25 @@ const MAX_PENDING_EDITS: usize = 12;
 /// 同一份 shader 原样重跑时回给模型的话。要说清「跳过不等于失败」：
 /// 不然它会以为工具坏了，换个写法再发一遍同样的东西。
 const SHADER_REPLAY_REFUSAL: &str = "this exact shader script already ran and painted these pixels; the canvas has not changed since; the run was skipped. Verify with pixel_read_canvas if you need the current grid. Then either change the script (different geometry, color choices, or target cel) or finish your reply with a one-sentence summary - re-running an identical script cannot produce a different canvas";
+
+/// 一轮提前收摊时，给没跑成的调用补的 `tool_result`。
+///
+/// 消息簿里每一条 `ToolUse` 都必须有配对的 `ToolResult`，否则下一轮请求会被
+/// 服务端整包 400 拒掉（"tool_use ids were found without tool_result blocks"）。
+/// 少了这一步，用户点一次停止、或撞上一次步数预算，这个会话就再也发不出
+/// 任何消息了——只能删掉重建。
+const UNFINISHED_TOOL_RESULT: &str = "this tool call was never executed because the turn ended first (stopped by you, out of tool steps, or out of approval). It painted nothing. Resend it unchanged if you still need it.";
+
+/// 把这一批没跑完的调用补成带错误的 `tool_result`。
+///
+/// `from` 之后的一律没执行（跑到一半停下、连错三次收摊）。已经配过结果的一笔
+/// 不多补：空结果会让模型以为工具坏了，换个写法重发一遍同样的东西。
+fn unfinished_tool_results(ids: &[String], from: usize) -> Vec<Message> {
+    ids[from..]
+        .iter()
+        .map(|id| Message::tool_result(id.clone(), UNFINISHED_TOOL_RESULT, true))
+        .collect()
+}
 
 /// 流静默计时器：记下最后一次见到字节的时刻，答一句「是不是该判死刑了」。
 #[derive(Debug, Clone, Copy)]
@@ -171,9 +202,13 @@ fn looks_cut_off(text: &str) -> bool {
         return true;
     }
     let last = trimmed.lines().last().unwrap_or_default().trim_end();
-    // 一行以连接符收尾：表达式、参数表、对象字面量都被从中间剪了一刀。
-    // 中文破折号「——」是全角字符，碰不到这张 ASCII 表，不会被误伤。
-    const DANGLING: &[&str] = &[",", "+", "&&", "||", "=>", "->", "(", "{", "[", "="];
+    // 一行以连接符或未闭合的括号收尾：表达式、参数表、对象字面量都被从中间
+    // 剪了一刀。中文逗号、顿号、冒号同理——没有一句话是拿它们收尾的；半角
+    // 冒号也多半是「后面还有内容」的标签。猜错不要紧，见调用处的处理。
+    // 中文破折号「——」是断得干净的收尾，碰不到这张表，不会被误伤。
+    const DANGLING: &[&str] = &[
+        ",", "，", "、", ":", "：", "+", "&&", "||", "=>", "->", "(", "{", "[", "=",
+    ];
     DANGLING.iter().any(|tail| last.ends_with(tail))
 }
 
@@ -216,9 +251,12 @@ const MAX_REASONING_CONTINUATIONS: usize =
 /// 而 400/401/404/413/422 是请求本身写错了：key 不对、模型名打错、路径没挂上，
 /// 原样重发多少次都是同一个报错，所以立刻现形，让用户去改配置。
 ///
-/// 403 走另一条路：它看着像「服务器不答应」，可 `permission_denied_error` 里有
-/// 相当一部分是网关侧的限流窗口、令牌套餐切换、区域策略在作怪，等一等就放行。
-/// 宁可让用户等十几秒看到同一个 403，也不能把一条其实能跑通的请求判死。
+/// 403 走另一条路：它看着像「服务器不答应」，可里面相当一部分是网关侧的限流
+/// 窗口、套餐切换、区域策略在作怪，等一等就放行。宁可让用户等十几秒看到同一个
+/// 403，也不能把一条其实能跑通的请求判死。
+///
+/// 响应体自己点明「这个模型不在你的套餐里」的那一半（见 `permanent_reason`）
+/// 也不在这张表里问生死：它照样发满这一轮的额度，只是摊牌时说的话不一样。
 fn retryable(err: &ProviderError) -> bool {
     match err {
         ProviderError::Network(_) | ProviderError::Decode(_) => true,
@@ -226,6 +264,205 @@ fn retryable(err: &ProviderError) -> bool {
             matches!(*status, 403 | 408 | 409 | 425 | 429) || (500..=599).contains(status)
         }
         ProviderError::Config(_) => false,
+    }
+}
+
+/// 命中这些词，就是「这句话不管再听几遍都一样」——但还是要听满这一轮的几遍。
+///
+/// 分三组，各对上一条出路：模型不给用、钱的事、钥匙不对。词全部小写比，
+/// 响应体里的 type 字段（`permission_denied_error` 一伙）不带 message 时不收——
+/// 光一个类型码分不清是套餐还是网关限流窗口，宁可让它走重试那条路。
+///
+/// 认出来不等于当场摊红字：中转站侧套餐生效有延迟、网关缓存旧策略也是等一等
+/// 就好的事，所以照样先给满这一轮的重发额度。认出来的价值在收场那句话——额度
+/// 见底时说的是「换模型、改套餐、改 key」，而不是一句「重试次数用尽」，
+/// 用户不知道该动哪里。判 Permanent 的语义只留一半：只管说什么，不管发几次。
+const PERMANENT_MARKERS: &[&str] = &[
+    // 模型这个端点上根本不给用：名打错、没订阅、套餐没覆盖。
+    "model is not available",
+    "not available in the current",
+    "token plan",
+    "model_not_found",
+    "model does not exist",
+    "does not exist",
+    "unknown model",
+    "no such model",
+    // 钱的事：配额见底、账单没生效。
+    "insufficient_quota",
+    "quota_exceeded",
+    "current quota",
+    "billing",
+    // 钥匙不对。
+    "invalid_api_key",
+    "incorrect api key",
+    "api key not valid",
+    "access denied",
+];
+
+/// 从一段响应体里读出「这发重发了也没用」。带一句出路，用户该动哪里。
+fn permanent_reason_of(body: &str) -> Option<String> {
+    let low = body.to_lowercase();
+    PERMANENT_MARKERS
+        .iter()
+        .find(|marker| low.contains(**marker))
+        .map(|marker| {
+            match *marker {
+                "billing" | "insufficient_quota" | "quota_exceeded" | "current quota" => {
+                    "the provider says this account cannot pay for the call; check the plan or credit, or switch model"
+                }
+                "invalid_api_key" | "incorrect api key" | "api key not valid" | "access denied" => {
+                    "the provider rejected the API key; fix it in Settings > Models, or switch model"
+                }
+                _ => {
+                    "the provider will not serve this model name; check the model id in Settings > Models, or switch model"
+                }
+            }
+            .to_string()
+        })
+}
+
+/// 一眼认出来「这句话不管再听几遍都一样」的那类报错：模型不让用、钱的事、
+/// 钥匙不对。判据全在响应体里，不在状态码里——403 既可能是网关限流窗口
+/// （等一等就放行），也可能是「这个模型不在你的 token 套餐里」，两者的报文
+/// 长得一模一样，只有字里那半句实话分得开。
+///
+/// 认出来只改变一件事：摊牌时说什么。发几次照旧走满这一轮的重发额度——
+/// 中转站侧套餐生效有延迟、网关缓存旧策略也是同一句 403 等一等就好的事，
+/// 用户要的是「红字之前真试过五次」。五次都撞回同一句话，才把 `Refused` 连同
+/// 出路（换模型 / 改套餐 / 改 key）交出去。
+///
+/// 真正一次都不该重发的是另一类：请求本身不被接受（400 参数错、401 钥匙格式
+/// 就不对且报文里没有实话）。那类由 `retryable` 否决，和这里井水不犯河水。
+fn permanent_reason(err: &ProviderError) -> Option<String> {
+    let ProviderError::Http { status, body } = err else {
+        return None;
+    };
+    if !(400..500).contains(status) {
+        // 5xx 是服务端自己的事，再难看也值得再发一次。
+        return None;
+    }
+    permanent_reason_of(body)
+}
+
+/// 同一个失败原样重来，到第几次认栽。
+///
+/// Provider 已经把那句话说尽了：第二遍、第三遍都是同一句、同一个码。再发下去，
+/// 用户看到的是一个不动的界面加一条标语，跟「卡死了」分不开。
+const IDENTICAL_FAILURE_LIMIT: usize = 3;
+
+/// 整个逻辑轮的重试退避总时长封顶。
+///
+/// 网络抖一小串能拖掉半分钟：五次退避 1+2+4+8 就是 15 秒，而续写会让同一个回合里
+/// 发出去几十次请求，每发都另给一份额度的话，一个回合可以有一整分钟没有新内容。
+/// 聊天回合不该这样，所以整轮共用一个总时长。
+const RETRY_WALL_LIMIT: Duration = Duration::from_secs(30);
+
+/// 一次失败之后怎么办。三条出路，摊给用户的措辞各不一样。
+enum RetryVerdict {
+    /// 原样再发一次。带第几次，界面要显示 `attempt/max`。
+    Again(usize),
+    /// 重发治不好：换模型、改套餐、改 key。出路写在 payload 里。
+    Refused(String),
+    /// 病理上该重发，但这一轮的额度/时长/复读见顶了。同样要说明白为什么收。
+    Halted(String),
+    /// 请求本身不被接受（400/401/404…），照原有的红卡片摊出去。
+    NotRetryable,
+}
+
+/// 一轮里「还发不发」的三条闸，外加一眼认出「重发也没用」。
+///
+/// 归整轮管，不归每一发管：续写会让同一个回合里发出几十次请求，每发都另给五次
+/// 重发额度，用户就能对着一行 403 看三分钟——那正是「触发了重试，却像根本没动」
+/// 的来路。一次成功会把次数和复读归零，但睡掉的时长不还：时间是真花掉了。
+#[derive(Debug, Default, Clone)]
+struct RetryGate {
+    /// 已经吃掉几次重发额度。
+    used: usize,
+    /// 退避累计睡了多久。
+    slept: Duration,
+    /// 连着几次一模一样的失败文本。
+    streak: usize,
+    /// 上一次的失败文本，拿来比「是不是同一句」。
+    last: String,
+}
+
+impl RetryGate {
+    /// 拿着 `ProviderError` 裁一次。流式失败走 `judge_text`。
+    fn judge(&self, err: &ProviderError, max: usize) -> RetryVerdict {
+        self.judge_known(max, permanent_reason(err), retryable(err))
+    }
+
+    /// 手里只剩一句成败文案时裁一次（流半道断、模型假死都走这条）。
+    ///
+    /// 响应体裹在同一句里，照样认得出「这句话再听几遍也一样」：不认的话，
+    /// 套餐不覆盖模型这件事摊牌时只会说「重试次数用尽」，用户不知道去换模型。
+    fn judge_text(&self, failure: &str, retryable: bool, max: usize) -> RetryVerdict {
+        self.judge_known(max, permanent_reason_of(failure), retryable)
+    }
+
+    /// 判定总入口。`known` 是「这句话再听几遍也一样」的出路说明。
+    ///
+    /// `Some` 时照旧给满 `max` 次重发，只是复读闸对它关门：同一句 403 回五遍正是
+    /// 预期中的样子，按复读闸第三遍就收，用户要的那五次永远等不到。次数或时长
+    /// 见底才交 `Refused`——红字得押一句能自己走出去的话，`Halted` 那句
+    /// 「这一轮不再兜了」只对瞬态错有意义，说给一个 key 写错的用户听，
+    /// 他只会把同一条消息再发一遍。
+    ///
+    /// `None` 时是老规矩：病理上不该重发的一次都不重发。
+    fn judge_known(&self, max: usize, known: Option<String>, retryable: bool) -> RetryVerdict {
+        let Some(why) = known else {
+            if !retryable {
+                return RetryVerdict::NotRetryable;
+            }
+            return self.judge_gate(max, false);
+        };
+        match self.judge_gate(max, true) {
+            RetryVerdict::Again(attempt) => RetryVerdict::Again(attempt),
+            _ => RetryVerdict::Refused(why),
+        }
+    }
+
+    /// 三条闸：次数、复读、总时长。病理上该重发的才走到这儿。
+    ///
+    /// `known_permanent` 为真时关掉复读闸，理由见 `judge_known`。
+    fn judge_gate(&self, max: usize, known_permanent: bool) -> RetryVerdict {
+        if self.used >= max {
+            return RetryVerdict::Halted(format!(
+                "the {max} retries this round allows are used up"
+            ));
+        }
+        if !known_permanent && self.streak >= IDENTICAL_FAILURE_LIMIT {
+            return RetryVerdict::Halted(format!(
+                "the provider answered with the same failure {IDENTICAL_FAILURE_LIMIT} times in a row"
+            ));
+        }
+        if self.slept >= RETRY_WALL_LIMIT {
+            return RetryVerdict::Halted(format!(
+                "this round already spent {}s backing off",
+                RETRY_WALL_LIMIT.as_secs()
+            ));
+        }
+        RetryVerdict::Again(self.used + 1)
+    }
+
+    /// 记下这一发失败、即将再发一次。
+    fn note(&mut self, attempt: usize, failure: &str, backoff: Duration) {
+        self.used = attempt;
+        self.slept += backoff;
+        if self.last == failure {
+            self.streak += 1;
+        } else {
+            self.last.clear();
+            self.last.push_str(failure);
+            self.streak = 1;
+        }
+    }
+
+    /// 这一轮收到了东西：次数与复读重新算，睡掉的时长不还。
+    fn succeed(&mut self) {
+        self.used = 0;
+        self.streak = 0;
+        self.last.clear();
     }
 }
 
@@ -284,8 +521,27 @@ impl EchoStream {
     /// 把这一段新写的并进窗口。续写判定必须跨轮活着：模型复读的常常不是最后
     /// 一句，而是上一轮整段。
     fn absorb(&mut self, written: &str) {
+        self.push_window(written);
+    }
+
+    /// 把新写的并进窗口，头部超长就削掉；被削出去的候选「总分」作废。
+    ///
+    /// 候选存的是窗口里的下标。削窗口不挪它们，下一次比对就全对在错位置上：
+    /// 该认的复读认不出，不该认的反而被咽掉。作废只会让下一个字走「当新内容
+    /// 放行」的保守分支，不会删掉真东西，所以宁可作废也不留着错下标。
+    fn push_window(&mut self, written: &str) {
         self.window.extend(written.chars());
-        keep_tail(&mut self.window, ECHO_WINDOW);
+        let drained = keep_tail(&mut self.window, ECHO_WINDOW);
+        if drained > 0 {
+            self.cands.retain_mut(|i| {
+                if *i >= drained {
+                    *i -= drained;
+                    true
+                } else {
+                    false
+                }
+            });
+        }
     }
 
     /// 收下一段新流进来的内容，返回真正该放行的那部分。整段都在复读就返回空。
@@ -333,8 +589,7 @@ impl EchoStream {
         }
         if !fresh.is_empty() {
             // 放行出去的字要并回窗口：下一段的复读判定得照最新的写。
-            self.window.extend(fresh.chars());
-            keep_tail(&mut self.window, ECHO_WINDOW);
+            self.push_window(&fresh);
         }
         fresh
     }
@@ -400,12 +655,14 @@ impl EchoTrim {
 }
 
 /// 只留最后 `keep` 个字符。中文一个字也是一个字符，这里一律按字符算。
-fn keep_tail(text: &mut Vec<char>, keep: usize) {
+/// 返回被削掉的字符数——调用方手上若有指向窗口的下标，得照这个数一起挪。
+fn keep_tail(text: &mut Vec<char>, keep: usize) -> usize {
     let total = text.len();
     if total <= keep {
-        return;
+        return 0;
     }
     text.drain(..total - keep);
+    total - keep
 }
 
 /// 续写时回灌给模型的指令。界面文案走字典，这句是喂模型的，必须英文。
@@ -463,7 +720,9 @@ fn continuation_progressed(carried: &str, fresh: &str) -> bool {
     if fresh.chars().count() < MIN_CONTINUATION_GAIN {
         return false;
     }
-    !carried.contains(fresh)
+    // 走到这儿：没在复读，也够长了。前面两条已经把不往前走的都挡了，
+    // 这里剩下的只有「算推进」一种答案。
+    true
 }
 
 /// 重试退避：1s、2s、4s、8s，之后封顶。失败不该把用户晾在原地干等。
@@ -604,6 +863,10 @@ pub struct AgentSession {
     document: Mutex<Document>,
     active: Mutex<ActiveContext>,
     cancelled: AtomicBool,
+    /// 一个 turn 一次占用。并发两个 turn 会互相踩：会话历史被双份写入、
+    /// 取消标志互相顶、turn 预算被对半砍。前端挡住了重复发送，但 MCP、
+    /// 脚本这些入口不受那层约束，所以这里再兜一次。
+    busy: AtomicBool,
     /// 当前挂起的审批发送端；None 表示没有调用在等用户。
     approval: Mutex<Option<ApprovalSlot>>,
     /// 用户自配的 MCP 工具服务器注册表；None 表示这个会话不接外部工具。
@@ -629,6 +892,34 @@ pub struct AgentSession {
     /// 用户在编辑器里动手的痕迹（一句话一条）。下一轮请求前冲刷成一条 user 消息，
     /// 让模型知道「画面已经被人改过了」，别照着自己上一轮的想象继续画。
     pending_edits: Mutex<Vec<String>>,
+    /// 上一次广播给前端的那份文档。增量广播的基准。
+    ///
+    /// 前端本地持有一份完整文档（撤销要整份回传），所以这里只需记住
+    /// 「它上次看到的是什么」，下次 emit 之前 diff 出变化的那几个 cel。
+    /// None = 还没广播过，第一次给全量。整份 clone 约 10ms，换来的是
+    /// 不再把 47MB 的 JSON 灌进 IPC。
+    broadcast: Mutex<Option<Document>>,
+}
+
+/// turn 占用标记。析构即放手：turn 里哪条 return、panic、提前 drop 掉，
+/// 会话都不会被永久钉在「忙」上，用户下一句还发得出去。
+struct BusyGuard<'a>(&'a AtomicBool);
+
+impl<'a> BusyGuard<'a> {
+    /// 抢得到才 Some。抢不到的调用方当场回话，别两个 turn 交叉写同一份历史。
+    fn try_acquire(flag: &'a AtomicBool) -> Option<Self> {
+        if flag.swap(true, Ordering::SeqCst) {
+            None
+        } else {
+            Some(Self(flag))
+        }
+    }
+}
+
+impl Drop for BusyGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
 }
 
 impl AgentSession {
@@ -644,6 +935,7 @@ impl AgentSession {
             document: Mutex::new(document),
             active: Mutex::new(active),
             cancelled: AtomicBool::new(false),
+            busy: AtomicBool::new(false),
             approval: Mutex::new(None),
             mcp: Mutex::new(None),
             title: Mutex::new(None),
@@ -653,11 +945,18 @@ impl AgentSession {
             craft: Mutex::new(None),
             pending_edits: Mutex::new(Vec::new()),
             last_shader: Mutex::new(None),
+            broadcast: Mutex::new(None),
         }
     }
 
     pub fn with_runner_config(mut self, config: RunnerConfig) -> Self {
         *self.runner_config.get_mut().unwrap() = config;
+        self
+    }
+
+    /// 给会话一个显示名。空串和纯空白都当没有：创建时用户可能清空了输入框。
+    pub fn with_title(self, title: Option<String>) -> Self {
+        self.set_title(title);
         self
     }
 
@@ -746,23 +1045,25 @@ impl AgentSession {
         )
     }
 
-    /// 这份 shader 身份是不是刚跑过、跑完到现在画布又没动过。
+    /// 这份 shader 身份是不是刚跑过、跑完到现在画布又没动过。命中就交回
+    /// 「那一发跑成了没有」，没命中是 None。
     /// revision 对不上就是画布动过了（模型、用户、撤销都算），记忆自然失效。
-    fn last_shader_is(&self, key: &str, revision: u64) -> bool {
+    fn remembered_shader(&self, key: &str, revision: u64) -> Option<bool> {
         self.last_shader
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
-            .is_some_and(|last| last.key == key && last.revision == revision)
+            .filter(|last| last.key == key && last.revision == revision)
+            .map(|last| last.ok)
     }
 
-    /// 跑成功的那份 shader 记下来。只有 `pixel_run_shader` 会走到这儿。
-    fn remember_shader(&self, key: String, revision: u64) {
+    /// 刚跑的这份 shader 记下来，跑成跑挂都记。只有 `pixel_run_shader` 会走到这儿。
+    fn remember_shader(&self, key: String, revision: u64, ok: bool) {
         *self
             .last_shader
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some(LastShader { key, revision });
+            Some(LastShader { key, revision, ok });
     }
 
     /// 把某个角色另绑到一个模型。配同一个角色就是换模型。
@@ -872,6 +1173,36 @@ impl AgentSession {
             .clone()
     }
 
+    /// 这一轮点名的风格预设。`None` = 用户没提，生图提示词该挂默认质量档。
+    ///
+    /// 锁只借一瞬就放：风格预设开 turn 时定一次，读它只是为了在提示词出门前
+    /// 挑一段渲染规矩。await 期间持着不放会把 pixel_plan 的改写和整条主循环
+    /// 一起堵在门外，而那正是用户嘴里「卡住不动」的意思。
+    fn current_style(&self) -> Option<artstyle::ArtStyle> {
+        self.plan
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .style
+    }
+
+    /// 本轮的收尾预设，和 `current_style` 一样只借一瞬就放。
+    ///
+    /// 这两份东西一起才构成「这一张图按什么规矩收尾」：画风管色数与描边，
+    /// 预设管形体、材质、细节落在哪。生图模型那头一样都想要。
+    fn current_presets(&self) -> Vec<&'static presets::Preset> {
+        self.plan
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .presets
+            .clone()
+    }
+
+    /// 生图提示词出门前挂上这一轮的渲染规矩。单独拆一个出口是为了能单测：
+    /// 生图本体要打网络，这一段是这一路上唯一纯函数的判断。
+    fn image_prompt(&self, prompt: &str) -> String {
+        plan::image_prompt(prompt, self.current_style(), &self.current_presets())
+    }
+
     pub fn set_runner_config(&self, config: RunnerConfig) {
         *self
             .runner_config
@@ -891,6 +1222,13 @@ impl AgentSession {
     /// 用外部文档整体替换当前文档（前端加载 .aip 或撤销后同步回来）。
     /// 激活图层/帧若已不存在则回落到首个，避免后续工具调用落空。
     pub fn sync_document(&self, document: Document) {
+        // 前端发来的整份文档就是它本地看到的最新画面。把广播基准也换过去，
+        // 否则下一次 emit 会拿旧基准 diff 出一份全量 patch，而前端刚刚才把
+        // 这份文档交上来——白推几十 MB 还把它本地的选择状态冲掉。
+        *self
+            .broadcast
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(document.clone());
         let mut doc = self
             .document
             .lock()
@@ -1011,6 +1349,32 @@ impl AgentSession {
         serde_json::to_value(&*doc).unwrap_or(Value::Null)
     }
 
+    /// 取一份相对上一次广播的文档增量，并把基准推进到当下。
+    ///
+    /// 广播不是替换：前端拿 patch 合并进本地那份完整文档，所以这里只报
+    /// 元数据和变化过的 cel。锁内一次 clone 当新基准，文档在两次广播之间
+    /// 被改了多少次都无所谓——下一次 emit 自然把改动 diff 出来。
+    ///
+    /// 纯内存计算，没有会失败的序列化步骤，所以不会有「发一份坏 patch 出去」
+    /// 的可能——原来那份 unwrap_or(Value::Null) 的兜底正是要消掉的东西：
+    /// 前端拿到 Null 会当场 hexesOf(null) 炸掉，界面整个冻住。
+    pub fn document_patch(&self) -> DocPatch {
+        let mut baseline = self
+            .broadcast
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let doc = self
+            .document
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let patch = match baseline.as_ref() {
+            None => DocPatch::full(&doc),
+            Some(prev) => DocPatch::diff(prev, &doc),
+        };
+        *baseline = Some(doc.clone());
+        patch
+    }
+
     pub fn revision(&self) -> u64 {
         self.document
             .lock()
@@ -1040,6 +1404,30 @@ impl AgentSession {
         self.cancelled.load(Ordering::SeqCst)
     }
 
+    /// 把一段「可能要等很久」的等待切成可中断的。
+    ///
+    /// 生图要等模型回图、外部 MCP 工具要等别人的服务器，两者都可能挂上几分钟。
+    /// 只在外层循环查取消标志的话，用户点了停止之后界面一动不动，一直干等到
+    /// 各自的超时——看上去就是停止键失灵。这里按 CANCEL_POLL 轮询取消标志，
+    /// 一中断立刻回 None，调用方走 bail 收摊，消息簿照样配得上对。
+    async fn until_cancelled<F>(&self, fut: F) -> Option<F::Output>
+    where
+        F: std::future::Future,
+    {
+        tokio::pin!(fut);
+        let mut tick = tokio::time::interval(CANCEL_POLL);
+        loop {
+            tokio::select! {
+                out = fut.as_mut() => return Some(out),
+                _ = tick.tick() => {
+                    if self.is_cancelled() {
+                        return None;
+                    }
+                }
+            }
+        }
+    }
+
     /// 挂起一条审批并等待用户决定。等待期间照样本轮询取消标志，
     /// 所以中断不会把这一笔调用彻底卡死。Err(()) = 没人再会给这一笔发决定。
     async fn await_approval(
@@ -1067,7 +1455,7 @@ impl AgentSession {
                 input: call.input.clone(),
             },
         );
-        let mut tick = tokio::time::interval(Duration::from_millis(120));
+        let mut tick = tokio::time::interval(CANCEL_POLL);
         loop {
             tokio::select! {
                 decision = &mut receiver => return decision.map_err(|_| ()),
@@ -1082,12 +1470,46 @@ impl AgentSession {
 
     /// 跑一个 turn：发一条用户消息，驱动模型通过工具改画布，直到它不再调工具。
     /// `images` 为 `(media_type, base64)` 对；所有过程事件经 `tx` 广播给 UI。
+    /// `pinned_style` 是用户在界面上钉住的风格（点了一下风格预设）：它压过
+    /// 从原话里读出来的风格，且整轮有效，直到用户改主意。
+    /// 不带提示词预设的一个 turn；要带预设走 `run_turn_with_preset`。
     pub async fn run_turn(
         &self,
         text: String,
         attachments: Vec<Attachment>,
         tx: UnboundedSender<AgentEvent>,
+        pinned_style: Option<artstyle::ArtStyle>,
     ) {
+        self.run_turn_with_preset(text, attachments, tx, pinned_style, Vec::new())
+            .await;
+    }
+
+    /// 带内置提示词预设的一个 turn。预设是用户在输入区点的「这张图按什么规矩
+    /// 收尾」：与画风平级，整轮有效，直到用户改主意。可以叠几条同时上路
+    /// （上限见 `presets::MAX_STACKED`），叠几条都照样整轮有效。
+    pub async fn run_turn_with_preset(
+        &self,
+        text: String,
+        attachments: Vec<Attachment>,
+        tx: UnboundedSender<AgentEvent>,
+        pinned_style: Option<artstyle::ArtStyle>,
+        pinned_presets: Vec<&'static super::presets::Preset>,
+    ) {
+        // 一个会话同时只跑一个 turn。抢不到就当场回话，别让两条 turn 在
+        // 同一个会话里交叉写入消息历史和画布。
+        let Some(_busy) = BusyGuard::try_acquire(&self.busy) else {
+            emit(
+                &tx,
+                AgentEvent::Error {
+                    message: UiText::new(
+                        "agent.busy",
+                        "this conversation is still busy with the previous message; wait for it to finish or press stop",
+                    ),
+                },
+            );
+            return;
+        };
+
         self.cancelled.store(false, Ordering::SeqCst);
 
         if text.trim().is_empty() && attachments.is_empty() {
@@ -1117,7 +1539,13 @@ impl AgentSession {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .has_pixels();
-        let plan = TurnPlan::from_text(&text, &attachments, has_pixels);
+        let plan = TurnPlan::from_text_pinned(
+            &text,
+            &attachments,
+            has_pixels,
+            pinned_style,
+            pinned_presets,
+        );
         *self
             .plan
             .lock()
@@ -1178,8 +1606,8 @@ impl AgentSession {
         // 进入 turn 时快照一份预算，避免中途改设置导致行为漂移。
         // mut：Ask 模式下用户点「本次放行」会把它降级成 Auto，只影响本 turn。
         let mut runner_config = self.runner_config();
-        // 这句话是不是在要图。纯聊天不必催，见 asks_for_artwork。
-        let art_requested = asks_for_artwork(&text);
+        // 这句话是不是在要图。纯聊天不必催，见 intent::asks_for_artwork。
+        let art_requested = intent::asks_for_artwork(&text);
         // 这一轮走不走提示词流程：要图、改画、成品意图已定都算，纯问答不算。
         // 判据只用 Rust 已经定性的东西，不猜模型待会要干什么——猜漏了顶多少
         // 一段清单，猜错了就是每句闲聊都被逼先写提示词。
@@ -1193,10 +1621,12 @@ impl AgentSession {
         let mut usage_in: Option<u32> = None;
         let mut usage_out: Option<u32> = None;
 
-        // 三个配额：逻辑轮次吃 max_turns 预算，续写和重试各自封顶五次。
+        // 两个配额：逻辑轮次吃 max_turns 预算，重试封顶五次。续写的额度跟着
+        // 单次回复走，见下面循环内的声明——放在 turn 头上会让上一轮用掉的次数
+        // 记在这一轮头上，越往后越抠，最后任何回复都只剩半截。
         let mut logical_rounds = 0usize;
-        let mut continuations = 0usize;
-        let mut retries = 0usize;
+        // 整轮共用的重发闸门：次数、退避总时长、同一句报错的复读。见 `RetryGate`。
+        let mut retry_gate = RetryGate::default();
         // 整轮零工具调用时催过几次。见 MAX_TOOL_NUDGES。
         let mut tool_nudges = 0usize;
 
@@ -1254,6 +1684,10 @@ impl AgentSession {
             let mut inferred_cut = false;
             // 连续几轮只吐推理、没动笔。护栏里的硬闸，理由见 MAX_REASONING_CONTINUATIONS。
             let mut thinking_only = 0usize;
+            // 续写额度归「这一次回复」管：每一轮重新问模型都带一份新的输出长度
+            // 预算，上一轮用掉的五次不该记在这一轮头上。放在 turn 头上的话，
+            // 第二轮开始任何回复都只剩半截——用户看到的就是「说到一半不动了」。
+            let mut continuations = 0usize;
             // 重试与续写都收在这个小循环里。请求每一发都重装：历史里刚 push 的
             // 半截回复必须在这发请求里生效，不然就是白续一次。
             let mut raw: RoundRaw = loop {
@@ -1288,26 +1722,51 @@ impl AgentSession {
                             continue;
                         }
                         // 发不出去：网络抖动、代理掐线、base_url 填错。比起把一句
-                        // 「失败」摔在用户脸上，按退避重发更有人味。
-                        if retries < runner_config.loop_limits.max_retries && retryable(&e) {
-                            retries += 1;
-                            emit(
-                                &tx,
-                                AgentEvent::Status {
-                                    message: retrying_status(
-                                        &e.to_string(),
-                                        retries,
-                                        runner_config.loop_limits.max_retries,
-                                    ),
-                                },
-                            );
-                            pause_before_retry(retries, &self.cancelled).await;
-                            continue;
+                        // 「失败」摔在用户脸上，按退避重发更有人味。但门只对「换个
+                        // 时间就能好」的错开——套餐不覆盖这个模型、key 被退的，
+                        // 重发五次只是把同一句报错看五遍，用户盯着一个死界面。
+                        let failure = e.to_string();
+                        let verdict = retry_gate.judge(&e, runner_config.loop_limits.max_retries);
+                        match verdict {
+                            RetryVerdict::Again(attempt) => {
+                                retry_gate.note(attempt, &failure, retry_backoff(attempt));
+                                emit(
+                                    &tx,
+                                    AgentEvent::Status {
+                                        message: retrying_status(
+                                            &failure,
+                                            attempt,
+                                            runner_config.loop_limits.max_retries,
+                                        ),
+                                    },
+                                );
+                                pause_before_retry(attempt, &self.cancelled).await;
+                                continue;
+                            }
+                            RetryVerdict::Refused(why) => {
+                                emit(
+                                    &tx,
+                                    AgentEvent::Error {
+                                        message: request_refused(&failure, &why, retry_gate.used),
+                                    },
+                                );
+                                return;
+                            }
+                            RetryVerdict::Halted(ref why) => {
+                                emit(
+                                    &tx,
+                                    AgentEvent::Error {
+                                        message: request_halted(&failure, why),
+                                    },
+                                );
+                                return;
+                            }
+                            RetryVerdict::NotRetryable => {}
                         }
                         emit(
                             &tx,
                             AgentEvent::Error {
-                                message: request_failed(&e.to_string()),
+                                message: request_failed(&failure),
                             },
                         );
                         return;
@@ -1327,20 +1786,48 @@ impl AgentSession {
                     return;
                 }
                 if let Some(failure) = raw.failure.take() {
-                    if retries < runner_config.loop_limits.max_retries && raw.retryable_failure {
-                        retries += 1;
-                        emit(
-                            &tx,
-                            AgentEvent::Status {
-                                message: retrying_status(
-                                    &failure,
-                                    retries,
-                                    runner_config.loop_limits.max_retries,
-                                ),
-                            },
-                        );
-                        pause_before_retry(retries, &self.cancelled).await;
-                        continue;
+                    // 流半道断、代理掐线、模型假死：这类该退避重发。套餐/ key / 模型名
+                    // 不被接受也算在这儿——报文裹在同一句里，见 `judge_text`。
+                    let verdict = retry_gate.judge_text(
+                        &failure,
+                        raw.retryable_failure,
+                        runner_config.loop_limits.max_retries,
+                    );
+                    match verdict {
+                        RetryVerdict::Again(attempt) => {
+                            retry_gate.note(attempt, &failure, retry_backoff(attempt));
+                            emit(
+                                &tx,
+                                AgentEvent::Status {
+                                    message: retrying_status(
+                                        &failure,
+                                        attempt,
+                                        runner_config.loop_limits.max_retries,
+                                    ),
+                                },
+                            );
+                            pause_before_retry(attempt, &self.cancelled).await;
+                            continue;
+                        }
+                        RetryVerdict::Refused(why) => {
+                            emit(
+                                &tx,
+                                AgentEvent::Error {
+                                    message: request_refused(&failure, &why, retry_gate.used),
+                                },
+                            );
+                            return;
+                        }
+                        RetryVerdict::Halted(ref why) => {
+                            emit(
+                                &tx,
+                                AgentEvent::Error {
+                                    message: request_halted(&failure, why),
+                                },
+                            );
+                            return;
+                        }
+                        RetryVerdict::NotRetryable => {}
                     }
                     emit(
                         &tx,
@@ -1350,8 +1837,9 @@ impl AgentSession {
                     );
                     return;
                 }
-                retries = 0;
+                retry_gate.succeed();
                 // 这一轮确实收到了东西，失败额度重新算：下次失误仍该有五次机会。
+                // 睡掉的退避时长不还——那时间是真花了的，见 `RetryGate::succeed`。
 
                 // 模型拿着工具，却把一轮额度全烧在思考上，正事一件没干。这类模型
                 // （LongCat、DeepSeek-R1 一系）默认就爱想，得让它先把嘴闭上：
@@ -1600,14 +2088,21 @@ impl AgentSession {
                 return;
             }
 
-            for call in calls {
+            // 提前收摊的四个出口：取消、步数预算耗尽、审批没人应答、同一个调用
+            // 连错三次。共同点是 assistant 那条消息已经把 ToolUse 写进消息簿，
+            // 而这一批调用还没跑完。直接 return 会把消息簿留在「有 ToolUse 却
+            // 没有 ToolResult」的状态，下一轮请求整包 400，用户之后每句话都发
+            // 不出去。所以四个出口统一记在这里，出路在循环外面收。
+            let call_ids: Vec<String> = calls.iter().map(|c| c.id.clone()).collect();
+            let mut bail: Option<(usize, AgentEvent)> = None;
+            for (idx, call) in calls.into_iter().enumerate() {
                 if self.is_cancelled() {
-                    emit(&tx, AgentEvent::Interrupted);
-                    return;
+                    bail = Some((idx, AgentEvent::Interrupted));
+                    break;
                 }
                 if steps >= runner_config.max_tool_steps {
-                    emit(
-                        &tx,
+                    bail = Some((
+                        idx,
                         AgentEvent::Error {
                             message: UiText::new(
                                 "agent.tool_budget",
@@ -1615,8 +2110,8 @@ impl AgentSession {
                             )
                             .with("steps", steps as u64),
                         },
-                    );
-                    return;
+                    ));
+                    break;
                 }
                 steps += 1;
 
@@ -1648,8 +2143,8 @@ impl AgentSession {
                         }
                         // 没人再会给这一笔发决定（中断，或挂起被新 turn 顶掉）。
                         Err(()) => {
-                            emit(&tx, AgentEvent::Interrupted);
-                            return;
+                            bail = Some((idx, AgentEvent::Interrupted));
+                            break;
                         }
                     }
                 }
@@ -1697,14 +2192,26 @@ impl AgentSession {
                                     },
                                 );
                             }
-                       let registry = self.mcp.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
-                       if call.name.starts_with(mcp::MCP_TOOL_PREFIX) {
-                            // 外部工具：分流到用户自配的 MCP 服务器，不进文档锁。
-                            match registry {
+                            let registry = self
+                                .mcp
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .clone();
+                            if call.name.starts_with(mcp::MCP_TOOL_PREFIX) {
+                                // 外部工具：分流到用户自配的 MCP 服务器，不进文档锁。
+                                match registry {
                                 Some(registry) => {
-                                    match registry.dispatch(&call.name, &call.input).await {
-                                        Ok(outcome) => outcome,
-                                        Err(e) => ToolOutcome {
+                                    match self
+                                        .until_cancelled(registry.dispatch(&call.name, &call.input))
+                                        .await
+                                    {
+                                        // 外部服务器挂住，用户点了停止：立刻收，走 bail。
+                                        None => {
+                                            bail = Some((idx, AgentEvent::Interrupted));
+                                            break;
+                                        }
+                                        Some(Ok(outcome)) => outcome,
+                                        Some(Err(e)) => ToolOutcome {
                                             content: e,
                                             is_error: true,
                                         },
@@ -1727,34 +2234,66 @@ impl AgentSession {
                             self.run_craft(&call.input).await
                         } else if call.name == tools::IMAGE_GEN_TOOL {
                             // 生图要等模型回图，异步跑；await 期间绝不持有文档锁。
-                            self.run_image_gen(&call.input).await
+                            // 回图可能等上三分钟，中途点停止不能干等到超时才收：
+                            // 包一层可中断等待，取消走 bail，消息簿照样配对。
+                            match self.until_cancelled(self.run_image_gen(&call.input)).await {
+                                Some(outcome) => outcome,
+                                None => {
+                                    bail = Some((idx, AgentEvent::Interrupted));
+                                    break;
+                                }
+                            }
                         } else {
                             let mut doc = self.document.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                             let active = self.active.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                            // 同一份 shader 原样重跑：跳过执行，画布不动，
-                            // 回一句能操作的话。模型照抄三遍也不收手，按
-                            // 「同一个调用连错三次」收摊，见下面的 streak。
-                            let replay = shader_key(&call.input).filter(|key| {
-                                call.name == tools::SHADER_TOOL
-                                    && self.last_shader_is(key, doc.revision)
-                            });
-                            if let Some(_key) = replay {
-                                shader_paused = true;
-                                ToolOutcome {
-                                    content: SHADER_REPLAY_REFUSAL.into(),
-                                    is_error: true,
-                                }
-                            } else {
-                                let outcome =
-                                    tools::execute(&mut doc, &active, &call.name, &call.input);
-                                // 只记跑成功的那一份：跑挂的 script 留在记忆里，
-                                // 模型改好再发会被误伤。
-                                if call.name == tools::SHADER_TOOL && !outcome.is_error {
-                                    if let Some(key) = shader_key(&call.input) {
-                                        self.remember_shader(key, doc.revision);
+                            // 同一份 shader 原样重跑，分两种收场。跑成过的那份：
+                            // 跳过执行，画布不动，回一句能操作的话；模型照抄三遍
+                            // 还不收手，按「同一个调用连错三次」收摊，见下面的
+                            // streak。刚跑挂的那份：一字不改再来一遍只可能再挂
+                            // 一次，而完整问一轮模型要几十秒到两分钟——实测里
+                            // 一个负坐标 bug 就这样白白烧掉四轮，画布还是空的。
+                            // 直接收摊，把改措辞的主动权还给用户。
+                            let key = shader_key(&call.input);
+                            let replay = key.clone().filter(|_| call.name == tools::SHADER_TOOL).and_then(
+                                |key| self.remembered_shader(&key, doc.revision).map(|ok| (key, ok)),
+                            );
+                            match replay {
+                                Some((_, true)) => {
+                                    shader_paused = true;
+                                    ToolOutcome {
+                                        content: SHADER_REPLAY_REFUSAL.into(),
+                                        is_error: true,
                                     }
                                 }
-                                outcome
+                                Some((_, false)) => {
+                                    bail = Some((
+                                        idx,
+                                        AgentEvent::Error {
+                                            message: UiText::new(
+                                                "agent.shader_repeat_failure",
+                                                "the model resent the exact shader script that just failed, unchanged; stopping so you can rephrase your request",
+                                            ),
+                                        },
+                                    ));
+                                    break;
+                                }
+                                None => {
+                                    let outcome = tools::execute(
+                                        &mut doc,
+                                        &active,
+                                        &call.name,
+                                        &call.input,
+                                    );
+                                    // 跑成的、跑挂的都记：跑挂的那份留在记忆里，
+                                    // 下一发现样重发就收摊；模型改过一个字符就不算
+                                    // 重放，照样放行，所以这不会挡住正常修复。
+                                    if call.name == tools::SHADER_TOOL {
+                                        if let Some(key) = key {
+                                            self.remember_shader(key, doc.revision, !outcome.is_error);
+                                        }
+                                    }
+                                    outcome
+                                }
                             }
                         }
                         // 提示词闸门的 else 分支到此收口：放行的调用回到原来的
@@ -1793,16 +2332,18 @@ impl AgentSession {
                         failure_streak = 1;
                     }
                     if failure_streak >= 3 {
-                        emit(
-                            &tx,
+                        // 这一笔的 ToolResult 上面刚推进消息簿，所以未配对的
+                        // 工具从下一笔算起。
+                        bail = Some((
+                            idx + 1,
                             AgentEvent::Error {
                                 message: UiText::new(
                                     "agent.same_call_failed",
                                     "the same tool call failed three times in a row; stopping so you can adjust the request",
                                 ),
                             },
-                        );
-                        return;
+                        ));
+                        break;
                     }
                 } else {
                     last_failure = None;
@@ -1819,18 +2360,24 @@ impl AgentSession {
                     && call.name != craft::PROMPT_TOOL
                     && !call.name.starts_with(mcp::MCP_TOOL_PREFIX)
                 {
-                    let (revision, document) = {
-                        let doc = self
-                            .document
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        (
-                            doc.revision,
-                            serde_json::to_value(&*doc).unwrap_or(Value::Null),
-                        )
-                    };
-                    emit(&tx, AgentEvent::DocumentUpdated { revision, document });
+                    // guard 通过也照发：空 patch 无害且便宜，而前端要靠
+                    // pendingFrameIndex 被 applyDocument 清掉，跳过空 patch
+                    // 会让帧选择一直挂在「正在切」上。
+                    let patch = self.document_patch();
+                    let revision = patch.revision;
+                    emit(&tx, AgentEvent::DocumentUpdated { revision, patch });
                 }
+            }
+            if let Some((unfinished_from, event)) = bail {
+                let leftovers = unfinished_tool_results(&call_ids, unfinished_from);
+                if !leftovers.is_empty() {
+                    self.messages
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .extend(leftovers);
+                }
+                emit(&tx, event);
+                return;
             }
         }
     }
@@ -1878,7 +2425,7 @@ impl AgentSession {
         // 本轮分流和知识条目按当前 plan 现算：模型中途纠正过，
         // 下一发请求就该带着新结论上路，缓存会把纠正吃掉。
         // 锁顺序固定 document -> active -> engine -> plan。
-        let (routing, craft_notes) = {
+        let (routing, craft_notes, query) = {
             let plan = self
                 .plan
                 .lock()
@@ -1889,6 +2436,8 @@ impl AgentSession {
                 // 硬塞进列表，重检会把它又挤掉，而它偏偏是唯一一条讲
                 // 「保留已有像素」的条目。
                 knowledge::section_from_ids(&plan.knowledge_ids, knowledge::DEFAULT_BUDGET),
+                // 原话单独带出来：两张对照表要按它裁剪，见 colornames::prompt_table_for。
+                plan.prompt_query().to_string(),
             )
         };
         ChatRequest {
@@ -1902,6 +2451,7 @@ impl AgentSession {
                     routing: &routing,
                     craft: &craft_section,
                     craft_notes: &craft_notes,
+                    query: &query,
                 },
             ),
             messages: self
@@ -1939,7 +2489,7 @@ impl AgentSession {
         mut echo: Option<&mut EchoTrim>,
     ) -> RoundRaw {
         let mut raw = RoundRaw::empty();
-        let mut tick = tokio::time::interval(Duration::from_millis(120));
+        let mut tick = tokio::time::interval(CANCEL_POLL);
         let mut idle = IdleWatch::new(STREAM_IDLE_LIMIT);
 
         loop {
@@ -2088,6 +2638,7 @@ impl AgentSession {
         if !plan.has_references()
             && plan.intent.is_none()
             && plan.style.is_none()
+            && plan.presets.is_empty()
             && plan.knowledge_ids.is_empty()
             && !plan.editing
         {
@@ -2289,7 +2840,12 @@ impl AgentSession {
         };
         let generator = imagegen::build_image_generator(&config);
         let request = ImageGenParams {
-            prompt: params.prompt.clone(),
+            // 生图模型那头没有我们的沙箱规矩，唯一能约束它的就是这段文字。
+            // 不挂的后果是按它自己的训练分布交差：动漫脸、过曝高光、塑料渐变，
+            // 栅格化落进画布之后，再干净的网格也带着一股不属于像素画的味。
+            // 点名了风格就挂风格规矩，没点名就挂默认质量档——两套同时上身，
+            // 生图模型只会在两段打架的要求里猜权重。
+            prompt: self.image_prompt(&params.prompt),
             size: params.size.clone(),
             reference,
         };
@@ -2359,6 +2915,66 @@ impl AgentSession {
         ToolOutcome {
             content,
             is_error: false,
+        }
+    }
+
+    /// 主循环的守门员：跑完、或者崩在半路，都要给这一回合一个收口。
+    ///
+    /// 前端把 `running` 押在「completed / error / interrupted 三选一必到」上。
+    /// 主循环里一个 `unwrap` 崩在边角，那个 future 会就地蒸发，之后没有任何人
+    /// 再发事件：占位节点一直闪着光标，点停止只会等到「这个会话还在忙」，
+    /// 下一句发什么都撞忙——用户看到的就是「按了没反应、也停不下来」。
+    /// panic 的 future 由这里接住，补一个错误收尾，界面当场回到能用的状态。
+    pub async fn run_turn_guarded(
+        &self,
+        text: String,
+        attachments: Vec<Attachment>,
+        tx: UnboundedSender<AgentEvent>,
+        pinned_style: Option<artstyle::ArtStyle>,
+    ) {
+        let fallback = tx.clone();
+        let crashed = futures_util::future::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+            self.run_turn_with_preset(text, attachments, tx, pinned_style, Vec::new()),
+        ))
+        .await;
+        if crashed.is_err() {
+            emit(
+                &fallback,
+                AgentEvent::Error {
+                    message: UiText::new(
+                        "agent.turn_crashed",
+                        "that turn stopped unexpectedly and nothing was saved; send it again",
+                    ),
+                },
+            );
+        }
+    }
+
+    /// 守门员那条路，带上内置提示词预设。界面发消息走这一条：用户点的预设
+    /// 必须在同一回合内生效，晚一拍就变成约束了上一张图。
+    pub async fn run_turn_guarded_with_preset(
+        &self,
+        text: String,
+        attachments: Vec<Attachment>,
+        tx: UnboundedSender<AgentEvent>,
+        pinned_style: Option<artstyle::ArtStyle>,
+        pinned_presets: Vec<&'static super::presets::Preset>,
+    ) {
+        let fallback = tx.clone();
+        let crashed = futures_util::future::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+            self.run_turn_with_preset(text, attachments, tx, pinned_style, pinned_presets),
+        ))
+        .await;
+        if crashed.is_err() {
+            emit(
+                &fallback,
+                AgentEvent::Error {
+                    message: UiText::new(
+                        "agent.turn_crashed",
+                        "that turn stopped unexpectedly and nothing was saved; send it again",
+                    ),
+                },
+            );
         }
     }
 }
@@ -2501,76 +3117,6 @@ fn manual_edit_digest(edits: &[String]) -> String {
     out
 }
 
-/// 用户这句话是不是在要图。
-///
-/// 只在「用户要画、模型却光说不练」时才催它动手。纯聊天（问配色怎么配、
-/// 问这个工具怎么使）用文字收尾是天经地义，一催就凭空多出一段废话，
-/// 反而更吵。判漏了顶多退回老行为——直接收尾；判错了才真闹心，
-/// 所以宁可保守，也不要把每次问答都当成画画。
-fn asks_for_artwork(text: &str) -> bool {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    // 问句是在等解释，不是在等一个工具调用。
-    if trimmed.contains('?') || trimmed.contains('？') {
-        return false;
-    }
-    // 「画」字在中文里太常见（计划、蓝图、画布、策划），只在它不属于这些词时才认。
-    for (i, _) in trimmed.match_indices('画') {
-        let prev: Option<char> = trimmed[..i].chars().next_back();
-        let next: Option<char> = trimmed[i + '画'.len_utf8()..].chars().next();
-        let borrowed = matches!(
-            prev,
-            Some('计') | Some('谋') | Some('策') | Some('蓝') | Some('构') | Some('规')
-        ) || next == Some('布');
-        if !borrowed {
-            return true;
-        }
-    }
-    const ZH: [&str; 14] = [
-        "绘制",
-        "涂",
-        "描一",
-        "做个",
-        "做一张",
-        "来一张",
-        "来一幅",
-        "生成",
-        "改成",
-        "换个",
-        "加一",
-        "去掉",
-        "删掉",
-        "重画",
-    ];
-    for word in ZH {
-        if trimmed.contains(word) {
-            return true;
-        }
-    }
-    const EN: [&str; 11] = [
-        "draw", "paint", "sketch", "render", "generate", "colour", "color", "make", "create",
-        "add", "replace",
-    ];
-    let lower = trimmed.to_lowercase();
-    let bytes = lower.as_bytes();
-    for word in EN {
-        let mut from = 0usize;
-        while let Some(at) = lower[from..].find(word) {
-            let start = from + at;
-            let end = start + word.len();
-            let before_ok = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
-            let after_ok = end >= bytes.len() || !bytes[end].is_ascii_alphanumeric();
-            if before_ok && after_ok {
-                return true;
-            }
-            from = start + 1;
-        }
-    }
-    false
-}
-
 /// 这一串字是不是在问用户问题。
 ///
 /// 澄清提问是合法收尾，不该被催。判据刻意放宽：宁可漏催一次（回到
@@ -2594,16 +3140,50 @@ fn finished_whole_status() -> UiText {
     )
 }
 
-/// 请求彻底失败时摊在用户面前的那一条。Rust 只说键和原始原因，措辞走字典。
-fn request_failed(reason: &str) -> UiText {
-    // 报错里常裹着一整条 URL 或响应体，截一刀免得红卡片把聊天区撑爆。
+/// 报错里常裹着一整条 URL 或响应体，截一刀免得红卡片把聊天区撑爆。
+fn trim_reason(reason: &str) -> String {
     let short: String = reason.chars().take(200).collect();
-    let short = if reason.chars().count() > 200 {
+    if reason.chars().count() > 200 {
         format!("{short}...")
     } else {
         short
-    };
-    UiText::new("agent.request_failed", "the request failed: {reason}").with("reason", short)
+    }
+}
+
+/// 请求彻底失败时摊在用户面前的那一条。Rust 只说键和原始原因，措辞走字典。
+fn request_failed(reason: &str) -> UiText {
+    UiText::new("agent.request_failed", "the request failed: {reason}")
+        .with("reason", trim_reason(reason))
+}
+
+/// 「这发重发了也没用」：报错原样摊出去，另外押一句出路。
+///
+/// 单纯摔一句 `http 403` 在用户脸上，他下一步只会把同一条消息再发一遍。
+/// 带上「换模型、改套餐、改 key」，这一轮才算真的结束。
+/// 重试了几次也要带上：不说的话，用户会以为我们一次都没试就把这句话摊出来了
+/// ——「触发了重试却像根本没动」的怨气正是这么来的。数字取闸门真花掉的几次，
+/// 提前收摊时说的是实际那几次，不是额度本上的那个五。
+fn request_refused(reason: &str, why: &str, attempts: usize) -> UiText {
+    UiText::new(
+        "agent.request_refused",
+        "the provider will not run this request ({attempts} retry(s) made): {reason}; {why}",
+    )
+    .with("reason", trim_reason(reason))
+    .with("why", why)
+    .with("attempts", attempts as u64)
+}
+
+/// 「该重发，但这一轮的闸门见顶了」。说清是哪条闸，外加最后一句报错。
+///
+/// 用户看到这条该知道两件事：不是模型坏了，是这一轮不再替它兜了；出路通常是
+/// 重发，或者去设置里把重发额度调大。
+fn request_halted(reason: &str, why: &str) -> UiText {
+    UiText::new(
+        "agent.request_halted",
+        "stopped retrying this round: {why}; last failure: {reason}",
+    )
+    .with("reason", trim_reason(reason))
+    .with("why", why)
 }
 
 /// 「一直想、始终不动笔」的收场。
@@ -2649,46 +3229,6 @@ mod tests {
         // 收到字节就重打表：思考再久也不能算卡住。
         watch.touch();
         assert!(!watch.expired());
-    }
-
-    #[test]
-    fn only_art_requests_count_as_art_requests() {
-        // 要图的：中英双语、带不带主语都算。
-        for yes in [
-            "画一只猫",
-            "给我画5帧橘猫奔跑",
-            "重新画这个头盔",
-            "绘制一个宝箱",
-            "涂个背景",
-            "做个五帧的行走循环",
-            "来一张西瓜",
-            "生成一把剑",
-            "draw a 32x32 knight",
-            "DRAW 4 walking frames",
-            "make me a run cycle",
-            "add a shadow under it",
-            "把配色改成冷色",
-        ] {
-            assert!(asks_for_artwork(yes), "这句在要图：{yes}");
-        }
-        // 不要图的：纯聊天、提问、以及「画」字被另用的词。
-        for no in [
-            "",
-            "   ",
-            "解释一下这个面板怎么用",
-            "这段配色什么意思",
-            "怎么导出 aseprite",
-            "画布上现在有什么",
-            "下一版准备怎么规划",
-            "这是不是一个蓝图",
-            "你觉得用什么颜色好？",
-            "现在几点了？",
-            "withdraw that change",
-            "what does this drawer do",
-            "帮我看看这个文件",
-        ] {
-            assert!(!asks_for_artwork(no), "这句不在要图：{no}");
-        }
     }
 
     #[test]
@@ -2853,6 +3393,95 @@ mod tests {
         assert_eq!(trim.seal().0, "前半段正文");
     }
 
+    /// 候选正比对到一半时把窗口削了，新内容不许被当成复读咽掉。
+    ///
+    /// 放行出去的字要并回窗口，一超过 ECHO_WINDOW 头部就被削掉。削的时候
+    /// 不动 cands，旧下标就往前多指了整段被削的量：下一个字来的时候，'正好
+    /// 连到窗口末尾' 这个条件被错位顶成立，于是按住的整截新内容被判成复读
+    /// 吃掉——用户看到的就是文字莫名少了一截。
+    #[test]
+    fn a_trim_while_comparing_must_not_eat_the_text_just_released() {
+        let mut stream = EchoStream::new();
+        stream.absorb(&"a".repeat(ECHO_WINDOW));
+        let mut eaten = 0usize;
+        // 第一发：一百个 'Z' 窗口里没有，逐个放行；紧跟的十六个 'a' 在窗口里
+        // 开出一批候选就卡住不动。收尾时 'Z' 并回窗口把头部削掉一百个，
+        // 而这批候选正是在这一瞬间被削出错的。
+        let fresh = stream.feed(
+            &format!("{}{}", "Z".repeat(100), "a".repeat(ECHO_MIN)),
+            &mut eaten,
+        );
+        assert_eq!(fresh, "Z".repeat(100), "卡住的那截还没定论，先不放");
+        assert_eq!(stream.window.len(), ECHO_WINDOW, "窗口该停在长度上限");
+        assert!(!stream.cands.is_empty(), "十六个 'a' 该留下候选");
+        // 第二发：对不上的一个字让那截见分晓。新内容必须一字不少地还回来。
+        let fresh = stream.feed("Q", &mut eaten);
+        let expect = format!("{}Q", "a".repeat(ECHO_MIN));
+        assert_eq!(fresh, expect, "削窗口削歪了会把新内容当复读咽掉");
+        assert_eq!(eaten, 0, "这一段里没有一个字是复读");
+    }
+
+    /// 窗口被削过头之后，候选下标必须还是对的。
+    /// 一条很长的回复分小块流进来，一个字都不许被复读过滤器啃掉。
+    ///
+    /// 真实流式就是几十个字一个 chunk 连着来，削窗口在这条路上反复发生。
+    /// 每次削窗口都要顺手改掉一批候选下标，错一次就是整段内容少一截。
+    /// 文本用单调递增的四位编号拼：任何一段都是独一份的，过滤器本该
+    /// 一个字都不动手——所以这里 assert 的就是「一个都没动手」。
+    ///
+    /// 和上一条分工不同：上一条把 chunk 边界停在「候选正按住不放」的那一瞬，
+    /// 钉的是削窗口错位这一个动作；这一条管的是长文流全程，任何一处开始
+    /// 误删都拦得住，改哪儿都不该让它变红。
+    #[test]
+    fn a_long_fresh_stream_survives_every_window_trim_untouched() {
+        let mut stream = EchoStream::new();
+        stream.absorb("这是上一轮已经写下的内容，垫满窗口好让后面削得动。");
+        let mut eaten = 0usize;
+        let mut fresh = String::new();
+        for i in 0..2400 {
+            let piece = format!("{i:04},");
+            let chars: Vec<char> = piece.chars().collect();
+            // 61 个字一块，故意不和 5 个字一组的分组对齐：chunk 边界
+            // 正是候选被按住、窗口被削掉的地方。
+            for chunk in chars.chunks(61) {
+                let chunk: String = chunk.iter().collect();
+                fresh.push_str(&stream.feed(&chunk, &mut eaten));
+            }
+        }
+        let expect: String = (0..2400).map(|i| format!("{i:04},")).collect();
+        fresh.push_str(&stream.seal(&mut eaten));
+        assert_eq!(fresh, expect, "长文流被复读过滤器啃掉了一截");
+        assert_eq!(eaten, 0, "满满一条新内容里没有一个字是复读");
+        assert_eq!(stream.window.len(), ECHO_WINDOW, "窗口该停在上限");
+    }
+
+    ///
+    /// 这条钉住不变量：每个候选都必须从「真的对得上手上这截」的位置开头。
+    /// 下标错位的后果不一定是立刻少字——更多时候是下一次比对全对在错位置上，
+    /// 该认的复读认不出、不该认的反被咽掉，所以直接钉住下标本身。
+    #[test]
+    fn candidates_survive_a_window_trim_staying_pointing_at_the_right_text() {
+        let mut stream = EchoStream::new();
+        // 先垫满一整个窗口：后面再放行内容出去，头部就非削不可。
+        stream.absorb(&"a".repeat(ECHO_WINDOW));
+        let mut eaten = 0usize;
+        // 前一百个字窗口里一个都没有，逐个放行；最后三个 'a' 开出的候选
+        // 就跨过了这一次削窗口。
+        let fresh = stream.feed(&format!("{}{}", "Z".repeat(100), "aaa"), &mut eaten);
+        assert_eq!(fresh, "Z".repeat(100));
+        assert_eq!(stream.window.len(), ECHO_WINDOW, "窗口该停在长度上限");
+        assert!(!stream.cands.is_empty(), "三个 'a' 该留下候选");
+        let held: Vec<char> = stream.held.chars().collect();
+        for &i in &stream.cands {
+            let at: Vec<char> = stream.window[i..]
+                .iter()
+                .copied()
+                .take(held.len())
+                .collect();
+            assert_eq!(at, held, "候选 {i} 对上的内容和手上这截不是一回事");
+        }
+    }
+
     #[tokio::test]
     async fn a_retyped_tail_never_shows_up_twice_in_a_live_run() {
         let s = session();
@@ -2871,7 +3500,8 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         // 纯接话不算在要图：这句话只是为了让 turn 里没有工具调用，
         // 免得 runner 抬手就催它去画画，测试就跑到第三条脚本上去了。
-        s.run_turn("接着刚才的继续写".into(), Vec::new(), tx).await;
+        s.run_turn("接着刚才的继续写".into(), Vec::new(), tx, None)
+            .await;
         let flow = drain(rx);
 
         assert!(flow.completed, "续写接上了就该好好收尾");
@@ -2913,6 +3543,108 @@ mod tests {
         assert_eq!(MAX_ROUND_RETRIES, 5, "重试上限就是五次");
         // 纯思考的闸比正文续写紧得多：这是「模型不想动笔」时的第一道刹车。
         assert_eq!(MAX_REASONING_CONTINUATIONS, 2);
+    }
+
+    /// 一条 ToolUse 必须有配对的 ToolResult，否则下一轮请求会被服务端整包 400
+    /// 拒掉（"tool_use ids were found without tool_result blocks"）。
+    ///
+    /// 撞上步数预算时最后那几条调用没跑，老代码直接 return，消息簿就停在那个
+    /// 残缺状态：这个会话之后每句话都发不出去，只能删掉重建。现在没跑的调用
+    /// 会补一条报错的 ToolResult，消息簿始终配对。
+    #[tokio::test]
+    async fn a_turn_that_runs_out_of_tool_steps_still_pairs_every_tool_use() {
+        let s = session().with_runner_config(RunnerConfig {
+            max_tool_steps: 2,
+            ..RunnerConfig::default()
+        });
+        rewire(
+            &s,
+            vec![tool_calls(&[
+                ("call_1", "pixel_read_canvas", json!({"what": "grid"})),
+                ("call_2", "pixel_read_canvas", json!({"what": "grid"})),
+                ("call_3", "pixel_read_canvas", json!({"what": "grid"})),
+            ])],
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("画布上现在有什么".into(), Vec::new(), tx, None)
+            .await;
+        let flow = drain(rx);
+
+        assert_eq!(flow.tools.len(), 3, "模型要了三笔就该让用户看见三笔");
+        assert_eq!(
+            flow.error.as_deref(),
+            Some("agent.tool_budget"),
+            "撞了步数预算要如实说"
+        );
+
+        let messages = s
+            .messages
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // 用户一句 + assistant 三条 ToolUse + 三条 ToolResult。
+        assert_eq!(messages.len(), 5, "每一笔调用都要有结果：{messages:?}");
+        let results: Vec<&str> = messages
+            .iter()
+            .filter_map(|m| match m.content.first() {
+                Some(ContentBlock::ToolResult { tool_use_id, .. }) => Some(tool_use_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(results, vec!["call_1", "call_2", "call_3"]);
+        match &messages[4].content[0] {
+            ContentBlock::ToolResult {
+                is_error, content, ..
+            } => {
+                assert!(*is_error, "没跑成的调用不许报成成功");
+                assert!(
+                    content.contains("never executed"),
+                    "要说清这一笔根本没落笔：{content}"
+                );
+            }
+            other => panic!("补的应该是 ToolResult，拿到 {other:?}"),
+        }
+    }
+
+    /// 一条消息簿里的 ToolUse 有没有配对的 ToolResult，直接决定下一发请求会不会
+    /// 被 400 拒掉。上面的场景测试只看一条路径，这里把配对规则本身钉死：
+    /// 跑完的不补、没跑的补、补的全是错误结果。
+    #[test]
+    fn every_unfinished_tool_call_gets_a_paired_error_result() {
+        let ids = vec![
+            "call_a".to_string(),
+            "call_b".to_string(),
+            "call_c".to_string(),
+        ];
+
+        assert_eq!(
+            unfinished_tool_results(&ids, 0).len(),
+            3,
+            "一笔没跑就三条全补"
+        );
+        assert_eq!(
+            unfinished_tool_results(&ids, 2).len(),
+            1,
+            "跑完两笔就只补最后一笔"
+        );
+        assert!(
+            unfinished_tool_results(&ids, 3).is_empty(),
+            "全跑完就不补：多一条空结果会让模型以为工具坏了"
+        );
+
+        for (msg, id) in unfinished_tool_results(&ids, 0).iter().zip(ids.iter()) {
+            match &msg.content[0] {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    is_error,
+                    ..
+                } => {
+                    assert_eq!(tool_use_id, id, "每条结果都要对得上那一笔调用");
+                    assert!(*is_error, "没跑的调用不能报成成功");
+                }
+                other => panic!("补的应该是 ToolResult，拿到 {other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -3094,6 +3826,27 @@ mod tests {
         ]
     }
 
+    /// 一截连着说了多个工具调用的回复。`index` 必须各不相同，否则累加器会把
+    /// 几条调用的参数搅成一团。要的就是「一轮里挤了三条调用」这个形态。
+    fn tool_calls(calls: &[(&str, &str, Value)]) -> Vec<Result<LlmEvent, ProviderError>> {
+        let mut out: Vec<Result<LlmEvent, ProviderError>> = Vec::new();
+        for (index, (id, name, input)) in calls.iter().enumerate() {
+            out.push(Ok(LlmEvent::ToolUseStart {
+                index,
+                id: (*id).into(),
+                name: (*name).into(),
+            }));
+            out.push(Ok(LlmEvent::ToolInputDelta {
+                index,
+                json_partial: input.to_string(),
+            }));
+        }
+        out.push(Ok(LlmEvent::Done {
+            stop_reason: "tool_use".into(),
+        }));
+        out
+    }
+
     /// 一截只写了提示词清单的回复。要图的一轮都得先过这一步。
     fn craft_call(id: &str) -> Vec<Result<LlmEvent, ProviderError>> {
         tool_call(
@@ -3121,7 +3874,7 @@ mod tests {
         );
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        s.run_turn("解释一下这个面板怎么用".into(), Vec::new(), tx)
+        s.run_turn("解释一下这个面板怎么用".into(), Vec::new(), tx, None)
             .await;
         let flow = drain(rx);
 
@@ -3136,7 +3889,7 @@ mod tests {
         rewire(&s, vec![cut("前半段"), done("后半段")]);
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        s.run_turn("解释一下这个面板怎么用".into(), Vec::new(), tx)
+        s.run_turn("解释一下这个面板怎么用".into(), Vec::new(), tx, None)
             .await;
         let flow = drain(rx);
 
@@ -3176,7 +3929,7 @@ mod tests {
         );
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        s.run_turn("解释一下这个面板怎么用".into(), Vec::new(), tx)
+        s.run_turn("解释一下这个面板怎么用".into(), Vec::new(), tx, None)
             .await;
         let flow = drain(rx);
 
@@ -3246,7 +3999,7 @@ mod tests {
         );
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        s.run_turn("画一只猫".into(), Vec::new(), tx).await;
+        s.run_turn("画一只猫".into(), Vec::new(), tx, None).await;
         let flow = drain(rx);
 
         // 401 重发五次也是同一个 401，还得白等 31 秒。直接现形，让用户去改 key。
@@ -3337,34 +4090,217 @@ mod tests {
         }
     }
 
-    /// 403「套餐不覆盖这个模型」要按重试对待：网关侧的限流窗口、套餐切换常以
-    /// 403 的形式出现，等一等就放行。重试满五次还不行才摊到用户脸上。
+    /// 「这发重发了也没用」全凭响应体认，状态码一律不许定罪——5xx 服务端自己的事，
+    /// 403 也大半是网关限流窗口。认不出来的代价是把一条跑得通的请求判死，
+    /// 认得太宽的代价是用户对着一行红字干等十几次重试，两头都得避。
+    #[test]
+    fn only_response_bodies_that_say_so_are_refused_outright() {
+        // 这些自己把话说尽了：换模型 / 改套餐 / 改 key 才能好。
+        for (err, expect) in [
+            (
+                ProviderError::Http {
+                    status: 403,
+                    body: r#"{"error":{"message":"model is not available in the current token plan","type":"permission_denied_error"}}"#.into(),
+                },
+                "switch model",
+            ),
+            (
+                ProviderError::Http {
+                    status: 429,
+                    body: r#"{"error":{"message":"You exceeded your current quota"}}"#.into(),
+                },
+                "plan or credit",
+            ),
+            (
+                ProviderError::Http {
+                    status: 401,
+                    body: r#"{"error":{"message":"Incorrect API key provided"}}"#.into(),
+                },
+                "API key",
+            ),
+            (
+                ProviderError::Http {
+                    status: 404,
+                    body: r#"{"error":{"message":"The model `gpt-4o` does not exist"}}"#.into(),
+                },
+                "model id",
+            ),
+        ] {
+            let why = permanent_reason(&err).unwrap_or_else(|| panic!("{err} 该一眼现形"));
+            assert!(why.contains(expect), "{why} 里该有 {expect}");
+            // 一眼现形的另一面：retryable 那关也得同时否掉，不然白认。
+            assert!(!retryable(&err) || permanent_reason(&err).is_some(), "{err}");
+        }
+
+        // 这些一个字都不能冤枉：限流窗口、网关限流、只带类型码的 403、5xx。
+        for err in [
+            ProviderError::Http {
+                status: 403,
+                body: r#"{"error":{"code":"7","type":"permission_denied_error"}}"#.into(),
+            },
+            ProviderError::Http {
+                status: 429,
+                body: r#"{"error":{"message":"slow down"}}"#.into(),
+            },
+            ProviderError::Http {
+                status: 503,
+                body: String::new(),
+            },
+            ProviderError::Network("reset".into()),
+        ] {
+            assert!(
+                permanent_reason(&err).is_none(),
+                "{err} 该照旧走重试：{:?}",
+                permanent_reason(&err)
+            );
+        }
+    }
+
+    /// 闸门本身：次数、复读、总时长三条，互不顶替。
+    #[test]
+    fn the_retry_gate_caps_count_repetition_and_wall_clock() {
+        let gate = RetryGate::default();
+        let failure = "http 429: slow down";
+
+        assert!(matches!(gate.judge_gate(5, false), RetryVerdict::Again(1)));
+
+        // 次数封顶。
+        let mut exhausted = gate.clone();
+        exhausted.used = 5;
+        assert!(
+            matches!(&exhausted.judge_gate(5, false), RetryVerdict::Halted(why) if why.contains("used up")),
+            "五次用尽就该收"
+        );
+
+        // 同一句报错第三遍。
+        let mut repeated = gate.clone();
+        repeated.note(1, failure, Duration::ZERO);
+        repeated.note(2, failure, Duration::ZERO);
+        repeated.note(3, failure, Duration::ZERO);
+        assert!(
+            matches!(&repeated.judge_gate(5, false), RetryVerdict::Halted(why) if why.contains("same failure")),
+            "复读第三遍就该收"
+        );
+        // 认过相的「这句话再听几遍也一样」不吃复读闸：用户要的是真听满五次，
+        // 第三遍就收，那第五次永远等不到。
+        assert!(
+            matches!(repeated.judge_gate(5, true), RetryVerdict::Again(4)),
+            "一眼认出来的错照样要给满次数"
+        );
+
+        // 退避总时长。一次成功只还次数，不还时间——时间是真花掉的。
+        let mut spent = gate.clone();
+        spent.note(1, failure, Duration::from_secs(20));
+        spent.succeed();
+        spent.note(1, "http 502: gateway", Duration::from_secs(11));
+        assert_eq!(spent.slept, Duration::from_secs(31));
+        assert!(
+            matches!(&spent.judge_gate(5, false), RetryVerdict::Halted(why) if why.contains("backing off")),
+            "睡够三十秒也该收"
+        );
+
+        // 包装层：手里只有一句成败文案时，照样认得出「重发也没用」。
+        let refused = "stream error: http 403: {\"error\":{\"message\":\"model is not available in the current token plan\"}}";
+        // 但不再零重试：第一次照样是「再发一次」，出路留到额度见底那一刻说。
+        assert!(
+            matches!(gate.judge_text(refused, true, 5), RetryVerdict::Again(1)),
+            "认过相的错也要先给满这一轮的额度"
+        );
+        let mut spent_on_it = gate.clone();
+        for attempt in 1..=5 {
+            assert!(
+                matches!(spent_on_it.judge_text(refused, true, 5), RetryVerdict::Again(n) if n == attempt),
+                "第 {attempt} 次仍该是重发"
+            );
+            spent_on_it.note(attempt, refused, Duration::ZERO);
+        }
+        assert!(
+            matches!(spent_on_it.judge_text(refused, true, 5), RetryVerdict::Refused(why) if why.contains("switch model")),
+            "五次都撞回同一句，才该连出路一起摊出去"
+        );
+        let stalled = "no data from the model for 90s, the stream looks stalled";
+        assert!(
+            matches!(gate.judge_text(stalled, true, 5), RetryVerdict::Again(1)),
+            "假死该照旧重发"
+        );
+    }
+
+    /// 403「套餐不覆盖这个模型」也要先听满五次，再把出路摊给用户。
+    ///
+    /// 中转站侧套餐生效有延迟、网关缓存旧策略，都是同一句 403 等一等就好的事；
+    /// 零重试直接摊红字，用户看到的是「明明刚订阅过却不能用」。所以次数照旧给满，
+    /// 变的是收场那句话：五次都撞回同一句，才说「换模型 / 改套餐 / 改 key」，
+    /// 而不是一句「这一轮不再兜了」。
     #[tokio::test]
-    async fn a_permission_denied_is_retried_before_it_is_shown_to_the_user() {
+    async fn a_403_the_provider_will_not_waive_still_gets_five_retries_first() {
         let s = session();
         // ProviderError 不 Clone，用闭包现造：每一发都是同一个 403。
         let denied = || {
             ProviderError::Http {
-            status: 403,
-            body: r#"{"error":{"message":"model is not available in the current token plan","type":"permission_denied_error","code":"7"}}"#.into(),
-        }
+                status: 403,
+                body: r#"{"error":{"message":"model is not available in the current token plan","type":"permission_denied_error","code":"7"}}"#.into(),
+            }
         };
         rewire(
             &s,
-            // 首发 + 五次重发：第六发才发现次数用尽，所以要备六份剧本。
             (0..=MAX_ROUND_RETRIES)
                 .map(|_| vec![Err(denied())])
                 .collect(),
         );
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        s.run_turn("画一只猫".into(), Vec::new(), tx).await;
+        s.run_turn("画一只猫".into(), Vec::new(), tx, None).await;
+        let flow = drain(rx);
+
+        assert!(
+            flow.statuses.len() == MAX_ROUND_RETRIES,
+            "红字之前要真听满五次：{:?}",
+            flow.statuses
+        );
+        assert!(
+            flow.statuses.iter().all(|k| k == "agent.retrying"),
+            "每一次重发都得让人看见：{:?}",
+            flow.statuses
+        );
+        assert!(!flow.completed, "不成不许悄悄收尾");
+        // 五次都撞回同一句，收场说的是「这发重发了也没用」加出路，不是「次数用尽」。
+        assert_eq!(flow.error.as_deref(), Some("agent.request_refused"));
+        let detail = flow.error_detail.unwrap_or_default();
+        assert!(detail.contains("403"), "报错要带上原文：{detail}");
+        assert!(
+            detail.contains("switch model"),
+            "报错要押一条出路：{detail}"
+        );
+    }
+
+    /// 只带类型码的 403 仍旧按重试对待：它分不清是网关限流窗口还是套餐切换，
+    /// 宁可让用户等十几秒看到同一个 403，也不能把一条其实能跑通的请求判死。
+    #[tokio::test]
+    async fn a_bare_403_is_still_retried_before_it_is_shown_to_the_user() {
+        let s = session();
+        // 报文每一发换个说法：网关侧的限流窗口就是这样，同一个 403、不同附言。
+        // 复读闸只拦「一模一样的那句话」，这种照旧拿满五次。
+        let window = |n: usize| ProviderError::Http {
+            status: 403,
+            body: format!(
+                r#"{{"error":{{"code":"7","type":"permission_denied_error","message":"gateway window {n}, try again"}}}}"#
+            ),
+        };
+        rewire(
+            &s,
+            (0..=MAX_ROUND_RETRIES)
+                .map(|n| vec![Err(window(n))])
+                .collect(),
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("画一只猫".into(), Vec::new(), tx, None).await;
         let flow = drain(rx);
 
         assert_eq!(
             flow.statuses.len(),
             MAX_ROUND_RETRIES,
-            "每一次重试都要让用户看见"
+            "发得出去的错，五次机会一次不该少"
         );
         assert!(
             flow.statuses.iter().all(|k| k == "agent.retrying"),
@@ -3372,9 +4308,55 @@ mod tests {
             flow.statuses
         );
         assert!(!flow.completed, "五次都没成，不许悄悄收尾");
-        assert_eq!(flow.error.as_deref(), Some("agent.request_failed"));
+        // 五次用尽之后收摊，说的是「这一轮的额度见底」外加最后一句报错——
+        // 比一句干巴巴的「请求没成」强，用户知道该重发还是该改配置。
+        assert_eq!(flow.error.as_deref(), Some("agent.request_halted"));
         let detail = flow.error_detail.unwrap_or_default();
         assert!(detail.contains("403"), "报错要带上原文：{detail}");
+        assert!(detail.contains("used up"), "要说清是次数见顶：{detail}");
+    }
+
+    /// 同一个报错原样重来，第三遍就认栽。
+    ///
+    /// Provider 已经把那句话说尽了，第四遍、第五遍只是让用户多盯二十秒同一行字，
+    /// 跟「卡死了」长得一模一样——这正是「触发了重试却像根本没动」的来路。
+    #[tokio::test]
+    async fn the_same_failure_three_times_in_a_row_cuts_the_retries_short() {
+        let s = session();
+        let stalled = || ProviderError::Http {
+            status: 429,
+            body: r#"{"error":{"message":"upstream stalled, try again later"}}"#.into(),
+        };
+        // 剧本备够：闸门第三遍就该收，后面几份根本用不到。
+        rewire(
+            &s,
+            (0..=MAX_ROUND_RETRIES)
+                .map(|_| vec![Err(stalled())])
+                .collect(),
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("画一只猫".into(), Vec::new(), tx, None).await;
+        let flow = drain(rx);
+
+        assert_eq!(
+            flow.statuses.len(),
+            IDENTICAL_FAILURE_LIMIT,
+            "同一句报错第三次就收：{:?}",
+            flow.statuses
+        );
+        assert!(
+            flow.statuses.iter().all(|k| k == "agent.retrying"),
+            "{:?}",
+            flow.statuses
+        );
+        assert!(!flow.completed, "没成不许悄悄收尾");
+        assert_eq!(flow.error.as_deref(), Some("agent.request_halted"));
+        let detail = flow.error_detail.unwrap_or_default();
+        assert!(
+            detail.contains("same failure"),
+            "要说清是复读闸收的：{detail}"
+        );
     }
 
     /// 无限思考的刹车：连续几轮只吐推理、正文和工具调用一个都没有，就收摊。
@@ -3402,7 +4384,7 @@ mod tests {
         );
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        s.run_turn("画一只猫".into(), Vec::new(), tx).await;
+        s.run_turn("画一只猫".into(), Vec::new(), tx, None).await;
         let flow = drain(rx);
 
         assert!(!flow.completed, "死思考不许悄悄收尾");
@@ -3437,7 +4419,7 @@ mod tests {
         );
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        s.run_turn("解释一下这个面板怎么用".into(), Vec::new(), tx)
+        s.run_turn("解释一下这个面板怎么用".into(), Vec::new(), tx, None)
             .await;
         let flow = drain(rx);
 
@@ -3475,7 +4457,8 @@ mod tests {
         );
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        s.run_turn("画一个红色方块".into(), Vec::new(), tx).await;
+        s.run_turn("画一个红色方块".into(), Vec::new(), tx, None)
+            .await;
         let flow = drain(rx);
 
         // 头一发真的跑了；后三发原样重发，发发跳过。照抄三遍还不收手，
@@ -3509,6 +4492,111 @@ mod tests {
         );
     }
 
+    /// 脚本本身坏（负坐标、除零这类）时模型最爱原样重发。剧本一字不改再来
+    /// 一遍只可能再坏一次，而完整问一轮要几十秒到两分钟：实测里一个负坐标
+    /// bug 就这样白烧四轮，用户干等两分钟，画布还是空的。所以刚跑挂的同一
+    /// 发现样重发，第二次直接收摊，不再往模型那儿送请求。改过一个字符的
+    /// 修复不算重放，照样放行。
+    #[tokio::test]
+    async fn a_failed_shader_resent_unchanged_stops_the_turn() {
+        let s = session();
+        // 必然报错的脚本：pset 不做裁剪，负坐标直接炸。
+        let broken = "pset(0, 0, hex('#ff004d')) pset(-1, 0, hex('#ff004d'))";
+        rewire(
+            &s,
+            vec![
+                craft_call("c0"),
+                tool_call("c1", "pixel_run_shader", json!({"script": broken})),
+                tool_call("c2", "pixel_run_shader", json!({"script": broken})),
+                done("这可不该被拿到"),
+            ],
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("画一个红色方块".into(), Vec::new(), tx, None)
+            .await;
+        let flow = drain(rx);
+
+        assert_eq!(
+            flow.tools,
+            vec![
+                "pixel_prompt".to_string(),
+                "pixel_run_shader".to_string(),
+                "pixel_run_shader".to_string(),
+            ],
+            "第二发现样重发就收摊，不能再往模型那儿烧一轮完整请求：{flow:?}"
+        );
+        assert_eq!(
+            flow.error.as_deref(),
+            Some("agent.shader_repeat_failure"),
+            "收摊的原因要说清是「刚出错的脚本又发了一遍」：{flow:?}"
+        );
+        assert!(
+            !flow.completed && flow.text.is_empty(),
+            "这轮已经收了摊，模型后面的正文一个字符都不该出现：{flow:?}"
+        );
+        assert_eq!(
+            flow.doc_updates, 1,
+            "只有跑过头那一发的错误才算一次画布事件：{flow:?}"
+        );
+        let doc = s
+            .document
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let layer = doc.layers[0].id.clone();
+        let frame = doc.frames[0].id.clone();
+        let painted = doc
+            .cel(&layer, &frame)
+            .unwrap()
+            .indices
+            .iter()
+            .filter(|i| **i != 0)
+            .count();
+        assert_eq!(painted, 0, "跑挂的脚本不许在画布上留半截：{painted}");
+    }
+
+    /// 护栏只拦「一字不差的坏脚本」。模型把坐标改对了，那就是一次正常的修复，
+    /// 必须放行——拦在这儿会把唯一能救场的路堵死，用户只能自己上编辑器。
+    #[tokio::test]
+    async fn a_corrected_script_after_a_failure_still_runs() {
+        let s = session();
+        rewire(
+            &s,
+            vec![
+                craft_call("c0"),
+                tool_call(
+                    "c1",
+                    "pixel_run_shader",
+                    json!({"script": "pset(-1, 0, hex('#ff004d'))"}),
+                ),
+                tool_call(
+                    "c2",
+                    "pixel_run_shader",
+                    json!({"script": "pset(0, 0, hex('#ff004d'))"}),
+                ),
+                done("画好了"),
+            ],
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("画一个红色像素".into(), Vec::new(), tx, None)
+            .await;
+        let flow = drain(rx);
+
+        assert!(flow.error.is_none(), "改对了不许被收摊挡掉：{flow:?}");
+        assert!(flow.completed, "{flow:?}");
+        assert_eq!(flow.text, "画好了");
+        let doc = s
+            .document
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let layer = doc.layers[0].id.clone();
+        let frame = doc.frames[0].id.clone();
+        let row = &doc.cel(&layer, &frame).unwrap().indices[..2];
+        assert_ne!(row[0], 0, "修好的那一发得真的画上");
+        assert_eq!(row[1], 0, "画错那一发不许留底：{row:?}");
+    }
+
     /// 要图的一轮不写提示词清单就动笔：头一发被挡下并要求补写，画布一个像素
     /// 都不许动；第二次仍然跳过清单时，按用户原话兜底一支基线放行，并如实
     /// 告诉用户这单没走成完整的提示词流程。
@@ -3526,7 +4614,7 @@ mod tests {
         );
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        s.run_turn("画个方块".into(), Vec::new(), tx).await;
+        s.run_turn("画个方块".into(), Vec::new(), tx, None).await;
         let flow = drain(rx);
 
         assert_eq!(
@@ -3567,7 +4655,7 @@ mod tests {
         );
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        s.run_turn("画个方块".into(), Vec::new(), tx).await;
+        s.run_turn("画个方块".into(), Vec::new(), tx, None).await;
         let flow = drain(rx);
 
         assert!(flow.completed, "{:?}", flow.error);
@@ -3612,7 +4700,7 @@ mod tests {
         let watched = rewire_watch(&s, vec![done("这一栏是导出用的")]);
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        s.run_turn("解释一下这个面板怎么用".into(), Vec::new(), tx)
+        s.run_turn("解释一下这个面板怎么用".into(), Vec::new(), tx, None)
             .await;
         let flow = drain(rx);
 
@@ -3654,7 +4742,7 @@ mod tests {
         );
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        s.run_turn("画个方块再整理下调色板".into(), Vec::new(), tx)
+        s.run_turn("画个方块再整理下调色板".into(), Vec::new(), tx, None)
             .await;
         let flow = drain(rx);
 
@@ -3714,7 +4802,7 @@ mod tests {
         );
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        s.run_turn("画两层".into(), Vec::new(), tx).await;
+        s.run_turn("画两层".into(), Vec::new(), tx, None).await;
         let flow = drain(rx);
 
         assert_eq!(
@@ -3754,7 +4842,7 @@ mod tests {
         rewire(&s, scripts);
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        s.run_turn("画一只猫".into(), Vec::new(), tx).await;
+        s.run_turn("画一只猫".into(), Vec::new(), tx, None).await;
         let flow = drain(rx);
 
         assert!(!flow.completed, "配额用尽不许悄悄收尾");
@@ -3790,6 +4878,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn each_round_gets_its_own_continuation_budget() {
+        let s = session();
+        // 每轮都用掉三次续写。配额归「单次回复」时每轮都是干净的三次；
+        // 换成 turn 级的话第二轮只剩两次，第三次就得提前撞墙收摊。
+        let round = |tag: &str| {
+            (0..3)
+                .map(|i| {
+                    cut(&format!(
+                        "第 {tag} 轮第 {i} 段被掐断的正文，模型确实在往下写，长度足够算一次推进"
+                    ))
+                })
+                .collect::<Vec<_>>()
+        };
+        // 每一「发」都是一个独立的响应：伪 provider 收到第一个 Done 就收流，
+        // 同一个脚本里排在 Done 后面的事件根本没人读。flatten 会把三段并成
+        // 一发，续写的次数就怎么也攒不起来。
+        rewire(
+            &s,
+            round("一")
+                .into_iter()
+                .chain(std::iter::once(tool_call(
+                    "c1",
+                    "pixel_apply_operations",
+                    json!({"operations": [{"op": "create_layer", "id": "L9"}]}),
+                )))
+                .chain(round("二"))
+                .chain(std::iter::once(done("两轮都写完了")))
+                .collect(),
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("画一只猫".into(), Vec::new(), tx, None).await;
+        let flow = drain(rx);
+
+        assert!(flow.completed, "第二轮不许被上一轮用掉的续写次数拖死");
+        assert_eq!(
+            flow.statuses
+                .iter()
+                .filter(|k| *k == "agent.continuing")
+                .count(),
+            6,
+            "两轮各续三次，每续一次都要有进度提示：{:?}",
+            flow.statuses
+        );
+        assert!(flow.error.is_none(), "{:?}", flow.error);
+    }
+
+    #[tokio::test]
     async fn a_model_that_retypes_the_same_words_is_cut_off_early() {
         let s = session();
         let repeated = "这段正文模型早就写过了，原样再吐一遍不算任何推进";
@@ -3806,7 +4942,7 @@ mod tests {
         );
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        s.run_turn("画一只猫".into(), Vec::new(), tx).await;
+        s.run_turn("画一只猫".into(), Vec::new(), tx, None).await;
         let flow = drain(rx);
 
         assert!(!flow.completed, "卡死了不许悄悄收尾");
@@ -3869,7 +5005,7 @@ mod tests {
         );
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        s.run_turn("画一只猫".into(), Vec::new(), tx).await;
+        s.run_turn("画一只猫".into(), Vec::new(), tx, None).await;
         let flow = drain(rx);
 
         assert!(flow.completed, "工具跑完接着问，这一轮要能收尾");
@@ -3898,6 +5034,71 @@ mod tests {
         assert_eq!(ids, vec!["c2".to_string()], "残缺的 c1 不该留下任何痕迹");
     }
 
+    /// 增量广播的骨：第一次给全量，之后只报动过的 cel。
+    ///
+    /// 这是整个「不再整份推」改动的关键性质——前端本地持有一份完整文档，靠
+    /// 增量往里合。第二次广播要是漏报没动过的 cel，前端那份文档就永久缺一格，
+    /// 而且不报错。所以宁可多 diff 一遍，也不靠「哪个工具写过的」来记。
+    #[test]
+    fn broadcasting_twice_only_reports_the_touched_cel() {
+        let s = session();
+        // 8x8 新文档一层一帧：第一次是全量，一个 cel 都不该少。
+        let first = s.document_patch();
+        assert_eq!(first.cels.len(), 1);
+        assert!(first.dropped.is_empty());
+        assert_eq!(first.name, "t");
+        assert_eq!(first.width, 8);
+
+        // 只动一个格子：模拟一次 apply_operations。
+        let layer = s.active().layer;
+        let frame = s.active().frame;
+        s.with_document_mut(|doc| {
+            doc.revision += 1;
+            doc.cels
+                .get_mut(&layer)
+                .and_then(|f| f.get_mut(&frame))
+                .expect("新文档该有这一格")
+                .indices[0] = 3;
+        });
+        let second = s.document_patch();
+        assert_eq!(second.cels.len(), 1, "只有一个 cel 动过");
+        assert_eq!(
+            second.cels[0].2.first().copied(),
+            Some(3),
+            "报上来的正是动过的那一格"
+        );
+        assert_eq!(second.revision, first.revision + 1);
+
+        // 什么都没改：元数据照给，cel 一个都不报。空 patch 无害且便宜。
+        let third = s.document_patch();
+        assert!(third.cels.is_empty());
+        assert!(third.dropped.is_empty());
+        assert_eq!(third.revision, second.revision);
+    }
+
+    /// sync_document 之后基准必须换成前端交上来的那份。
+    ///
+    /// 不换的话下一次 emit 会拿旧基准 diff 出一份全量 patch——而前端刚刚才把
+    /// 这份文档发过来，白推几十 MB，还把它本地尚未确认的选择态整个盖掉。
+    #[test]
+    fn sync_document_resets_the_broadcast_baseline() {
+        let s = session();
+        let fresh = Document::new("fresh", 4, 4).unwrap();
+        s.sync_document(fresh);
+        let patch = s.document_patch();
+        assert_eq!(patch.name, "fresh");
+        assert_eq!(patch.width, 4);
+        // 一个 cel 都不报，正是基准换对了：前端刚交上来的就是这份，它本地已经有。
+        // 基准没换的话，这里会拿旧 8x8 文档 diff 出一整个全量 patch 来。
+        assert!(patch.cels.is_empty(), "同步过的文档不该再全量推一遍");
+
+        // 基准已是这份：下一份增量不再带着旧文档的任何东西。
+        let after = s.document_patch();
+        assert!(after.cels.is_empty());
+        assert!(after.dropped.is_empty());
+        assert_eq!(after.name, "fresh");
+    }
+
     fn session() -> AgentSession {
         AgentSession::new(
             "s1",
@@ -3915,6 +5116,56 @@ mod tests {
             },
             Document::new("t", 8, 8).unwrap(),
         )
+    }
+
+    /// 主循环崩在半路，也必须给这一回合一个收口。
+    ///
+    /// 收不了口的话前端的 running 永远挂着：占位节点闪着光标，点停止只等到
+    /// 「这个会话还在忙」，下一句发什么都撞忙——用户看到的就是「按了没反应」。
+    /// 崩掉的 future 会就地蒸发，之后没有任何人会再发事件，所以这一层兜底
+    /// 必须是「崩溃也照样收口」，而不是「正常跑完才收口」。
+    #[tokio::test]
+    async fn a_turn_that_panics_mid_way_still_closes() {
+        struct ExplodingProvider;
+        #[async_trait::async_trait]
+        impl providers::LlmProvider for ExplodingProvider {
+            async fn request(
+                &self,
+                _req: &ChatRequest,
+            ) -> Result<providers::EventStream, ProviderError> {
+                panic!("a poisoned lock right in the middle of the turn");
+            }
+        }
+
+        let s = session();
+        let config = s
+            .engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .config
+            .clone();
+        *s.engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Engine {
+            config,
+            provider: Arc::new(ExplodingProvider),
+        };
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        // 默认钩子会往测试输出里刷一条栈，临时换成安静的那个，跑完立刻还原。
+        let chatty = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        s.run_turn_guarded("画一只猫".into(), Vec::new(), tx, None)
+            .await;
+        std::panic::set_hook(chatty);
+
+        let flow = drain(rx);
+        assert!(!flow.completed, "崩掉的那一圈不算画完");
+        assert_eq!(
+            flow.error.as_deref(),
+            Some("agent.turn_crashed"),
+            "崩在主循环里也要回一条 error，前端才收得住 running"
+        );
     }
 
     /// 换一把钉死关思考的会话：用户要的是「别想，直接画」。
@@ -3968,7 +5219,7 @@ mod tests {
         );
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        s.run_turn("画一只猫".into(), Vec::new(), tx).await;
+        s.run_turn("画一只猫".into(), Vec::new(), tx, None).await;
         let flow = drain(rx);
 
         assert_eq!(
@@ -4032,7 +5283,7 @@ mod tests {
         );
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        s.run_turn("画一只猫".into(), Vec::new(), tx).await;
+        s.run_turn("画一只猫".into(), Vec::new(), tx, None).await;
         let flow = drain(rx);
 
         assert!(
@@ -4072,7 +5323,8 @@ mod tests {
         );
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        s.run_turn("这个面板怎么用？".into(), Vec::new(), tx).await;
+        s.run_turn("这个面板怎么用？".into(), Vec::new(), tx, None)
+            .await;
         let flow = drain(rx);
 
         assert_eq!(
@@ -4125,7 +5377,8 @@ mod tests {
         );
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        s.run_turn("画5帧橘猫奔跑".into(), Vec::new(), tx).await;
+        s.run_turn("画5帧橘猫奔跑".into(), Vec::new(), tx, None)
+            .await;
         let flow = drain(rx);
 
         assert!(
@@ -4196,7 +5449,7 @@ mod tests {
         );
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        s.run_turn("照这个画风换色".into(), vec![reference_image()], tx)
+        s.run_turn("照这个画风换色".into(), vec![reference_image()], tx, None)
             .await;
         let flow = drain(rx);
 
@@ -4241,7 +5494,7 @@ mod tests {
         );
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        s.run_turn("画个图标".into(), Vec::new(), tx).await;
+        s.run_turn("画个图标".into(), Vec::new(), tx, None).await;
         let flow = drain(rx);
 
         assert!(flow.completed, "{:?}", flow.error);
@@ -4313,7 +5566,7 @@ mod tests {
         );
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        s.run_turn("画个图标".into(), Vec::new(), tx).await;
+        s.run_turn("画个图标".into(), Vec::new(), tx, None).await;
         let flow = drain(rx);
 
         assert!(flow.completed, "{:?}", flow.error);
@@ -4342,7 +5595,7 @@ mod tests {
         rewire(&s, vec![done("看完了")]);
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        s.run_turn("帮我看看这张图".into(), vec![snapshot_image()], tx)
+        s.run_turn("帮我看看这张图".into(), vec![snapshot_image()], tx, None)
             .await;
         let flow = drain(rx);
 
@@ -4361,7 +5614,7 @@ mod tests {
         rewire(&s, vec![done("想要侧视还是四分之三视角？")]);
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        s.run_turn("画只猫".into(), Vec::new(), tx).await;
+        s.run_turn("画只猫".into(), Vec::new(), tx, None).await;
         let flow = drain(rx);
 
         assert!(
@@ -4393,7 +5646,7 @@ mod tests {
         );
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        s.run_turn("画5帧橘猫".into(), Vec::new(), tx).await;
+        s.run_turn("画5帧橘猫".into(), Vec::new(), tx, None).await;
         let flow = drain(rx);
 
         let nudges = flow
@@ -4413,7 +5666,7 @@ mod tests {
         let watched = rewire_watch(&s, vec![done("不思考直接画")]);
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        s.run_turn("解释一下这个面板怎么用".into(), Vec::new(), tx)
+        s.run_turn("解释一下这个面板怎么用".into(), Vec::new(), tx, None)
             .await;
         let flow = drain(rx);
 
@@ -4445,7 +5698,8 @@ mod tests {
         );
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        s.run_turn("导出按钮在哪".into(), Vec::new(), tx).await;
+        s.run_turn("导出按钮在哪".into(), Vec::new(), tx, None)
+            .await;
         let flow = drain(rx);
 
         assert!(
@@ -4475,7 +5729,7 @@ mod tests {
         );
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        s.run_turn("画一只猫".into(), Vec::new(), tx).await;
+        s.run_turn("画一只猫".into(), Vec::new(), tx, None).await;
         let flow = drain(rx);
 
         assert_eq!(
@@ -4716,6 +5970,10 @@ mod tests {
         assert!(looks_cut_off("let palette = {"));
         assert!(looks_cut_off("draw(cat,\n"));
         assert!(looks_cut_off("if walking &&\n"));
+        // 中文那句话绝不会拿逗号、顿号、冒号收尾：这三个一出现就是断了。
+        assert!(looks_cut_off("配色用的是橘色系，"));
+        assert!(looks_cut_off("需要改的地方有尾巴、耳朵、"));
+        assert!(looks_cut_off("接下来调整："));
     }
 
     #[test]
@@ -4723,6 +5981,8 @@ mod tests {
         // 猜错一次要白跑一整轮续写，所以只认最硬的信号。
         assert!(!looks_cut_off("```lua\npset(1, 1, red)\n```\n画完了"));
         assert!(!looks_cut_off("五帧行走图已经画好，帧时长都是 100ms。"));
+        // 句子中间是整段说的，只有最后一行算数，所以整段里出现逗号不算。
+        assert!(!looks_cut_off("第一帧落地\n第二帧收腿\n五帧都画好了"));
         assert!(!looks_cut_off(""));
         assert!(!looks_cut_off("   "));
         // 中文破折号是全角字符，碰不到那张 ASCII 表。
@@ -4828,7 +6088,7 @@ mod tests {
         );
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        s.run_turn("解释一下这个面板怎么用".into(), Vec::new(), tx)
+        s.run_turn("解释一下这个面板怎么用".into(), Vec::new(), tx, None)
             .await;
         let flow = drain(rx);
 
@@ -4870,7 +6130,7 @@ mod tests {
         );
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        s.run_turn("解释一下这个面板怎么用".into(), Vec::new(), tx)
+        s.run_turn("解释一下这个面板怎么用".into(), Vec::new(), tx, None)
             .await;
         let flow = drain(rx);
 
@@ -4889,5 +6149,114 @@ mod tests {
         assert_eq!(messages.len(), 2, "追问指令该被撤掉");
         assert_eq!(messages[0].role, Role::User);
         assert_eq!(messages[1].role, Role::Assistant);
+    }
+
+    /// 长工具挂住时，停止键必须在轮询间隔内把人放出去，不能干等到工具自己的超时。
+    /// 这正是生图和外部 MCP 两条路径的实际情形：用户点了停止，界面得立刻有反应。
+    #[tokio::test]
+    async fn a_long_tool_call_yields_the_moment_stop_is_pressed() {
+        let s = Arc::new(session());
+        let spawned = s.clone();
+        let waiting = tokio::spawn(async move {
+            spawned
+                .until_cancelled(tokio::time::sleep(Duration::from_secs(30)))
+                .await
+        });
+
+        // 先给它几拍 tick，确保取消不是在 future 头一次 poll 就被贴脸撞上的。
+        tokio::time::sleep(CANCEL_POLL * 2).await;
+        s.interrupt();
+
+        let out = tokio::time::timeout(Duration::from_secs(2), waiting)
+            .await
+            .expect("停止键按下后 until_cancelled 要立刻放行")
+            .unwrap();
+        assert!(out.is_none(), "取消成功了才回 None，调用方才能 bail 收摊");
+    }
+
+    /// 没人点停止，等到的东西要原样交出去：正常回来的工具结果不该被误伤。
+    #[tokio::test]
+    async fn a_tool_call_that_finishes_alone_is_passed_through() {
+        let s = session();
+        let out = s
+            .until_cancelled(async {
+                tokio::time::sleep(CANCEL_POLL * 2 + Duration::from_millis(20)).await;
+                7
+            })
+            .await;
+        assert_eq!(out, Some(7));
+    }
+
+    /// 生图提示词要挂着这一轮的渲染规矩出门。
+    ///
+    /// 用户没点名风格的那一轮恰恰是最常见的一轮，也是过去最吃亏的一轮：
+    /// 一句话里连成品触发词都未必中，生图模型于是照自己的训练分布交差。
+    /// 两套规矩不能同时上身——风格命中时风格顶替默认档，不然生图模型只在
+    /// 两段打架的要求里猜权重，交回来的是一张四不像。
+    #[test]
+    fn the_image_prompt_carries_this_turns_style() {
+        let s = session();
+        let plain = s.image_prompt("a small frog");
+        assert!(
+            plain.contains("finished drawing means"),
+            "没点名风格也该有默认质量档：{plain}"
+        );
+
+        let plan = TurnPlan::from_text_with_style("画只gameboy风格的猫", &[], false, None);
+        assert_eq!(plan.style.map(|s| s.id()), Some("gameboy"), "风格没读出来");
+        *s.plan
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = plan;
+        let styled = s.image_prompt("a small frog");
+        assert!(
+            !styled.contains("finished drawing means"),
+            "风格规矩该顶替默认档，不是叠加：{styled}"
+        );
+        assert_eq!(
+            styled,
+            artstyle::decorate_image_prompt("a small frog", Some(artstyle::ArtStyle::GameBoy)),
+            "轮次里定的风格要真的落到生图提示词上"
+        );
+    }
+
+    /// 轮次预设也走同一个出口：界面在输入区叠的收尾规矩跟着这一句进生图提示词。
+    ///
+    /// 生图模型不知道用户在输入区点了什么，也不共用我们的 Lua 沙箱规矩。
+    /// 少了这一段，「写实渲染 + 微细结构」这三下点击在生图那条路上等于没点。
+    #[test]
+    fn this_turns_presets_also_reach_the_image_prompt() {
+        let s = session();
+        // 一条预设的轮次：默认档要让位，预设正文要上车。
+        let plan = TurnPlan::from_text_pinned(
+            "画只写实的猫",
+            &[],
+            false,
+            None,
+            vec![presets::parse("microdetail").unwrap()],
+        );
+        assert_eq!(plan.presets.len(), 1, "预设钉进了轮次计划");
+        *s.plan
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = plan;
+        let out = s.image_prompt("a small frog");
+        assert!(
+            !out.contains("default quality tier"),
+            "预设在路上时默认档整段让位：{out}"
+        );
+        assert!(
+            out.contains("fur direction in 1px strokes"),
+            "预设规矩正文要跟着来：{out}"
+        );
+
+        // 换一轮就把旧的放下了：预设是「这一句的偏好」，不跟着下一句赖着。
+        *s.plan
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            TurnPlan::from_text("画只猫", &[], false);
+        let plain = s.image_prompt("a small frog");
+        assert!(
+            plain.contains("default quality tier"),
+            "没叠预设的下一句照旧只挂默认档：{plain}"
+        );
     }
 }

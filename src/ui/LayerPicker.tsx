@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import { useT } from "../lib/t";
 import { resolveLayerId } from "../lib/layer-pick";
+import HStrip from "./HStrip";
 import type { PixelDocument } from "../lib/types";
 
 /**
@@ -27,7 +28,7 @@ export default function LayerPicker({
   );
 
   return (
-    <div className="frame-picker">
+    <HStrip className="frame-picker" label={t("dock.active_layer")}>
       <button
         type="button"
         className={`frame-pick layer-pick ${resolved === "" ? "active" : ""}`}
@@ -48,6 +49,6 @@ export default function LayerPicker({
           <span className="layer-pick-id">{index + 1}</span>
         </button>
       ))}
-    </div>
+    </HStrip>
   );
 }

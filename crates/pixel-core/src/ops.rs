@@ -8,6 +8,8 @@ use super::document::{
     MAX_PALETTE,
 };
 use super::palettes::MAX_PALETTES;
+/// 图层/配色范围名字的长度上限：面板侧一行能显示的字符数。
+const MAX_NAME_CHARS: usize = 64;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -112,6 +114,10 @@ pub enum PixelOperation {
         /// 也收 `palette_id`：schema 里别处一律叫 palette_id，模型照那边写。
         #[serde(alias = "palette_id")]
         id: String,
+        /// 还有层在引用时接盘的那一套：给了就先把这些层改指过去，再删。
+        /// 没给就照旧报错——「删得掉」必须调用方明说，不能悄悄改别人的层。
+        #[serde(default)]
+        fallback: Option<String>,
     },
     RenamePalette {
         #[serde(alias = "palette_id")]
@@ -127,6 +133,10 @@ pub enum PixelOperation {
         #[serde(alias = "palette_id")]
         id: String,
         index: usize,
+        /// 画面像素的接手颜色：给了就把用了被删色的像素全改成它，再删颜色。
+        /// 没给就是老语义：只动范围不动画面，索引前移会把像素悄悄改色。
+        #[serde(default)]
+        replacement: Option<String>,
     },
     /// 把某一层指到另一套范围上。换层等于把这一层的像素就地收进新范围。
     SetLayerPalette {
@@ -182,6 +192,9 @@ pub enum PixelOperation {
     },
 }
 
+/// 新帧的默认时长。100ms ≈ 10FPS：像素画动画按这个密度读起来是「能动」，
+/// 再快就糊成一团，再慢就成了幻灯片。前端新建帧时也填这个值，
+/// 两处不同步会让用户以为时长没生效。
 fn default_duration() -> u32 {
     100
 }
@@ -221,10 +234,18 @@ pub enum OperationError {
     TooManyPalettes(usize),
     #[error("cannot remove the last color of palette {0}")]
     LastPaletteColor(String),
+    #[error("cannot delete a palette into itself as the fallback")]
+    PaletteFallbackSelf,
+    #[error("the replacement color is the color being removed; pick a different one")]
+    PaletteReplaceSame,
     #[error("palette {0} is still used by layer {1}")]
     PaletteInUse(String, String),
     #[error("palette color index out of range: {0}")]
     PaletteColorIndex(usize),
+    #[error("duplicate id: {0} already exists")]
+    DuplicateId(String),
+    #[error("name cannot be empty or whitespace only")]
+    EmptyName,
 }
 
 /// 应用一组操作；任一失败则整批回滚（幂等失败，无半成品状态）。
@@ -237,11 +258,21 @@ pub fn apply_batch(doc: &mut Document, ops: &[PixelOperation]) -> Result<u64, Op
             return Err(e);
         }
     }
-    doc.check_limits().map_err(OperationError::Document)?;
+    if let Err(e) = doc.check_limits() {
+        // 上限是在整批之后才查的：这条路径也要回滚，否则批量操作失败时
+        // 文档里留着大半截应用了一半的图层或帧。
+        *doc = snapshot;
+        return Err(OperationError::Document(e));
+    }
     doc.bump();
     Ok(doc.revision)
 }
 
+/// 应用单条操作。不带回滚：中途失败时文档可能已经改了一半。
+///
+/// 调用方分两种：`apply_batch` 用整体快照兜底，可以随便失败；
+/// 另一条路（Tauri 编辑器命令）是用户在画布上的一笔，失败就得原样退出，
+/// 所以那边自己包了快照。别把这个函数直接接到长流程上。
 pub fn apply_one(doc: &mut Document, op: &PixelOperation) -> Result<(), OperationError> {
     match op {
         PixelOperation::CreateFrame {
@@ -253,6 +284,13 @@ pub fn apply_one(doc: &mut Document, op: &PixelOperation) -> Result<(), Operatio
                 return Err(OperationError::Document(DocumentError::Dimension(
                     *duration_ms,
                 )));
+            }
+            // 显式 id 撞名会让 frames 里出现两条同 id 的记录，后面 cel 按 id
+            // 索引时直接互相冲掉，画面凭空少一半。
+            if let Some(explicit) = id {
+                if doc.frames.iter().any(|f| &f.id == explicit) {
+                    return Err(OperationError::DuplicateId(explicit.clone()));
+                }
             }
             let new_id = id.clone().unwrap_or_else(|| {
                 next_id(
@@ -399,6 +437,12 @@ pub fn apply_one(doc: &mut Document, op: &PixelOperation) -> Result<(), Operatio
                     &doc.layers.iter().map(|l| l.id.clone()).collect::<Vec<_>>(),
                 )
             });
+            // 与 CreateFrame 同理：同 id 的图层会把 cels 里已有一层的数据冲掉。
+            if let Some(explicit) = id {
+                if doc.layers.iter().any(|l| &l.id == explicit) {
+                    return Err(OperationError::DuplicateId(explicit.clone()));
+                }
+            }
             // 显式指定的配色范围必须真的存在，否则模型会拿一个拼错的 id
             // 建出一层「指向不存在色板」的层，错误直到后面才炸。
             let palette = match palette_id {
@@ -451,7 +495,12 @@ pub fn apply_one(doc: &mut Document, op: &PixelOperation) -> Result<(), Operatio
                 doc.layers.iter_mut().find(|l| &l.id == id).ok_or_else(|| {
                     OperationError::Document(DocumentError::UnknownLayer(id.clone()))
                 })?;
-            layer.name = name.clone();
+            // 空名字会让侧栏那一行塌成一条缝，截断了也看不出是哪一层。
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                return Err(OperationError::EmptyName);
+            }
+            layer.name = trimmed.chars().take(MAX_NAME_CHARS).collect();
         }
         PixelOperation::SetLayerProperties {
             id,
@@ -477,6 +526,14 @@ pub fn apply_one(doc: &mut Document, op: &PixelOperation) -> Result<(), Operatio
             }
         }
         PixelOperation::SetPalette { colors } => {
+            // 空配色表没有任何可映射的目标：nearest_index 会全程返回 None，
+            // 索引全归 0，整幅画无声擦成透明，而文件照样能导出。
+            if colors.is_empty() {
+                return Err(OperationError::BadColor("palette cannot be emptied".into()));
+            }
+            if colors.len() > MAX_PALETTE {
+                return Err(OperationError::Document(DocumentError::PaletteFull));
+            }
             let mut next: Vec<Rgba> = Vec::with_capacity(colors.len());
             for hex in colors {
                 let color =
@@ -576,7 +633,7 @@ pub fn apply_one(doc: &mut Document, op: &PixelOperation) -> Result<(), Operatio
                 )?;
             }
         }
-        PixelOperation::DeletePalette { id } => {
+        PixelOperation::DeletePalette { id, fallback } => {
             if crate::palettes::is_builtin_id(id) {
                 return Err(OperationError::BuiltinPalette(id.clone()));
             }
@@ -585,9 +642,57 @@ pub fn apply_one(doc: &mut Document, op: &PixelOperation) -> Result<(), Operatio
                 .iter()
                 .position(|p| &p.id == id)
                 .ok_or_else(|| OperationError::UnknownPalette(id.clone()))?;
-            // 还被图层引用着就先别删：静默改指会让别的层莫名其妙换色板。
-            if let Some(layer) = doc.layers.iter().find(|l| &l.palette_id == id) {
-                return Err(OperationError::PaletteInUse(id.clone(), layer.id.clone()));
+            // 有层在引用时给 fallback 就把这些层改指过去再删；没给照旧拒。
+            // 「删正在被自家层用的范围」在前端是常规操作：一概拒掉会让用户
+            // 永远清不掉自建预设，所以接盘路径必须真能走通。
+            if doc.layers.iter().any(|l| &l.palette_id == id) {
+                let fallback = fallback.as_deref().ok_or_else(|| {
+                    let holder = doc
+                        .layers
+                        .iter()
+                        .find(|l| &l.palette_id == id)
+                        .map(|l| l.id.clone())
+                        .unwrap_or_default();
+                    OperationError::PaletteInUse(id.clone(), holder)
+                })?;
+                if fallback == id {
+                    return Err(OperationError::PaletteFallbackSelf);
+                }
+                if !doc.palettes.iter().any(|p| p.id == fallback) {
+                    return Err(OperationError::UnknownPalette(fallback.to_string()));
+                }
+                let target = doc
+                    .palettes
+                    .iter()
+                    .find(|p| p.id == fallback)
+                    .map(|p| p.colors.clone())
+                    .ok_or_else(|| OperationError::UnknownPalette(fallback.to_string()))?;
+                // 换范围和 SetLayerPalette 是同一条不变量：像素上的色是文档级下标，
+                // 光改 palette_id 不动格子，这些像素仍旧指着被删范围里的颜色，
+                // 配色锁当场说谎——层说自己在接盘范围里，画面在范围外。
+                // 前端删预设那句「像素按就近色重新归队」说的就是这一步。
+                // 空范围没得归队，先拒：把层指去一套没有颜色的范围，等于把画面
+                // 交给一把空锁，后面每一次落笔都要报错。
+                if target.is_empty() {
+                    return Err(OperationError::UnknownPalette(format!(
+                        "color scope {fallback} holds no color"
+                    )));
+                }
+                // 先重归队再改指：requantize 是按当下的 palette_id 找层的，反了序扑空。
+                let owners: Vec<String> = doc
+                    .layers
+                    .iter()
+                    .filter(|layer| &layer.palette_id == id)
+                    .map(|layer| layer.id.clone())
+                    .collect();
+                for owner in &owners {
+                    requantize_layer(doc, owner, &target)?;
+                }
+                for layer in doc.layers.iter_mut() {
+                    if &layer.palette_id == id {
+                        layer.palette_id = fallback.to_string();
+                    }
+                }
             }
             doc.palettes.remove(pos);
         }
@@ -597,7 +702,7 @@ pub fn apply_one(doc: &mut Document, op: &PixelOperation) -> Result<(), Operatio
             }
             let trimmed = name.trim();
             if trimmed.is_empty() {
-                return Err(OperationError::UnknownPalette("empty name".into()));
+                return Err(OperationError::EmptyName);
             }
             let palette = doc
                 .palettes
@@ -625,13 +730,17 @@ pub fn apply_one(doc: &mut Document, op: &PixelOperation) -> Result<(), Operatio
             }
             palette.colors.push(color);
         }
-        PixelOperation::RemovePaletteColor { id, index } => {
+        PixelOperation::RemovePaletteColor {
+            id,
+            index,
+            replacement,
+        } => {
             if crate::palettes::is_builtin_id(id) {
                 return Err(OperationError::BuiltinPalette(id.clone()));
             }
             let palette = doc
                 .palettes
-                .iter_mut()
+                .iter()
                 .find(|p| &p.id == id)
                 .ok_or_else(|| OperationError::UnknownPalette(id.clone()))?;
             if *index >= palette.colors.len() {
@@ -640,9 +749,60 @@ pub fn apply_one(doc: &mut Document, op: &PixelOperation) -> Result<(), Operatio
             if palette.colors.len() <= 1 {
                 return Err(OperationError::LastPaletteColor(id.clone()));
             }
+            let removed = palette.colors[*index];
+            // 给了接手色就把画面上用着被删色的像素全部改写过去：删色不是删范围，
+            // 画面得有地方去。接手色就是被删色本身等于什么都没改，直接拒。
+            let swap = match replacement {
+                Some(hex) => {
+                    let next = Rgba::parse_hex(hex)
+                        .ok_or_else(|| OperationError::BadColor(hex.clone()))?;
+                    if next == removed {
+                        return Err(OperationError::PaletteReplaceSame);
+                    }
+                    Some(next)
+                }
+                None => None,
+            };
             // 删的是范围不是存储：cel 里的索引照旧指向文档调色板，一个像素都不动。
             // 真要在画面上消掉这个色，用户自己用橡皮擦，或者换一套范围触发重归队。
+            let palette = doc
+                .palettes
+                .iter_mut()
+                .find(|p| &p.id == id)
+                .ok_or_else(|| OperationError::UnknownPalette(id.clone()))?;
             palette.colors.remove(*index);
+            let Some(next) = swap else {
+                return Ok(());
+            };
+            // 被删色此刻在文档调色板里的位置；它压根没进过文档调色板时就无事可做。
+            // 先查后 intern：被删色没上过画，这一趟就只是拆个范围，
+            // 不该顺手把接手色塞进文档调色板白白占一格。
+            let Some(dead) = doc.palette_index_of(removed) else {
+                return Ok(());
+            };
+            let slot = doc.intern_color(next).map_err(OperationError::Document)?;
+            // 只动认领了这套范围的层：别的层色板里也有同值颜色，那些像素
+            // 不属于这个范围，跟着改就是越界去动别人的画。
+            let owners: Vec<String> = doc
+                .layers
+                .iter()
+                .filter(|layer| &layer.palette_id == id)
+                .map(|layer| layer.id.clone())
+                .collect();
+            let frames: Vec<String> = doc.frames.iter().map(|frame| frame.id.clone()).collect();
+            for owner in owners {
+                for frame in &frames {
+                    // cel 不存在就跳过：新建的层可能还没画过这一帧。
+                    let Some(cel) = doc.cel_mut(&owner, frame) else {
+                        continue;
+                    };
+                    for index in cel.indices.iter_mut() {
+                        if *index == dead {
+                            *index = slot;
+                        }
+                    }
+                }
+            }
         }
         PixelOperation::SetLayerPalette { layer, palette_id } => {
             let layer_exists = doc.layers.iter().any(|l| &l.id == layer);
@@ -753,8 +913,10 @@ pub fn apply_one(doc: &mut Document, op: &PixelOperation) -> Result<(), Operatio
         } => {
             let (cw, ch) = (doc.width, doc.height);
             let cel = cel_mut(doc, layer, frame)?;
-            let x_end = (*x + *w).min(cw);
-            let y_end = (*y + *h).min(ch);
+            // 加号溢出会把区域绕回画布左上角，一整片不该擦的地方被抹掉。
+            // 超界的部分继续按老规矩夹掉，但和必须是 saturating 加法。
+            let x_end = x.saturating_add(*w).min(cw);
+            let y_end = y.saturating_add(*h).min(ch);
             for cy in *y..y_end {
                 for cx in *x..x_end {
                     cel.set(cw, cx, cy, 0);
@@ -925,6 +1087,11 @@ fn linearize(v: u8) -> f64 {
     }
 }
 
+/// 挑一个没被占用的 `{prefix}{n}`。从 0 开始扫，不接着最大编号走：
+///
+/// 删掉中间一帧之后，现有 id 是稀疏的（F0、F1、F5），取「最大值加一」
+/// 会让编号一眼看不出丢了什么，而补空位既直观又稳定。多扫两轮不花钱，
+/// id 的数量级也就几十。
 pub(crate) fn next_id(prefix: &str, existing: &[String]) -> String {
     for i in 0..existing.len() + 2 {
         let candidate = format!("{prefix}{i}");
@@ -944,6 +1111,12 @@ pub fn flood_fill(
     target: u16,
     fill: u16,
 ) {
+    if target == fill {
+        // 同色回填时 set 之后格子依然是 target，四邻会被反复压栈：
+        // 既不收敛也不报错，只把栈撑到内存吃穿。三个调用点都挡了这一种，
+        // 但这判断本身就在这个函数的语义里，不该靠调用方自觉。
+        return;
+    }
     let mut stack = vec![(sx, sy)];
     while let Some((x, y)) = stack.pop() {
         if x >= width || y >= height {
@@ -992,6 +1165,8 @@ pub fn draw_line(cel: &mut Cel, w: u32, h: u32, x0: u32, y0: u32, x1: u32, y1: u
     }
 }
 
+/// 矩形。先夹界再进内层循环：夹过的盒子一定整块落在画布里，
+/// 循环体便不必再逐个判坐标。
 #[allow(clippy::too_many_arguments)]
 pub fn draw_rect(
     cel: &mut Cel,
@@ -1026,6 +1201,8 @@ fn clamp_span(a: u32, b: u32, extent: u32) -> (u32, u32) {
     (lo.min(top), hi.min(top))
 }
 
+/// 空心椭圆靠 `|d - 1.0| < 0.35` 这道带宽判定：像素没有矢量边界，
+/// 严格等于 1 的格子几乎没有，带宽给窄了画出来是一串断点，给宽了轮廓糊成两道。
 #[allow(clippy::too_many_arguments)]
 pub fn draw_ellipse(
     cel: &mut Cel,
@@ -1086,6 +1263,21 @@ mod tests {
         assert!(l.abs() < 0.01 && a.abs() < 0.01 && b.abs() < 0.01);
     }
 
+    #[test]
+    fn flood_fill_with_the_same_color_terminates() {
+        // 同色回填会把每个格子的四邻反复压栈，栈只增不减。这个用例以前要跑
+        // 到内存耗尽，现在必须立刻返回且一个格子都不动。
+        let mut cel = Cel::new(64, 64);
+        cel.indices.iter_mut().for_each(|i| *i = 7);
+        let before = cel.indices.clone();
+        flood_fill(&mut cel, 64, 64, 10, 10, 7, 7);
+        assert_eq!(cel.indices, before);
+
+        // 换色那条路照旧生效，别被守卫顺手挡掉。
+        flood_fill(&mut cel, 64, 64, 10, 10, 7, 9);
+        assert!(cel.indices.iter().all(|i| *i == 9));
+    }
+
     /// 配色范围那一组的 id 字段必须也收 palette_id：schema 里别处一律叫
     /// palette_id，模型照着写过来时整批操作不该因为一个字段名全部失败。
     #[test]
@@ -1115,8 +1307,381 @@ mod tests {
             "index": 2
         }))
         .unwrap();
-        assert!(
-            matches!(op, PixelOperation::RemovePaletteColor { id, index } if id == "range-1" && index == 2)
+        assert!(matches!(
+            op,
+            PixelOperation::RemovePaletteColor { id, index, replacement }
+                if id == "range-1" && index == 2 && replacement.is_none()
+        ));
+    }
+
+    /// 造一套自建配色范围并接到 L0 上，返回它的 id。
+    fn custom_scope(doc: &mut Document, colors: &[&str]) -> String {
+        apply_one(
+            doc,
+            &PixelOperation::CreatePalette {
+                name: "我的范围".to_string(),
+                from: None,
+                colors: colors.iter().map(|c| c.to_string()).collect(),
+                layer: Some("L0".to_string()),
+                id: None,
+            },
+        )
+        .expect("create a custom palette");
+        doc.palettes
+            .iter()
+            .find(|p| !p.builtin)
+            .map(|p| p.id.clone())
+            .expect("the new palette is in the document")
+    }
+
+    /// 删正被自家层引用的预设：给了接盘的那一套，层先改指过去，预设才删得掉。
+    /// 少了这条路用户一套自建范围都清不掉——当前层必然在引用它。
+    #[test]
+    fn delete_palette_hands_referencing_layers_to_the_fallback() {
+        let mut doc = Document::new("alias", 16, 16).expect("16x16 within limits");
+        let mine = custom_scope(&mut doc, &["#112233"]);
+        assert_eq!(doc.layers[0].palette_id, mine);
+
+        apply_one(
+            &mut doc,
+            &PixelOperation::DeletePalette {
+                id: mine.clone(),
+                fallback: Some(crate::document::DEFAULT_PALETTE_ID.to_string()),
+            },
+        )
+        .expect("the layer moves to the fallback, then the palette goes");
+
+        assert!(doc.palettes.iter().all(|p| p.id != mine));
+        // 悬空引用会让后面的取色全部落空，接盘必须真的落上去。
+        assert_eq!(
+            doc.layers[0].palette_id,
+            crate::document::DEFAULT_PALETTE_ID
         );
+    }
+
+    /// 删预设时只改指、不把像素重归队，画面就和配色锁对不上了：
+    /// 层对外声称自己在接盘范围里，像素却仍旧指着被删掉的那套颜色。
+    /// 前端那句「像素按就近色重新归队」不是装饰，删完必须能在取色上看出来。
+    #[test]
+    fn delete_palette_snaps_the_moved_pixels_into_the_fallback_scope() {
+        let mut doc = Document::new("alias", 8, 8).expect("8x8 within limits");
+        let mine = custom_scope(&mut doc, &["#112233"]);
+        // 接盘那套不接层：这一问要的就是「层先留在旧范围上画完，再整套删掉」。
+        apply_one(
+            &mut doc,
+            &PixelOperation::CreatePalette {
+                name: "接盘".to_string(),
+                from: None,
+                colors: vec!["#445566".to_string()],
+                layer: None,
+                id: None,
+            },
+        )
+        .expect("create the handover scope");
+        let hand = doc
+            .palettes
+            .iter()
+            .rev()
+            .find(|p| !p.builtin)
+            .map(|p| p.id.clone())
+            .expect("the handover scope is in the document");
+        apply_one(
+            &mut doc,
+            &PixelOperation::SetPixels {
+                layer: "L0".into(),
+                frame: "F0".into(),
+                cells: vec![PixelCell {
+                    x: 0,
+                    y: 0,
+                    color: "#112233".into(),
+                }],
+            },
+        )
+        .expect("paint with the color the doomed scope owns");
+
+        apply_one(
+            &mut doc,
+            &PixelOperation::DeletePalette {
+                id: mine.clone(),
+                fallback: Some(hand.clone()),
+            },
+        )
+        .expect("the layer moves over, then the scope goes");
+
+        assert_eq!(doc.layers[0].palette_id, hand, "the layer moved over");
+        // 画面跟着走：那一格现在落在接盘范围里唯一的那个色上。
+        let cel = doc.cel("L0", "F0").expect("cel exists");
+        assert_eq!(
+            doc.color_of(cel.indices[0]),
+            Some(Rgba::parse_hex("#445566").expect("a valid hex")),
+            "the pixel snapped into the fallback scope instead of keeping a dead color"
+        );
+    }
+
+    /// 没给接盘那套、拿自己接盘、接盘的那套不存在，三种都得拒。
+    /// 「删得掉与否」要调用方明说，不能悄悄改别人的层。
+    #[test]
+    fn delete_palette_refuses_a_missing_self_or_unknown_fallback() {
+        let mut doc = Document::new("alias", 16, 16).expect("16x16 within limits");
+        let mine = custom_scope(&mut doc, &["#112233"]);
+        for fallback in [None, Some(mine.clone()), Some("no-such-range".to_string())] {
+            let mut probe = doc.clone();
+            let err = apply_one(
+                &mut probe,
+                &PixelOperation::DeletePalette {
+                    id: mine.clone(),
+                    fallback,
+                },
+            )
+            .expect_err("the delete must be refused");
+            assert!(probe.palettes.iter().any(|p| p.id == mine));
+            match err {
+                OperationError::PaletteInUse(..) => {}
+                OperationError::PaletteFallbackSelf => {}
+                OperationError::UnknownPalette(_) => {}
+                other => panic!("unexpected error: {other:?}"),
+            }
+        }
+    }
+
+    /// 删色带了接手色：画面上的像素跟着改写，不靠索引前移碰运气。
+    #[test]
+    fn remove_palette_color_rewrites_painted_pixels_to_the_replacement() {
+        let mut doc = Document::new("alias", 8, 8).expect("8x8 within limits");
+        let mine = custom_scope(&mut doc, &["#112233", "#445566"]);
+        apply_one(
+            &mut doc,
+            &PixelOperation::SetPixels {
+                layer: "L0".into(),
+                frame: "F0".into(),
+                cells: vec![
+                    PixelCell {
+                        x: 0,
+                        y: 0,
+                        color: "#112233".into(),
+                    },
+                    PixelCell {
+                        x: 1,
+                        y: 0,
+                        color: "#445566".into(),
+                    },
+                ],
+            },
+        )
+        .expect("paint both colors of the range");
+
+        apply_one(
+            &mut doc,
+            &PixelOperation::RemovePaletteColor {
+                id: mine.clone(),
+                index: 0,
+                replacement: Some("#445566".into()),
+            },
+        )
+        .expect("the pixels move to the replacement, then the color goes");
+
+        let palette = doc
+            .palettes
+            .iter()
+            .find(|p| p.id == mine)
+            .expect("the range is still there");
+        assert_eq!(palette.colors.len(), 1, "the removed color is gone");
+        let cel = doc.cel("L0", "F0").expect("cel exists");
+        let want = Rgba::parse_hex("#445566").expect("a valid hex");
+        for index in [0usize, 1] {
+            assert_eq!(
+                doc.color_of(cel.indices[index]),
+                Some(want),
+                "pixel {index} must have moved to the replacement"
+            );
+        }
+    }
+
+    /// 另一个层也用了同值颜色，但它不认领这套范围：不许跟着改，那是动别人的画。
+    #[test]
+    fn remove_palette_color_leaves_other_scopes_alone() {
+        let mut doc = Document::new("alias", 8, 8).expect("8x8 within limits");
+        let mine = custom_scope(&mut doc, &["#112233", "#445566"]);
+        apply_one(
+            &mut doc,
+            &PixelOperation::CreatePalette {
+                name: "另一套".to_string(),
+                from: None,
+                colors: vec!["#112233".into()],
+                layer: None,
+                id: None,
+            },
+        )
+        .expect("create a second range");
+        let other = doc
+            .palettes
+            .iter()
+            .find(|p| !p.builtin && p.id != mine)
+            .map(|p| p.id.clone())
+            .expect("the second range is in the document");
+        apply_one(
+            &mut doc,
+            &PixelOperation::CreateLayer {
+                after: None,
+                name: Some("L1".to_string()),
+                palette_id: Some(other),
+                locked: None,
+                id: None,
+            },
+        )
+        .expect("add a layer on the other range");
+        apply_one(
+            &mut doc,
+            &PixelOperation::SetPixels {
+                layer: "L0".into(),
+                frame: "F0".into(),
+                cells: vec![PixelCell {
+                    x: 0,
+                    y: 0,
+                    color: "#112233".into(),
+                }],
+            },
+        )
+        .expect("paint on the first layer");
+        apply_one(
+            &mut doc,
+            &PixelOperation::SetPixels {
+                layer: "L1".into(),
+                frame: "F0".into(),
+                cells: vec![PixelCell {
+                    x: 0,
+                    y: 0,
+                    color: "#112233".into(),
+                }],
+            },
+        )
+        .expect("paint the same color on the second layer");
+
+        apply_one(
+            &mut doc,
+            &PixelOperation::RemovePaletteColor {
+                id: mine.clone(),
+                index: 0,
+                replacement: Some("#445566".into()),
+            },
+        )
+        .expect("the removal applies");
+
+        let want = Rgba::parse_hex("#112233").expect("a valid hex");
+        assert_eq!(
+            doc.color_of(doc.cel("L1", "F0").expect("cel exists").indices[0]),
+            Some(want),
+            "the second layer does not claim this range, its pixels stay put"
+        );
+        assert_eq!(
+            doc.color_of(doc.cel("L0", "F0").expect("cel exists").indices[0]),
+            Some(Rgba::parse_hex("#445566").expect("a valid hex")),
+            "the first layer did claim it, its pixels followed the removal"
+        );
+    }
+
+    /// 接手色就是被删色本身等于什么都没改，还骗用户说删过了。
+    #[test]
+    fn remove_palette_color_rejects_the_same_color_as_replacement() {
+        let mut doc = Document::new("alias", 8, 8).expect("8x8 within limits");
+        let mine = custom_scope(&mut doc, &["#112233", "#445566"]);
+        let err = apply_one(
+            &mut doc,
+            &PixelOperation::RemovePaletteColor {
+                id: mine.clone(),
+                index: 0,
+                replacement: Some("#112233".into()),
+            },
+        )
+        .expect_err("the removed color cannot be its own replacement");
+        assert!(
+            matches!(err, OperationError::PaletteReplaceSame),
+            "got {err:?}"
+        );
+        // 报错就不留半成品：颜色还在，一个像素都没动。
+        let palette = doc
+            .palettes
+            .iter()
+            .find(|p| p.id == mine)
+            .expect("the range is still there");
+        assert_eq!(palette.colors.len(), 2);
+        assert_eq!(
+            doc.cel("L0", "F0")
+                .expect("cel exists")
+                .indices
+                .iter()
+                .sum::<u16>(),
+            0
+        );
+    }
+
+    /// 被删色没上过画时给了接手色，这一趟只该拆范围：文档调色板不能因为一次
+    /// intern 凭空多出一格——用户视角下就是「预设里莫名其妙多了一个色」。
+    #[test]
+    fn removing_an_unused_color_leaves_the_document_palette_untouched() {
+        let mut doc = Document::new("alias", 8, 8).expect("8x8 within limits");
+        let mine = custom_scope(&mut doc, &["#112233", "#445566"]);
+        let before = doc.palette.len();
+        apply_one(
+            &mut doc,
+            &PixelOperation::RemovePaletteColor {
+                id: mine,
+                index: 0,
+                replacement: Some("#aabbcc".into()),
+            },
+        )
+        .expect("replace a color nothing is drawing with yet");
+        assert_eq!(doc.palette.len(), before, "replacement color stayed out");
+        assert_eq!(
+            doc.cel("L0", "F0")
+                .expect("cel exists")
+                .indices
+                .iter()
+                .sum::<u16>(),
+            0
+        );
+    }
+
+    /// 空名字以前会被报成「未知图层/未知配色」，用户照着这句话找不到问题。
+    #[test]
+    fn empty_rename_reports_empty_name_for_both_kinds() {
+        let mut doc = Document::new("alias", 16, 16).expect("16x16 within limits");
+        apply_one(
+            &mut doc,
+            &PixelOperation::CreatePalette {
+                name: "我的范围".to_string(),
+                from: None,
+                colors: vec!["#112233".into(), "#445566".into()],
+                layer: None,
+                id: None,
+            },
+        )
+        .expect("create a custom palette");
+        let palette_id = doc
+            .palettes
+            .iter()
+            .find(|p| !p.builtin)
+            .map(|p| p.id.clone())
+            .expect("the new palette is in the document");
+
+        // 两处空名字都得落在 EmptyName 上，而不是先撞上「未知」那一类错误。
+        for op in [
+            PixelOperation::RenameLayer {
+                id: "L0".into(),
+                name: "   ".into(),
+            },
+            PixelOperation::RenamePalette {
+                id: palette_id,
+                name: String::new(),
+            },
+        ] {
+            let mut probe = doc.clone();
+            let err = apply_one(&mut probe, &op).expect_err("empty names are rejected");
+            assert!(matches!(err, OperationError::EmptyName), "got {err:?}");
+            // 整批语义同样要守住：报错的那一笔不留半成品。
+            let mut batch = doc.clone();
+            assert!(apply_batch(&mut batch, &[op]).is_err());
+            assert_eq!(format!("{batch:?}"), format!("{doc:?}"));
+        }
     }
 }

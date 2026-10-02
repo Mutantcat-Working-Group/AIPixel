@@ -3,6 +3,7 @@
 import { Tooltip } from "antd";
 
 import FrameThumb from "./FrameThumb";
+import HStrip from "./HStrip";
 import { useT } from "../lib/t";
 import type { PixelDocument } from "../lib/types";
 
@@ -27,7 +28,7 @@ export default function FramePicker({
   if (!doc) return null;
 
   return (
-    <div className="frame-picker">
+    <HStrip className="frame-picker" label={t("dock.reference_frame")}>
       {doc.frames.map((frame, index) => (
         <Tooltip
           key={frame.id}
@@ -44,6 +45,6 @@ export default function FramePicker({
           </button>
         </Tooltip>
       ))}
-    </div>
+    </HStrip>
   );
 }

@@ -145,7 +145,14 @@ pub fn classify_text(text: &str) -> (ReferenceMode, Option<String>) {
 fn hits<'a>(haystack: &str, signals: &[&'a str]) -> Vec<(usize, &'a str)> {
     let mut out: Vec<(usize, &'a str)> = Vec::new();
     for signal in signals {
-        for (at, _) in haystack.match_indices(signal) {
+        // 说法表照原样存，比对前小写一遍：判据那头拿到的必须和小写后的文本同一个世界。
+        let lowered = signal.to_lowercase();
+        for (at, _) in haystack.match_indices(&lowered) {
+            // 拉丁说法整词才算：`as is` 不该在 `canvas is` 里命中，
+            // `style` 不该在 `lifestyle` 里命中。中文没有词边界，照旧子串。
+            if !super::terms::matches_at(haystack, at, &lowered) {
+                continue;
+            }
             out.push((at, signal));
         }
     }
@@ -335,6 +342,21 @@ mod tests {
     fn the_hit_word_is_reported_so_the_node_can_show_it() {
         let (_, hit) = classify_text("按这个画风来");
         assert_eq!(hit.as_deref(), Some("画风"));
+    }
+
+    #[test]
+    fn a_latin_signal_never_rides_inside_a_bigger_word() {
+        // `as is` 钻进 `canvas is`、`style` 钻进 `lifestyle`。这两个过去都命中过，
+        // 后果是贴进来的参照图被套上「照着实临摹」——主体不许发明，画风白贴。
+        let (mode, hit) = classify_text("the canvas is empty, make it a cat");
+        assert_eq!(mode, ReferenceMode::Full);
+        assert_eq!(hit, None, "canvas is 里的 as is 不该算命中");
+        let (mode, hit) = classify_text("a lifestyle poster");
+        assert_eq!(mode, ReferenceMode::Full);
+        assert_eq!(hit, None, "lifestyle 里的 style 不该算命中");
+        // 真正的说法照旧命中，别把定性改死了。
+        assert_eq!(classify_text("use it as-is").1.as_deref(), Some("as-is"));
+        assert_eq!(classify_text("exact copy please").0, ReferenceMode::Full);
     }
 
     #[test]

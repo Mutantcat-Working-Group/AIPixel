@@ -1,7 +1,17 @@
 // Copyright (C) 2026 Mutantcat Working Group
 // SPDX-License-Identifier: GPL-3.0-only
-import { useEffect, useState } from "react";
-import { Alert, Button, Checkbox, Input, Modal, Segmented, Tag, Tooltip } from "antd";
+import { useState } from "react";
+import {
+  Alert,
+  Button,
+  Checkbox,
+  Input,
+  Popconfirm,
+  Segmented,
+  Switch,
+  Tag,
+  Tooltip,
+} from "antd";
 import { Plus, Trash2 } from "lucide-react";
 
 import { useStore } from "../lib/store";
@@ -68,12 +78,15 @@ function statusTag(server: McpServerView, t: T) {
   return <Tag>{t("mcp.offline")}</Tag>;
 }
 
-export default function McpPanel() {
+/** MCP 一整块：总闸加服务器去留。以前顶栏那个独立弹窗并进了设置，
+ *  所以草稿跟着设置弹窗一起生死——关掉设置就当没填过，下次重新开。 */
+export default function McpSection() {
   const t = useT();
-  const open = useStore((s) => s.mcpOpen);
+  const settingsOpen = useStore((s) => s.settingsOpen);
+  const enabled = useStore((s) => s.mcpEnabled);
+  const setEnabled = useStore((s) => s.setMcpEnabled);
   const servers = useStore((s) => s.mcpServers.entries);
   const busy = useStore((s) => s.mcpBusy);
-  const closeMcp = useStore((s) => s.closeMcp);
   const upsertMcpServer = useStore((s) => s.upsertMcpServer);
   const removeMcpServer = useStore((s) => s.removeMcpServer);
   const connectMcpServer = useStore((s) => s.connectMcpServer);
@@ -84,12 +97,16 @@ export default function McpPanel() {
   const [draft, setDraft] = useState<DraftShape>(EMPTY_DRAFT);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!open) {
+  // 设置窗一关就收回编辑态：settingsOpen 由真转假的那次渲染里就地收，
+  // 不进 effect——effect 体内同步 setState 会多一次提交。
+  const [openSeen, setOpenSeen] = useState(settingsOpen);
+  if (settingsOpen !== openSeen) {
+    setOpenSeen(settingsOpen);
+    if (!settingsOpen) {
       setEditing(null);
       setError(null);
     }
-  }, [open]);
+  }
 
   function startNew() {
     setError(null);
@@ -160,28 +177,23 @@ export default function McpPanel() {
   }
 
   return (
-    <Modal
-      title={t("mcp.title")}
-      open={open}
-      onCancel={closeMcp}
-      width={640}
-      className="mcp-modal"
-      footer={[
-        <Button key="close" onClick={closeMcp}>
-          {t("mcp.close")}
-        </Button>,
-        editing ? (
-          <Button key="save" type="primary" loading={busy} onClick={save}>
-            {t("mcp.save")}
-          </Button>
-        ) : null,
-      ]}
-    >
+    <section className="settings-section mcp-section">
+      <div className="settings-section-title">
+        <span>{t("settings.mcp")}</span>
+        <span className="grow section-hint">
+          {enabled ? t("settings.mcp_on") : t("settings.mcp_off")}
+        </span>
+        <Switch
+          size="small"
+          checked={enabled}
+          onChange={(next) => void setEnabled(next)}
+        />
+      </div>
+      <p className="settings-blurb">{t("settings.mcp_hint")}</p>
+
       <div className="mcp-list">
         {servers.length === 0 ? (
-          <div className="mcp-empty">
-            {t("mcp.empty")}
-          </div>
+          <div className="mcp-empty">{t("mcp.empty")}</div>
         ) : null}
         {servers.map((server) => (
           <div key={server.name} className={`mcp-row ${editing === server.name ? "active" : ""}`}>
@@ -204,25 +216,38 @@ export default function McpPanel() {
                   {t("mcp.disconnect")}
                 </Button>
               ) : (
-                <Button
-                  size="small"
-                  type="primary"
-                  disabled={busy}
-                  onClick={() => void connectMcpServer(server.name)}
-                >
-                  {t("mcp.connect")}
-                </Button>
+                <Tooltip title={enabled ? "" : t("mcp.connect_disabled")}>
+                  <Button
+                    size="small"
+                    type="primary"
+                    disabled={busy || !enabled}
+                    onClick={() => void connectMcpServer(server.name)}
+                  >
+                    {t("mcp.connect")}
+                  </Button>
+                </Tooltip>
               )}
               <Button size="small" disabled={busy} onClick={() => startEdit(server)}>
                 {t("mcp.edit")}
               </Button>
-              <Button
-                size="small"
-                danger
-                icon={<Trash2 size={13} />}
+              {/* 服务器连上之后它的工具已经进了 agent 的工具箱，删掉等于把一整套
+                  工具从流程里抽走，所以也先问一句。行内弹一下即可，不开大窗。 */}
+              <Popconfirm
+                title={t("mcp.delete_confirm", { name: server.name })}
+                okText={t("mcp.delete_ok")}
+                cancelText={t("mcp.delete_cancel")}
+                okButtonProps={{ danger: true }}
                 disabled={busy}
-                onClick={() => void removeMcpServer(server.name)}
-              />
+                onConfirm={() => void removeMcpServer(server.name)}
+              >
+                <Button
+                  size="small"
+                  danger
+                  aria-label={t("mcp.delete")}
+                  icon={<Trash2 size={13} />}
+                  disabled={busy}
+                />
+              </Popconfirm>
             </div>
             {server.last_error ? <div className="mcp-error">{server.last_error}</div> : null}
             {server.tools.length > 0 ? (
@@ -337,15 +362,16 @@ export default function McpPanel() {
             {t("mcp.auto_connect")}
           </Checkbox>
           {error ? <Alert type="error" message={error} showIcon /> : null}
-          <span className="inline-note">
-            {t("mcp.credentials_note")}
-          </span>
+          <span className="inline-note">{t("mcp.credentials_note")}</span>
           <div className="mcp-form-actions">
             <span className="grow" />
             <Button onClick={() => setEditing(null)}>{t("mcp.cancel")}</Button>
+            <Button type="primary" loading={busy} onClick={() => void save()}>
+              {t("mcp.save")}
+            </Button>
           </div>
         </div>
       ) : null}
-    </Modal>
+    </section>
   );
 }

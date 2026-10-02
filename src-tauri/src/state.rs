@@ -4,7 +4,7 @@
 //! 没有内置服务器、没有登录、没有计费；模型完全来自用户在本机填的 Provider。
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -29,6 +29,8 @@ pub struct ModelsFile {
 }
 
 impl ModelsFile {
+    /// 激活的定义；None 就是还没配模型。这里刻意不造一个默认兜底：
+    /// 「没配」是设置页要如实显示的状态，顶上来的假配置只会让人以为好了。
     fn active(&self) -> Option<&ModelConfig> {
         self.entries.iter().find(|m| m.id == self.active_id)
     }
@@ -96,6 +98,9 @@ pub struct AppState {
     /// MCP 服务器登记表：配置的唯一真相，mcp.json 只是它的落盘影子。
     mcp: Arc<McpRegistry>,
     config_dir: Mutex<PathBuf>,
+    /// 落盘串行化。三份配置共用一套「写临时文件再 rename」的路子，
+    /// 两条命令同时保存时得排队，否则两份内容会互相盖对方的临时文件。
+    save_lock: Mutex<()>,
     counter: Mutex<u64>,
 }
 
@@ -111,7 +116,23 @@ impl Default for AppState {
             // 落到「当前工作目录/models.json」，跑一遍单测就等于往仓库里写一份
             // 含 api_key 的模型配置。setup 里的 bootstrap 会立刻把它换成真目录。
             config_dir: Mutex::new(scratch_config_dir()),
+            save_lock: Mutex::new(()),
             counter: Mutex::new(0),
+        }
+    }
+}
+
+impl AppState {
+    /// 落一份配置：全程只许一条线程在里面走。
+    /// rename 本身是原子的，但「写临时文件」和「rename」之间不设防的话，
+    /// 两次相邻的保存会共用同一个 .tmp 路径，后写的那份可能把前一份盖掉再换名。
+    pub(crate) fn write_config(&self, path: &Path, text: &str, label: &str) {
+        let _guard = self
+            .save_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Err(e) = write_json_atomic(path, text) {
+            eprintln!("cannot save {label}: {e}");
         }
     }
 }
@@ -128,6 +149,62 @@ fn scratch_config_dir() -> PathBuf {
         "aipixel-scratch-{}-{nanos}-{n}",
         std::process::id()
     ))
+}
+
+/// 原子落盘：先写同目录的临时文件，再 rename 盖上去。
+///
+/// `std::fs::write` 是「开、写、关」三步。中途断电、磁盘写满、或者进程正好
+/// 在这一步被 kill，用户看到的就是一个被截断的 JSON。而 `load_models` 解析
+/// 失败就退回默认值，下一次保存又把默认值写回去——用户整份模型配置连 API Key
+/// 就这么没了，而且找不回来。同一个文件系统上的 rename 是原子的：要么旧内容
+/// 完好，要么新内容完整，不会停在中间。
+pub(crate) fn write_json_atomic(path: &Path, text: &str) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    let atomic = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, path));
+    if atomic.is_ok() {
+        return Ok(());
+    }
+    // rename 在 Windows 上会输给占用：杀软扫一下、或者用户自己拿编辑器开着
+    // 这份配置，rename 就失败，新内容独自留在 .tmp 里，而原地那份还是旧的——
+    // 用户刚才改的设置看着"存过了"，其实一个字都没进去。
+    // 退回直写目标：直写有截断风险，可那比让用户整份模型配置连 API Key
+    // 一起蒸发要好得多。
+    std::fs::write(path, text).map_err(|direct| {
+        // 直写也失败：内容只剩 .tmp 这一份，留着让人能自己捞回来。
+        eprintln!(
+            "atomic save of {} failed ({atomic:?}); direct write failed too ({direct}); the content is still in {}",
+            path.display(),
+            tmp.display()
+        );
+        direct
+    })?;
+    let _ = std::fs::remove_file(&tmp);
+    eprintln!(
+        "atomic save of {} failed ({atomic:?}); wrote the file directly",
+        path.display()
+    );
+    Ok(())
+}
+
+/// 读一份 JSON 配置；解析失败时把坏文件挪成 `.bak` 再说话。
+///
+/// 悄悄忽略坏文件是有代价的：内存里是默认值，而写回时会把它当成新内容覆盖，
+/// 那一份含 api_key 的配置就真没了。挪去 `.bak` 至少留一份，用户自己能捞。
+pub(crate) fn load_json_or_quarantine<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
+    let text = std::fs::read_to_string(path).ok()?;
+    match serde_json::from_str::<T>(&text) {
+        Ok(parsed) => Some(parsed),
+        Err(e) => {
+            let backup = path.with_extension("bak");
+            let _ = std::fs::rename(path, &backup);
+            eprintln!(
+                "{} was not readable JSON ({e}); moved it to {}",
+                path.display(),
+                backup.display()
+            );
+            None
+        }
+    }
 }
 
 impl AppState {
@@ -164,21 +241,14 @@ impl AppState {
             entries: self.mcp.configs(),
         };
         if let Ok(text) = serde_json::to_string_pretty(&file) {
-            let _ = std::fs::write(self.mcp_path(), text);
+            self.write_config(&self.mcp_path(), &text, "mcp.json");
         }
     }
 
     fn load_mcp_file(&self) -> Vec<McpServerConfig> {
-        let Ok(text) = std::fs::read_to_string(self.mcp_path()) else {
-            return Vec::new();
-        };
-        match serde_json::from_str::<McpFile>(&text) {
-            Ok(file) => file.entries,
-            Err(e) => {
-                eprintln!("mcp.json is broken, starting with no servers: {e}");
-                Vec::new()
-            }
-        }
+        load_json_or_quarantine::<McpFile>(&self.mcp_path())
+            .map(|file| file.entries)
+            .unwrap_or_default()
     }
 
     /// 开机恢复：逐条登记（校验不过的跳过），auto_connect 的再排队连。
@@ -217,11 +287,9 @@ impl AppState {
     fn load_limits(&self) {
         let path = self.limits_path();
         // 读不出来（不存在、字段错位、被手改坏）都退回默认值：护栏是兜底，
-        // 不该因为一个坏文件让整个工具起不来。
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            return;
-        };
-        let Ok(file) = serde_json::from_str::<LimitsFile>(&text) else {
+        // 不该因为一个坏文件让整个工具起不来。坏的那份会挪成 .bak 留着，
+        // 下一次保存不许把它当成新内容覆盖掉。
+        let Some(file) = load_json_or_quarantine::<LimitsFile>(&path) else {
             return;
         };
         *self
@@ -247,16 +315,12 @@ impl AppState {
             limits: snapshot,
             mcp_enabled,
         }) {
-            let _ = std::fs::write(self.limits_path(), text);
+            self.write_config(&self.limits_path(), &text, "limits.json");
         }
     }
 
     fn load_models(&self) {
-        let path = self.models_path();
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            return;
-        };
-        if let Ok(file) = serde_json::from_str::<ModelsFile>(&text) {
+        if let Some(file) = load_json_or_quarantine::<ModelsFile>(&self.models_path()) {
             *self
                 .models
                 .lock()
@@ -271,7 +335,7 @@ impl AppState {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         if let Ok(text) = serde_json::to_string_pretty(&snapshot) {
-            let _ = std::fs::write(self.models_path(), text);
+            self.write_config(&self.models_path(), &text, "models.json");
         }
     }
 
@@ -465,6 +529,9 @@ impl AppState {
         }
     }
 
+    /// 取一个会话的 Arc。刻意把克隆交出去而把 Guard 留在函数里：
+    /// 一轮对话能跑几十秒，期间「列会话」「改标题」都得能进，
+    /// 这把锁不能陪一整轮挂在那里。
     pub fn session(&self, id: &str) -> Result<Arc<AgentSession>, String> {
         self.sessions
             .lock()
@@ -515,7 +582,7 @@ impl AppState {
     }
 
     /// 建会话并按当前生效模型绑定 provider。
-    pub fn create_session(&self, document: Document) -> Arc<AgentSession> {
+    pub fn create_session(&self, document: Document, title: Option<String>) -> Arc<AgentSession> {
         let mut counter = self
             .counter
             .lock()
@@ -534,6 +601,7 @@ impl AppState {
             AgentSession::new(id.clone(), self.active_config(), document)
                 .with_mcp_registry(self.mcp.clone())
                 .with_runner_config(runner_config)
+                .with_title(title)
                 .with_order(order),
         );
         // 总开关关着就别挂：新会话从第一轮起就看不见外部工具。
@@ -585,10 +653,16 @@ impl AppState {
     }
 
     pub fn drop_session(&self, id: &str) {
-        self.sessions
+        let removed = self
+            .sessions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(id);
+        // 在跑的那一笔必须先叫停：会话从簿里消失不等于 turn 会自己收手，
+        // 少了这一步，删掉的会话还在继续烧额度，而中断按钮已经无从按起。
+        if let Some(session) = removed {
+            session.interrupt();
+        }
     }
 }
 
@@ -606,7 +680,7 @@ mod tests {
         // 默认开着：装了服务器的人不该再多一步。
         let state = AppState::default();
         assert!(state.mcp_enabled());
-        let first = state.create_session(default_document());
+        let first = state.create_session(default_document(), None);
         assert!(first.mcp_attached(), "默认状态下新会话要接外部工具");
 
         // 关掉：活着的那个当场摘掉，新来的也不再挂。
@@ -615,12 +689,16 @@ mod tests {
             !first.mcp_attached(),
             "关掉必须当轮生效，不是下个会话才生效"
         );
-        assert!(!state.create_session(default_document()).mcp_attached());
+        assert!(!state
+            .create_session(default_document(), None)
+            .mcp_attached());
 
         // 再开回来：双向都要通，否则开关只能关不能开。
         state.set_mcp_enabled(true);
         assert!(first.mcp_attached(), "重新打开要装回同一个共享注册表");
-        assert!(state.create_session(default_document()).mcp_attached());
+        assert!(state
+            .create_session(default_document(), None)
+            .mcp_attached());
     }
 
     /// 一条最小可用的模型定义：字段要全填，命令层就是这么校验的。
@@ -644,7 +722,7 @@ mod tests {
     #[test]
     fn renaming_a_model_refreshes_the_sessions_bound_to_it() {
         let state = AppState::default();
-        let session = state.create_session(default_document());
+        let session = state.create_session(default_document(), None);
 
         // 一个模型都还没配时开出来的会话：存下第一个定义就该被收编，
         // 不然侧栏一直挂着「未绑定」，用户存的模型谁也用不上。
@@ -660,6 +738,28 @@ mod tests {
         assert_eq!(live.max_tokens, Some(4096), "参数也要换成新存的那份");
     }
 
+    /// 建会话时给的名字要真的落到侧栏显示上：不填回落到编号，填了原样留着。
+    #[test]
+    fn a_session_keeps_the_name_it_was_created_with() {
+        let state = AppState::default();
+
+        // 不填：侧栏回落到编号 s1，不能塞个空名进去。
+        assert_eq!(state.create_session(default_document(), None).title(), None);
+
+        // 填了：原样留着；前后空白要去掉，不然侧栏看着像多了一截空格。
+        let named = state.create_session(default_document(), Some("  橘猫  ".into()));
+        assert_eq!(named.title().as_deref(), Some("橘猫"));
+
+        // 空白名等同没填：用户在输入框里删空了不该得到一个空名字会话。
+        assert_eq!(
+            state
+                .create_session(default_document(), Some("   ".into()))
+                .title(),
+            None,
+            "纯空白名等于没填，不是给个空标题"
+        );
+    }
+
     /// 会话正绑着的定义被删掉：落到当前生效模型上，而不是赖在「未绑定」。
     #[test]
     fn dropping_a_model_falls_its_sessions_back_to_the_active_one() {
@@ -667,7 +767,7 @@ mod tests {
         state.upsert_model(model_def("m1", "一号"), None);
         state.upsert_model(model_def("m2", "二号"), None);
         state.set_active_model("m2").unwrap();
-        let session = state.create_session(default_document());
+        let session = state.create_session(default_document(), None);
         session.rebind_provider(state.model_config("m1").unwrap());
         assert_eq!(session.model_config().id, "m1");
 
@@ -707,5 +807,95 @@ mod tests {
             "别处一改就不该把思考的意愿冲掉"
         );
         assert_eq!(live.base_url, "https://example.invalid/v2");
+    }
+
+    /// 保存要留下完整的一份：写坏的 models.json 会被读成默认值，
+    /// 下一次保存就把用户整份配置（含 api_key）覆写成空的。
+    #[test]
+    fn a_corrupt_config_file_is_quarantined_not_silently_ignored() {
+        let dir = scratch_config_dir();
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("models.json");
+        std::fs::write(&path, "{ not json at all").expect("seed a broken file");
+
+        let loaded: Option<serde_json::Value> = load_json_or_quarantine(&path);
+        assert!(loaded.is_none(), "坏文件不能当成有效配置读进来");
+        assert!(
+            dir.join("models.bak").exists(),
+            "坏文件必须留一份 .bak，否则内容连同 api_key 一起消失"
+        );
+        assert!(!path.exists(), "原位不能再留着那份坏内容");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn atomic_write_leaves_no_temporary_file_behind() {
+        let dir = scratch_config_dir();
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("models.json");
+        write_json_atomic(&path, "{\"a\":1}").expect("write");
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"a\":1}");
+        assert!(
+            !dir.join("models.tmp").exists(),
+            "临时文件必须被 rename 带走，留在目录里只会越攒越多"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// rename 输给占用（Windows 上杀软扫一下、或者用户拿编辑器开着这份配置）
+    /// 时，新内容独自留在 .tmp 里，原地那份还是旧的——用户看着"存过了"。
+    /// 这里把 .tmp 占成一个目录，让原子落盘这一步必败，验证会退回直写。
+    #[test]
+    fn a_locked_target_falls_back_to_writing_the_file_directly() {
+        let dir = scratch_config_dir();
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        std::fs::create_dir_all(dir.join("models.tmp")).expect("把 tmp 占住");
+        let path = dir.join("models.json");
+
+        write_json_atomic(&path, "{\"b\":2}").expect("退回直写后必须成功");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{\"b\":2}",
+            "配置一个字节都不许丢，那是用户的 api_key"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 两条路都走不通（目标路径本身不是文件）时，报错的同时必须把内容
+    /// 留在 .tmp 里：那只是这次保存失败，删了 tmp 就是用户永远找不回来。
+    #[test]
+    fn when_both_paths_fail_the_content_is_kept_in_the_temporary_file() {
+        let dir = scratch_config_dir();
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        std::fs::create_dir_all(dir.join("models.json")).expect("把目标占成目录");
+
+        let err = write_json_atomic(&dir.join("models.json"), "{\"c\":3}");
+        assert!(err.is_err(), "两条路都失败时必须报错，不能假装存好了");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("models.tmp")).unwrap(),
+            "{\"c\":3}",
+            "内容必须留在 .tmp 里等人来捞"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 文档从外部灌进来（前端回灌、别的进程发 JSON）时必须自洽：
+    /// 尺寸放行 u32::MAX 的话，后面一次 width*height 分配就能打死进程。
+    #[test]
+    fn an_outsized_document_from_the_frontend_is_refused() {
+        let good = Document::new("ok", 8, 8).expect("8x8 is valid");
+        assert!(good.clone().validated().is_ok());
+
+        let absurd = Document {
+            width: u32::MAX,
+            height: u32::MAX,
+            ..good
+        };
+        assert!(absurd.validated().is_err(), "u32::MAX 的宽高必须被挡在门外");
     }
 }

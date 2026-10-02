@@ -38,6 +38,18 @@ function lastEntry(entries: TranscriptEntry[]): TranscriptEntry {
   return entries[entries.length - 1];
 }
 
+/** 抽帧坞每落一帧广播一条进度，拼成真机形状免得测试和实现各说各话。 */
+function readingFrame(index: number, total: number): AgentEvent {
+  return {
+    kind: "status",
+    message: {
+      key: "status.reading_frame",
+      vars: { index, total },
+      fallback: "reading frame {index} of {total}",
+    },
+  } as AgentEvent;
+}
+
 describe("stripImageCaption", () => {
   it("drops the injected manifest but keeps the user text", () => {
     expect(stripImageCaption(CAPTION)).toBe("make a knight");
@@ -156,6 +168,25 @@ describe("reduceEvent", () => {
     expect(sealed.some((entry) => entry.kind === "pending")).toBe(false);
   });
 
+  // 发出去没等到 tool_result 就被收尾（点停止 / 拔网线）：这一条不能永远
+  // 挂着「运行中」。封口之后界面才问得出「到底跑完没有」。
+  it("seals a tool call that never got its result", () => {
+    const entries = reduceEvent([], {
+      kind: "tool_call",
+      id: "t9",
+      name: "pixel_run_shader",
+      input: {},
+    } as AgentEvent);
+
+    const live = lastEntry(entries);
+    expect(live.kind === "tool" && live.live).toBe(true);
+
+    const sealed = sealTranscript(entries);
+    const tool = sealed.find((entry) => entry.kind === "tool");
+    expect(tool?.kind === "tool" && tool.live).toBe(false);
+    expect(tool?.kind === "tool" && tool.summary).toBe(null);
+  });
+
   it("marks a failed tool result as an error and stops it being live", () => {
     let entries = reduceEvent([], {
       kind: "tool_call",
@@ -176,6 +207,58 @@ describe("reduceEvent", () => {
   });
 
   it("replaces the pending placeholder with the first real token", () => {
+    let entries = pushUserMessage([], "hi", []);
+    entries = pushPendingAssistant(entries, false);
+    expect(lastEntry(entries).kind).toBe("pending");
+    entries = reduceEvent(entries, { kind: "token", text: "On it" } as AgentEvent);
+    const last = lastEntry(entries);
+    expect(last.kind).toBe("assistant");
+    expect(last.kind === "assistant" && last.text).toBe("On it");
+    expect(last.kind === "assistant" && last.live).toBe(true);
+  });
+
+  // 中转每回合都从 call_0 / 0 重新编号，两回合的 id 一模一样。按 id 全局找
+  // 第一条的话，第二回合的结果会封到第一回合的条目上，本回合那条永远
+  // 转圈——用户看到的就是「刚发的话卡在那儿，上面的旧块还被改写了」。
+  it("pairs a tool result with the call from the same turn, not an older twin", () => {
+    let entries = pushUserMessage([], "画只猫", []);
+    entries = reduceEvent(entries, {
+      kind: "tool_call",
+      id: "call_0",
+      name: "pixel_plan",
+      input: { intent: "cat" },
+    } as AgentEvent);
+    entries = reduceEvent(entries, {
+      kind: "tool_result",
+      id: "call_0",
+      name: "pixel_plan",
+      summary: "第一回合",
+      is_error: false,
+    } as AgentEvent);
+
+    entries = pushUserMessage(entries, "再画条狗", []);
+    entries = reduceEvent(entries, {
+      kind: "tool_call",
+      id: "call_0",
+      name: "pixel_plan",
+      input: { intent: "dog" },
+    } as AgentEvent);
+    entries = reduceEvent(entries, {
+      kind: "tool_result",
+      id: "call_0",
+      name: "pixel_plan",
+      summary: "第二回合",
+      is_error: false,
+    } as AgentEvent);
+
+    const tools = entries.filter((entry) => entry.kind === "tool");
+    expect(tools).toHaveLength(2);
+    expect(tools[0]?.kind === "tool" && tools[0].summary).toBe("第一回合");
+    expect(tools[1]?.kind === "tool" && tools[1].summary).toBe("第二回合");
+    expect(tools[1]?.kind === "tool" && tools[1].live).toBe(false);
+  });
+
+  it("replaces the pending placeholder with the first token", () => {
     let entries = pushUserMessage([], "hi", []);
     entries = pushPendingAssistant(entries, false);
     expect(lastEntry(entries).kind).toBe("pending");
@@ -283,6 +366,35 @@ describe("reduceEvent", () => {
     const last = lastEntry(entries);
     expect(last.kind).toBe("notice");
     expect(last.kind === "notice" && last.text).toBe("这次请求没成（boom），正在重试 1/5");
+  });
+
+  // 抽帧一个动作播四条「正在读取第 N 帧」：不就地改写的话四条全留在历史里，
+  // 用户往回翻看到的净是中间态。位置不动、只换字，跑完只剩最后一条。
+  it("rewrites the same progress notice in place instead of stacking one per frame", () => {
+    const base = pushUserMessage([], "抽四帧", []);
+    let entries = reduceEvent(base, readingFrame(1, 4));
+    entries = reduceEvent(entries, readingFrame(2, 4));
+    entries = reduceEvent(entries, readingFrame(3, 4));
+    const notices = entries.filter((entry) => entry.kind === "notice");
+    expect(notices).toHaveLength(1);
+    const last = lastEntry(entries);
+    expect(last.kind).toBe("notice");
+    expect(last.kind === "notice" && last.text).toBe("正在读取第 3 帧，共 4 帧");
+  });
+
+  it("keeps progress notices of different keys side by side", () => {
+    const base = pushUserMessage([], "抽帧再量化", []);
+    let entries = reduceEvent(base, readingFrame(4, 4));
+    entries = reduceEvent(entries, {
+      kind: "status",
+      message: {
+        key: "status.quantizing",
+        vars: {},
+        fallback: "quantizing the generated image onto the grid",
+      },
+    } as AgentEvent);
+    const notices = entries.filter((entry) => entry.kind === "notice");
+    expect(notices).toHaveLength(2);
   });
 });
 

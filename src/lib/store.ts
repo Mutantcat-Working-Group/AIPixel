@@ -8,7 +8,7 @@ import { create } from "zustand";
 import { renderUiText, translate, type Lang, type TVARS, type TKey } from "./i18n";
 import * as bridge from "./bridge";
 import type { ExportFormat } from "./bridge";
-import { PALETTE_PRESETS, hexesOf, nearestHex, parseHex, rgbaToHex } from "./palette";
+import { PALETTE_PRESETS, nearestHex, parseHex, rgbaToHex } from "./palette";
 import {
   emptyTranscript,
   historyToTranscript,
@@ -29,6 +29,7 @@ import type {
   RecipeImportReport,
   BatchScan,
   EditorOperation,
+  DocPatch,
   DockKind,
   DockDraft,
   ImageGenParams,
@@ -74,6 +75,8 @@ import {
   type BatchRun,
 } from "./batch";
 
+import { MAX_STACKED_PRESETS, normalizePresetStack, uniquePresetIds } from "./presets";
+
 /**
  * 内置配色范围的界面镜像，色值与 Rust 的 `builtin_palettes()` 逐字一致。
  * id 也照抄：图层认领用的是同一套 id，两边对不上就指不到地方。
@@ -96,6 +99,12 @@ export interface DocumentSnapshot {
   pngUrl: string | null;
   /** 已经渲染过 PNG 的 revision，用来丢弃过期的异步结果。 */
   pngRevision: number;
+  /**
+   * pngUrl 到底属于哪一帧。切帧时帧层是同步重画的，而权威 PNG 要等后端一趟
+   * 往返；这期间旧的 PNG 还挂在 <img> 上，和新帧层叠在一起就是一张花脸。
+   * 帧号对不上就让权威图让位，等新的回来再出场。-1 表示手上没有图。
+   */
+  pngFrame: number;
   frameIndex: number;
 }
 
@@ -184,9 +193,10 @@ interface StoreState extends DocumentSnapshot, WorkflowState, BatchState {
   pendingFrameIndex: number | null;
   /** 编辑器自己的改动快照，最新一版在栈顶。模型改动不进栈。 */
   undoStack: PixelDocument[];
+  /** 撤销过又还没被新改动作废的快照。空表示没有可重做的一步。 */
+  redoStack: PixelDocument[];
   notice: { text: string; isError: boolean } | null;
   settingsOpen: boolean;
-  mcpOpen: boolean;
   /** 连接/保存进行中：期间按钮全灭，防止连点把服务器打爆。 */
   mcpBusy: boolean;
   /** 界面语言。默认中文，用户可在设置里改成英语；只影响这一层，不回灌 Rust。 */
@@ -197,18 +207,30 @@ interface StoreState extends DocumentSnapshot, WorkflowState, BatchState {
   mcpEnabled: boolean;
   /** 设置弹窗停在哪一页：模型 / 行为护栏 / 关于。 */
   settingsTab: SettingsTab;
+  /** 会话输入区里钉住的画风 id；null = 让模型按这句话自己判断。
+  *  只在发消息那一刻读一次，不进会话状态——它是「这一句的偏好」，不是会话属性。 */
+  styleOverride: string | null;
+  /** 会话输入区里点的内置提示词预设 id 集合（写实渲染、微细结构…）；空 = 不限。
+   *  与画风那柄同等级、同寿命：同样只在这一句上生效，同样不进会话状态。
+   *  分管另一半——画风钉色数和描边，预设讲这张图按什么规矩收尾。
+   *  能叠几条（上限 `presets.ts` 的 MAX_STACKED_PRESETS）：细节这件事是乘法，
+   *  「写实渲染」管整张图按什么规矩收尾，「微细结构」管最后一两个像素放哪里，
+   *  两条一起才凑得成一张写实的图。 */
+  presetOverrides: string[];
   /** 工具块展开状态，按工具调用 id 记。跨会话重载也不丢：用户摊开的 JSON 不该
    * 因为切走再回来就自己合上。 */
   toolOpen: Record<string, boolean>;
 }
 
 export interface StoreActions {
+  setStyleOverride: (style: string | null) => void;
+  setPresetOverrides: (presets: string[]) => void;
   /** 摊开/收起某条工具调用；autoOpen 是这一条的默认姿态（分流节点默认摊开）。 */
   toggleToolOpen: (id: string, autoOpen: boolean) => void;
   boot: () => Promise<void>;
   setLang: (lang: Lang) => void;
   selectSession: (id: string) => Promise<void>;
-  createSession: (width?: number, height?: number) => Promise<void>;
+  createSession: (width?: number, height?: number, title?: string) => Promise<void>;
   removeSession: (id: string) => Promise<void>;
   /** 改侧边栏显示名。空白名 Rust 当取消处理。 */
   renameSession: (id: string, title: string) => Promise<void>;
@@ -237,8 +259,6 @@ export interface StoreActions {
     protocol: Protocol;
   }) => Promise<string[]>;
   refreshMcp: () => Promise<void>;
-  openMcp: () => void;
-  closeMcp: () => void;
   /** 读一次 MCP 总开关。 */
   refreshMcpEnabled: () => Promise<void>;
   /** 开/关 MCP。Rust 当场作用到活着的会话，回值才是生效的那份。 */
@@ -263,7 +283,8 @@ export interface StoreActions {
   setActiveLayer: (layerId: string) => void;
   setActiveFrame: (index: number) => void;
   setActiveColor: (color: string | null) => void;
-  refreshDocument: () => Promise<void>;
+  /** 重拉整份文档；刚导入过外来文件时传 authoritative，让低号文档也能盖掉本地。 */
+  refreshDocument: (authoritative?: boolean) => Promise<void>;
   syncSelection: () => Promise<void>;
   refreshPng: () => Promise<void>;
   refreshSessions: () => Promise<void>;
@@ -322,12 +343,14 @@ export interface StoreActions {
   /** 从零起一套；不给名字就沿用 Rust 的兜底命名。 */
     createPalette: (name: string, colors: string[], layerId?: string) => Promise<void>;
   /** 删掉一套自定义范围。内置的、还被引用的，Rust 会拒。 */
-  deletePalette: (id: string) => Promise<void>;
+  /** 删一套配色范围。有层在引用时带 fallback：那些层先改指过去再删。 */
+  deletePalette: (id: string, fallback?: string | null) => Promise<void>;
   renamePalette: (id: string, name: string) => Promise<void>;
   /** 往范围里添一个颜色。已经有这个色就当无事发生。 */
   addPaletteColor: (id: string, color: string) => Promise<void>;
   /** 从范围里拿掉一个颜色；画面不动，只是以后不许再用了。 */
-  removePaletteColor: (id: string, index: number) => Promise<void>;
+  /** 删范围里的一个颜色。带 replacement 时画面上用了它的像素跟着改写过去。 */
+  removePaletteColor: (id: string, index: number, replacement?: string | null) => Promise<void>;
   /** 把某一层指到另一套范围上；这一层的像素就地收进新范围。 */
   setLayerPalette: (layerId: string, paletteId: string) => Promise<void>;
   /** 配色锁。锁上=只许用范围内的颜色，AI 也不能越界。 */
@@ -352,6 +375,8 @@ export interface StoreActions {
   moveLayer: (delta: number) => Promise<void>;
   /** 回退一步编辑器改动：撤销栈见底就什么都不做。 */
   undoEdit: () => Promise<void>;
+  /** 把撤销掉的画面找回来：重做栈见底就什么都不做。 */
+  redoEdit: () => Promise<void>;
   /** 改画布宽高：左上角锚定，原有像素留住，新区域透明。 */
   resizeCanvas: (width: number, height: number) => Promise<void>;
   /** 换批量种类。旧扫描立马作废：素材类型和语义都变了，留着只会误导。 */
@@ -515,6 +540,11 @@ function workflowError(error: unknown): string {
 }
 
 let unlisten: (() => void) | null = null;
+/**
+ * 撤销/重做排队链：同一时刻只跑一档「把整份文档拍回后端」。
+ * 定义在模块级而不是 store 里，是为了切会话、重开窗口也共用同一条链。
+ */
+let restoreChain: Promise<unknown> = Promise.resolve();
 // 批量跑在独立通道上，与 agent-event 各听一条，互不打扰。
 let batchUnlisten: (() => void) | null = null;
 let booting: Promise<void> | null = null;
@@ -523,18 +553,73 @@ let snapshotSeq = 0;
 /** 撤销栈上限：再老的笔触就别指望了，省得内存和「撤销到天边」一起失控。 */
 const UNDO_LIMIT = 40;
 /**
- * 下一次 document_updated 若是编辑器自己触发的，就把改前的文档压进撤销栈。
- * 为什么不让模型改动也进栈：一轮 agent 跑下来事件几十条，会把这些笔触挤没。
+ * 撤销栈的字节预算。快照存的是整个文档（number[] 索引网格，约 4 字节/格），
+ * 一张 1024x1024、30 层 60 帧的怪物画布单份就要 256MB，40 份能把内存吃到 10GB，
+ * 不拦就是 OOM 崩溃。低于预算时照旧保留满 40 步，只有真的大文档才自动少存几份，
+ * 最少也留 1 步——一步都没有的话整个撤销就废了。
  */
-let undoCapture = false;
+const UNDO_BYTE_BUDGET = 256 * 1024 * 1024;
 /**
- * 松手失败就缴械。armed 是「下一次 document_updated 属于编辑器」的约定，
- * 可这一步没成功（Rust 拒了 ops、链路断了）时 document_updated 永远不会来，
- * 旗子就一直悬着：下一个到达的 document_updated 会把它当成编辑器改动吃掉，
- * 把模型的改动塞进撤销栈，用户自己随后那一下笔反而没了撤销。
+ * 预算读数口子。做成可变对象是给测试留的缝：把额度一压，用小文档就能验
+ * 「超预算先丢最老、至少留一步」这套裁剪，不必真造几百 MB 的数组。
  */
-function disarmUndoCapture() {
-  undoCapture = false;
+export const undoBudget = { bytes: UNDO_BYTE_BUDGET };
+
+/** 文档体积的备忘：同一份快照会被反复估算（每压一次栈就全量过一遍），不可变，可放心缓存。 */
+const docBytesCache = new WeakMap<PixelDocument, number>();
+
+function estimateDocBytes(doc: PixelDocument): number {
+  const cached = docBytesCache.get(doc);
+  if (cached !== undefined) return cached;
+  let cells = 0;
+  for (const frames of Object.values(doc.cels)) {
+    for (const cel of Object.values(frames)) cells += cel.indices.length;
+  }
+  const bytes = cells * 4;
+  docBytesCache.set(doc, bytes);
+  return bytes;
+}
+/**
+ * 一次成功的编辑器改动落下的两笔账：改前的文档进撤销栈，重做栈作废。
+ * 为什么不让模型改动也进栈：一轮 agent 跑下来事件几十条，会把这些笔触挤没。
+ *
+ * 记账点选在这一次 invoke 的落点，不在 document_updated 里认领：模型那边
+ * 随时也在广播 document_updated，插在这一笔来回之间的那条会被旗子当成用户
+ * 笔触吃掉——用户这一下笔白撤，模型的改动还占一格。快照在调用前取，
+ * 谁先广播都不影响它记的是「动手之前」。
+ */
+function recordUndo(state: StoreState, before: PixelDocument): Partial<StoreState> {
+  return {
+    undoStack: pushDocStack(state.undoStack, before),
+    redoStack: [],
+  };
+}
+
+/**
+ * 落空时把上一笔账退回去：撤销栈顶如果还是这一笔就摘掉，重做栈还原成动手之前。
+ * 不然一次点空的画笔也会白吃一步撤销，还把本来能重做的那步一起作废。
+ */
+function rollbackUndo(before: PixelDocument, redoBefore: PixelDocument[]): Partial<StoreState> {
+  const stack = useStore.getState().undoStack;
+  if (stack[stack.length - 1] !== before) return {};
+  return { undoStack: stack.slice(0, -1), redoStack: redoBefore };
+}
+
+/**
+ * 跑一次会改画布的编辑器动作：先把改前文档记进撤销栈，落空再把账退回去。
+ * before 为空说明文档快照还没到手（刚开会话、正在切换），这账记不了，
+ * 但动作照跑——后端手上的画布未必是空的。
+ */
+async function withCanvasUndo<T>(before: PixelDocument | null, run: () => Promise<T>): Promise<T> {
+  if (!before) return run();
+  const redoBefore = useStore.getState().redoStack;
+  useStore.setState(recordUndo(useStore.getState(), before));
+  try {
+    return await run();
+  } catch (error) {
+    useStore.setState(rollbackUndo(before, redoBefore));
+    throw error;
+  }
 }
 
 /**
@@ -557,14 +642,39 @@ let stallTimer: ReturnType<typeof setTimeout> | null = null;
  */
 let loadSeq = 0;
 
-function pushUndo(stack: PixelDocument[], doc: PixelDocument): PixelDocument[] {
+/** 文档快照栈统一往栈尾压一份，超限就丢最老的那份。 */
+function pushDocStack(stack: PixelDocument[], doc: PixelDocument): PixelDocument[] {
   const next = [...stack, doc];
-  return next.length > UNDO_LIMIT ? next.slice(next.length - UNDO_LIMIT) : next;
+  const byCount = next.length > UNDO_LIMIT ? next.slice(next.length - UNDO_LIMIT) : next;
+  let drop = 0;
+  let bytes = byCount.reduce((sum, entry) => sum + estimateDocBytes(entry), 0);
+  while (byCount.length - drop > 1 && bytes > undoBudget.bytes) {
+    bytes -= estimateDocBytes(byCount[drop]);
+    drop += 1;
+  }
+  return drop > 0 ? byCount.slice(drop) : byCount;
 }
 
 export const useStore = create<StoreState & StoreActions>()((setState, getState) => {
   /**
-   * 回合级失败：发通知、封口占位节点、把 running 收掉。
+   * 撤销/重做的串行闸门。
+   *
+   * 连点两下撤销时，第二次会在第一次的 sync_document 还没落地时就把「动手之前」
+   * 的当前文档又压一遍重做栈，而那两份 IPC 并发，谁后到就把文档定成谁：两步撤销
+   * 可能只退一步，重做栈里还多出一份重复的当前文档，重做一下就越过了中间态。
+   * 排队之后每一档都等前一档真落地，栈里的账和画布才一一对得上。
+   */
+  const queueRestore = <T,>(task: () => Promise<T>): Promise<T> => {
+    const settled = restoreChain.then(task, task);
+    restoreChain = settled.then(
+      () => undefined,
+      () => undefined,
+    );
+    return settled;
+  };
+
+  /**
+  * 回合级失败：发通知、封口占位节点、把 running 收掉。
    *
    * 只有「这一回合确实走不下去」时才走这里——目前就是发送入口那两处：没会话可发、
    * 消息没能递到 agent。其余一律走 flagKey。
@@ -636,31 +746,106 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     }, STALL_MS);
   }
 
-  /** document_updated 的统一落点：文档、撤销栈、帧选择意图一起结算。 */
+  /** 等这一回合把占用交回来。
+   *
+   * 中断不是一句话就生效的：Rust 那边要走完手头那个检查点才收手（在途请求卡住时
+   * 也在百来毫秒内，读流那个循环每 120ms 轮一次取消标志）。这期间 `running` 还是
+   * 真，后端的回合占用也还压在上一轮手上——这时候紧跟着发新消息，只会得到一句
+   * 「这个会话还在忙」，用户看到的就是「点了重试原地不动」。
+   *
+   * 订阅而不是轮询：收尾事件一到就放手，不用白等。等不到也不死等，超时返回假，
+   * 由调用方决定是把丑话说清楚还是硬发。 */
+  function waitForTurnRelease(timeoutMs = 8000): Promise<boolean> {
+    if (!getState().running) return Promise.resolve(true);
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      let unsub = () => {};
+      const finish = (released: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        unsub();
+        resolve(released);
+      };
+      const timer = setTimeout(() => finish(false), timeoutMs);
+      unsub = useStore.subscribe((state) => {
+        if (!state.running) finish(true);
+      });
+    });
+  }
+
+  /** 把增量合并进本地那份完整文档。没动过的 cel 保持引用，不深拷。
+   *
+   * 必须和 Rust 侧 `DocPatch::apply` 一步步对齐：漏掉 dropped 会让删掉的图层
+   * 在界面上复活，漏掉 cels 会让改过的画面永远停在旧像素。第一次广播是全量，
+   * `current` 是 null 也照合——cels 全由 patch 带上。
+   *
+   * 顺手按元数据把门管死：cel 只许长在 patch 带着的层与帧里。dropped 漏报一次
+   * （事件桥还没挂上监听、窗口藏起来那一阵丢包都可能），光靠 dropped 就再也
+   * 补不回来，而层号帧号是会复用的——下一次 create_layer 拿回 "L0" 时，那一层
+   * 旧像素就跟着新层一起显形了。 */
+  function mergePatch(current: PixelDocument | null, patch: DocPatch): PixelDocument {
+    const liveLayers = new Set(patch.layers.map((layer) => layer.id));
+    const liveFrames = new Set(patch.frames.map((frame) => frame.id));
+    const cels: PixelDocument["cels"] = {};
+    for (const [layerId, frames] of Object.entries(current?.cels ?? {})) {
+      if (!liveLayers.has(layerId)) continue;
+      const kept: PixelDocument["cels"][string] = {};
+      for (const [frameId, cel] of Object.entries(frames)) {
+        if (liveFrames.has(frameId)) kept[frameId] = cel;
+      }
+      cels[layerId] = kept;
+    }
+    for (const [layerId, frameId] of patch.dropped) {
+      const frames = cels[layerId];
+      if (frames) delete frames[frameId];
+    }
+    for (const [layerId, frameId, indices] of patch.cels) {
+      (cels[layerId] ??= {})[frameId] = { indices };
+    }
+    return {
+      name: patch.name,
+      width: patch.width,
+      height: patch.height,
+      palette: patch.palette,
+      layers: patch.layers,
+      frames: patch.frames,
+      cels,
+      palettes: patch.palettes,
+      revision: patch.revision,
+    };
+  }
+
+  /** document_updated 的统一落点：文档、帧选择意图、选色归队一起结算。 */
   function applyDocument(
-    document: PixelDocument,
+    patch: DocPatch,
     revision: number,
     frameHint: number | null,
   ) {
     const state = getState();
-    const stale = revision < state.pngRevision;
+    const document = mergePatch(state.document, patch);
     const next: Partial<StoreState> = {
-      document,
-      revision,
-      // 撤销栈只吃编辑器自己那次改动前的快照，见 undoCapture 的说明。
-      undoStack:
-        undoCapture && state.document
-          ? pushUndo(state.undoStack, state.document)
-          : state.undoStack,
-      pendingFrameIndex: null,
-      pngRevision: stale ? state.pngRevision : revision,
+    document,
+    revision,
+    pendingFrameIndex: null,
+    pngRevision: revision,
     };
+    // revision 往回走是正常事：撤销把整份旧文档拍回后端，计数器跟着退回旧号，
+    // 导入 .aip 更是直接换一份低号文档。而 patch 从来不是「第 N 版全量」，是
+    // 「相对上一次广播」的增量，所以号再小也得照合——丢掉它，后端基线已经推进
+    // 过去，这一笔就永远补不回来了。
+    // 过期异步渲染的去重也不归这儿管：那由 refreshPng 自己按 revision 认领。
+    // 原来那把「号小就不更新 pngRevision」的锁，只会让它一直停在比文档高的
+    // 位置，之后每份增量都被误判成过期，纯属自己给自己埋雷。
     // 调色板就是配色范围：选中的色不在新调色板里，就近挪进去。
     // 不挪的话画笔会按字面量把色 intern 进调色板，用户挑的范围就悄悄失守了。
+    // 归队的候选是「当前层的配色范围」，不是文档自带的那份基础调色板：
+    // 各层的范围各自独立，拿基础调色板去就近，归回来的色很可能压根不在本层
+    // 范围里，配色锁等于对模型这一回合的改动敞开着。
     let active = state.active;
     // color 是可选的：null 与「没选过」在这里都是一个意思，都就近归队。
     if (active.color != null) {
-      const snapped = nearestHex(hexesOf(document), active.color);
+      const snapped = nearestHex(layerScopeColors(document, active.layer), active.color);
       if (snapped !== null && snapped !== active.color) active = { ...active, color: snapped };
     } else {
       // 从没选过色：给笔尖顶上第一个色，别让画笔以「擦除」的形态开工。
@@ -673,7 +858,6 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       next.frameIndex = index;
       if (frame) active = { ...active, frame: frame.id };
     }
-    undoCapture = false;
     // 选色被就近挪过、或者结构操作换了帧：都得让 Rust 侧的 active 跟上，
     // 不然模型的下一步编辑还落在旧的选中上。
     const activeChanged =
@@ -686,6 +870,43 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       if (id) syncActive(id, active);
     }
     void getState().refreshPng();
+  }
+
+  /**
+   * 把一份整文档拍回当前画布。
+   * sync_document 只落在后端：它既不广播 document_updated，也不换预览地址，
+   * 所以文档、revision、帧选择、预览图都得自己推——漏一个界面就和后端两张皮。
+   *
+   * 已知语义（有意不加锁）：这里的 revision 用的是快照里那个旧号，比后端
+   * 计数器小。模型那一回合要是刚好在这之后广播 document_updated，它的 patch
+   * 会叠在这份被拍回的文档上——撤销只撤掉"用户动手之前"的状态，
+   * 撤不掉模型并行写进去的东西。想让它看得见，得上一个"这一笔没撤掉"的提示，
+   * 而不是把撤销通道和模型通道用锁串起来：那会让模型一次普通的画完
+   * 就顶掉用户连着点的好几步撤销。
+   */
+  async function restoreDocument(id: string, target: PixelDocument) {
+    await bridge.syncDocument(id, target);
+    const frameIndex = Math.max(0, Math.min(getState().frameIndex, target.frames.length - 1));
+    const frame = target.frames[frameIndex];
+    // 帧号可能是被夹过来的：撤销回到一份帧数更少的快照时，手里那个帧名
+    // 已经不在新文档里。后端的 sync_document 只在选中「不存在」时才修，
+    // 而这里换成的帧名在新文档里是存在的——两边就此指向不同的帧，
+    // 模型下一步的工具调用就落到用户没在看的那个帧上。层同理。
+    // 所以拍回之后要把选中原样回传，和 setActiveFrame / selectSession 一个规矩。
+    const previous = getState().active;
+    const layer = target.layers.some((one) => one.id === previous.layer)
+      ? previous.layer
+      : (target.layers[0]?.id ?? previous.layer);
+    const active = frame ? { ...previous, layer, frame: frame.id } : previous;
+    setState({
+      document: target,
+      revision: target.revision,
+      pngRevision: target.revision,
+      frameIndex,
+      active,
+    });
+    syncActive(id, active);
+    await getState().refreshPng();
   }
 
   /** agent-event 路由：文档事件驱动画布，其余折叠进对话条目。 */
@@ -709,7 +930,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         return;
       }
       if (raw.kind === "document_updated") {
-        applyDocument(raw.document, raw.revision, state.pendingFrameIndex);
+        applyDocument(raw.patch, raw.revision, state.pendingFrameIndex);
         return;
       }
       if (raw.kind === "completed" || raw.kind === "error" || raw.kind === "interrupted") {
@@ -767,8 +988,13 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
    * 必须在等新文档之前就撤掉。不撤的话，新文档还在半路上，画布里挂的仍是
    * 上一条会话的像素——用户点进来先看见一幅画，再看着它变成另一幅。
    */
-  async function loadDocument(id: string, switching = false) {
-    const seq = (loadSeq += 1);
+  /**
+   * @param authoritative 快照是否无条件盖掉本地文档。
+   * 只有「刚往后端灌过一份外来文档」时才为真（导入 .aip）：那份文档的 revision
+   * 比本地旧，但它就是要取而代之。
+   */
+  async function loadDocument(id: string, switching = false, authoritative = false) {
+   const seq = (loadSeq += 1);
     // 换会话就把工作流面板的中间产物倒掉：上一条会话的提示词不属于这一条。
     setState({
       refined: null,
@@ -781,6 +1007,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       refinedDraft: "",
       // 撤销栈是当前会话的笔迹，换会话不跟着走；挂着的审批同理。
       undoStack: [],
+      redoStack: [],
       pendingApproval: null,
       pendingFrameIndex: null,
     });
@@ -788,6 +1015,9 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       // revision 一起归零：会话之间的 revision 没有可比性，带着旧值会让
       // 后续 document_updated 被 `revision < pngRevision` 误判成过期事件。
       setState({ document: null, revision: 0, pngRevision: -1, pngUrl: null });
+      // 会话一换，旧图连「属于哪一帧」都不算数了：留着会让新会话第一眼
+      // 拿上一幅画顶着，直到 refreshPng 那趟往返回来。
+      setState({ pngFrame: -1 });
     }
     try {
       const messages = await bridge.agentHistory(id);
@@ -798,6 +1028,11 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     }
     const snapshot = await bridge.documentSnapshot(id);
     if (seq !== loadSeq) return;
+    // 快照还在半路上时模型可能又画了一笔：那条 document_updated 早已并进本地文档，
+    // 而快照是它之前的状态。照单全收就把刚画上去的东西从本地抹掉，而后端广播基线
+    // 已经推进过去，那一笔再也不会补发——用户看到的就是「模型说画完了，画布没动」。
+    // 按 revision 认领，谁新留谁；导入 .aip 那一路是主动换文档，不受这条约束。
+    if (!authoritative && snapshot.revision < getState().revision) return;
     setState({
       document: snapshot.document,
       revision: snapshot.revision,
@@ -827,6 +1062,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     revision: 0,
     pngUrl: null,
     pngRevision: -1,
+    pngFrame: -1,
     frameIndex: 0,
     entries: emptyTranscript(),
     running: false,
@@ -842,10 +1078,10 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     pendingApproval: null,
     pendingFrameIndex: null,
     undoStack: [],
+    redoStack: [],
     notice: null,
     settingsOpen: false,
     mcpServers: EMPTY_MCP,
-    mcpOpen: false,
     mcpBusy: false,
     loopLimits: null,
     workflows: [],
@@ -866,6 +1102,8 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     // MCP 默认开着：关掉要在设置里明确按一下，而不是因为一次读失败悄悄消失。
     mcpEnabled: true,
     settingsTab: "models",
+    styleOverride: null,
+    presetOverrides: [],
     toolOpen: {},
     recipe: DEFAULT_BATCH_RECIPE,
     scan: null,
@@ -914,15 +1152,15 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         } catch (error) {
           flagKey("store.read_sessions_failed", { error: String(error) });
         }
-        if (sessions.length === 0) {
-          const created = await bridge.createSession();
-          sessions = [created];
-        }
         sessions = sortSessions(sessions);
         const first = sessions[sessions.length - 1];
         if (first) {
           setState({ sessions, activeId: first.id });
           await loadDocument(first.id);
+        } else {
+          // 一条都没有就空着。「当前没有会话，您可以创建」是个正常状态，
+          // 开机悄悄补一个的话，侧栏里永远躺着个没打开过的 s1。
+          setState({ sessions: [], activeId: null, document: null });
         }
         setState({ booted: true });
       })();
@@ -954,9 +1192,10 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     await getState().refreshSessions();
   },
 
-    createSession: async (width, height) => {
+    createSession: async (width, height, title) => {
       const document = width && height ? blankDocument(width, height) : undefined;
-      const info = await bridge.createSession(document);
+      // 空字符串当没填：用户清空输入框不该得到一个空名会话。
+      const info = await bridge.createSession(document, (title ?? "").trim() || null);
       setState({
         // 新会话按顺序位追加：Rust 会把它的 order 排在已有会话之后。
         sessions: sortSessions([...getState().sessions, info]),
@@ -969,24 +1208,56 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         usage: null,
         lastQuery: null,
         attachments: [],
-      frameIndex: 0,
+        frameIndex: 0,
     });
       await loadDocument(info.id, true);
-      // 只有从尺寸弹窗进来的才告知：删掉最后一个会话时那次自动补建不该吵用户。
+      // 只有从尺寸弹窗进来的才告知：别的方式来这儿就安静建，不刷通知。
       if (width && height) {
         noteKey("sidebar.created_hint", { width: info.width, height: info.height });
       }
     },
 
     removeSession: async (id) => {
-      await bridge.dropSession(id);
+      try {
+        await bridge.dropSession(id);
+      } catch (error) {
+        // Rust 那头没删成：会话还在盘上。消息必须给用户看见，不然点了「删除」
+        // 什么也没发生，只会以为界面卡了。往上抛，好让确认弹窗停在原处等下一回。
+        flagKey("store.drop_session_failed", { error: String(error) });
+        throw error;
+      }
       const rest = getState().sessions.filter((s) => s.id !== id);
       setState({ sessions: rest });
       if (getState().activeId === id) {
         if (rest.length > 0) {
           await getState().selectSession(rest[rest.length - 1].id);
         } else {
-          await getState().createSession();
+          // 最后一个也删了：停在「当前没有会话」，不悄悄补一个顶数。
+          setState({
+            activeId: null,
+            document: null,
+            entries: emptyTranscript(),
+            running: false,
+            runStartedAt: null,
+            runElapsedMs: null,
+            stalled: false,
+            usage: null,
+          lastQuery: null,
+          attachments: [],
+          pngUrl: null,
+          revision: 0,
+          pngRevision: -1,
+          pngFrame: -1,
+          frameIndex: 0,
+          pendingFrameIndex: null,
+          busy: false,
+          undoStack: [],
+          redoStack: [],
+          pendingApproval: null,
+        });
+        // running 一收，静默计时也得当场撤。留着的话它过半小时自己响，
+        // 在没有会话的空界面上弹一条「模型好像卡住了」。
+        clearStallWatch();
         }
       }
     },
@@ -1039,6 +1310,17 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       const trimmed = text.trim();
       const attachments = getState().attachments;
       if (!trimmed && attachments.length === 0) return;
+      // 上一轮还赖着：先收掉再发。用户在停顿横幅上点重试、或者直接回车再发
+      // 一句，走的是同一条路。不收的话 Rust 的回合占用压在上一轮手上，这句话
+      // 过去只会撞「这个会话还在忙」，界面看着就是按了没反应。
+      if (getState().running) {
+        await getState().interrupt();
+        if (!(await waitForTurnRelease())) {
+          // 等不到也把话说清楚：占位气泡一个都不画，别在对话里留一堆重复消息。
+          failKey("agent.busy");
+          return;
+        }
+      }
       const payload: Attachment[] = attachments.map((a) => ({
         role: a.role,
         media_type: a.mediaType,
@@ -1064,10 +1346,23 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         notice: null,
       });
       // 从这一刻起盯着静默：路上一个事件都不来的话，界面上会出现「可能卡住了」。
-      touchStallWatch();
-      try {
-        await bridge.sendMessage(id, trimmed, payload);
-      } catch (error) {
+    touchStallWatch();
+    try {
+      // 风格锁定跟着这一句走：用户在输入区钉了画风，模型这一回合就得按它画，
+      // 话里没提也不能改主意。
+      // 预设同理，且是几条一起走：点了「写实渲染 + 微细结构 + 闭塞接触」，
+      // 这一句就照这三条规矩收尾。两者都是「这一句的偏好」，一起送过去，
+      // Rust 那侧按先让位、再顶替的顺序拼进提示词——画风在时色数听画风的，
+      // 其余收尾规矩照常上路；与画风 id 重合的那条由画风段顶替，不发两遍。
+      await bridge.sendMessage(
+        id,
+        trimmed,
+        payload,
+        undefined,
+        getState().styleOverride,
+        getState().presetOverrides,
+      );
+    } catch (error) {
         clearStallWatch();
         failKey("store.send_failed", { error: String(error) });
       }
@@ -1159,10 +1454,6 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       }
     },
 
-    openMcp: () => setState({ mcpOpen: true }),
-
-    closeMcp: () => setState({ mcpOpen: false }),
-
     refreshMcpEnabled: async () => {
       try {
         setState({ mcpEnabled: await bridge.mcpEnabled() });
@@ -1222,6 +1513,8 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         setState({ mcpServers: await bridge.upsertMcpServer(config) });
       } catch (error) {
         flagKey("store.save_mcp_failed", { error: String(error) });
+        // 必须往外抛：表单要靠这个失败把编辑态留住，不然关了窗用户以为存上了。
+        throw error;
       } finally {
         setState({ mcpBusy: false });
       }
@@ -1352,10 +1645,10 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       syncActive(id, active);
     },
 
-    refreshDocument: async () => {
+    refreshDocument: async (authoritative = false) => {
       const id = getState().activeId;
       if (!id) return;
-      await loadDocument(id);
+      await loadDocument(id, false, authoritative);
       await getState().refreshSessions();
     },
 
@@ -1405,7 +1698,9 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         // 第 0 帧也必须显式带上：后端收到 None 会把所有帧横向铺开，
         // 画布里就会出现一条被拉长的帧序列。
         const url = await bridge.pngUrl(id, frameIndex);
-        if (getState().revision === requested) setState({ pngUrl: url });
+        // 帧号跟着图一起落库：切帧的瞬间帧层已经画上新的一帧，而这张图还是
+        // 旧帧的，两层叠着就是花脸。记下来，界面照着把旧图请下去。
+        if (getState().revision === requested) setState({ pngUrl: url, pngFrame: frameIndex });
       } catch (error) {
         flagKey("store.render_failed", { error: String(error) });
       }
@@ -1416,12 +1711,20 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       if (!id) return;
       setState({ busy: true });
       try {
-      const document = await bridge.aipLoad(path);
-      await bridge.syncDocument(id, document);
-      // 新文档和旧笔迹无关，撤销栈清空；否则一撤销就退回上一个文件。
-      setState({ undoStack: [], pendingFrameIndex: null });
-      noteKey("store.loaded", { name: baseName(path) });
-        await getState().refreshDocument();
+        const document = await bridge.aipLoad(path);
+        // 文件解析还在半路上用户切了会话：这份文档是照着打开时那条会话
+        // 弄来的，这时候灌进去等于拿它覆盖现在这条画布。原样撤掉，招呼一声。
+        if (getState().activeId !== id) {
+          flagKey("store.open_aip_switched");
+          return;
+        }
+        await bridge.syncDocument(id, document);
+        // 新文档和旧笔迹无关，撤销栈清空；否则一撤销就退回上一个文件。
+        setState({ undoStack: [], redoStack: [], pendingFrameIndex: null });
+        noteKey("store.loaded", { name: baseName(path) });
+        // 刚把外来文件灌进后端：这份文档的号比本地旧，但就是要它盖掉本地，
+        // 所以这一趟得无条件认领。
+        await getState().refreshDocument(true);
       } catch (error) {
         flagKey("store.open_aip_failed", { error: String(error) });
       } finally {
@@ -1479,6 +1782,19 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         // 存储不可用就只切这一趟：设置里的选择当场就生效。
       }
       setState({ lang });
+    },
+
+    setStyleOverride: (style) => setState({ styleOverride: style }),
+
+    setPresetOverrides: (presets) => {
+      // 上限之外的一律不收，但绝不静默收：用户点了第四条又没反应，他会以为
+      // 这条也上了路，然后盯着没变化的图猜原因。antd 那头先把超额项置灰，
+      // 这里是第二道闸，顺手兜住「从别处塞进来的超额清单」。
+      const wanted = uniquePresetIds(presets);
+      setState({ presetOverrides: normalizePresetStack(wanted) });
+      if (wanted.length > MAX_STACKED_PRESETS) {
+        flagKey("store.preset_stack_full", { max: MAX_STACKED_PRESETS });
+      }
     },
 
     openSettings: () => setState({ settingsOpen: true }),
@@ -1582,12 +1898,17 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       setState({ workflowBusy: true, outcomeError: null, refined: null });
       try {
         // 宽高传 0：Rust 会拿画布的真实尺寸补，提示词里的比例才和画布对得上。
+        // 画风与预设跟着这一句走，和主循环送的是同一份：微调这条链过去完全不
+        // 带它们，用户在输入区选了「写实渲染」，点一下微调，出来的九行提示词里
+        // 一条渲染规矩都没有。
         const refined = await bridge.promptRefine(
           id,
           idea,
           0,
-          0,
+         0,
         getState().refineTarget,
+        getState().styleOverride,
+        getState().presetOverrides,
       );
       setState({ refined, refinedDraft: refined.prompt, outcomeError: null });
       } catch (error) {
@@ -1700,17 +2021,17 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       const document = getState().document;
       const active = getState().active;
       if (!id || !document || cells.length === 0) return;
-      undoCapture = true;
       try {
-        await bridge.paintStroke(id, {
-          layer: active.layer,
-          frame: active.frame,
-          cells,
-          // 传进来的 override 是给橡皮的：null 明说「这一笔就是擦」。
-          color: inkOverride !== undefined ? inkOverride : (active.color ?? null),
-        });
+        await withCanvasUndo(document, () =>
+          bridge.paintStroke(id, {
+            layer: active.layer,
+            frame: active.frame,
+            cells,
+            // 传进来的 override 是给橡皮的：null 明说「这一笔就是擦」。
+            color: inkOverride !== undefined ? inkOverride : (active.color ?? null),
+          }),
+        );
       } catch (error) {
-        disarmUndoCapture();
         flagKey("store.paint_failed", { error: String(error) });
       }
     },
@@ -1718,34 +2039,34 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     fillCell: async (x, y, inkOverride) => {
       const id = getState().activeId;
       const active = getState().active;
-      if (!id) return;
-      undoCapture = true;
+      const document = getState().document;
+      if (!id || !document) return;
       try {
-        await bridge.fillCells(
-          id,
-          active.layer,
-          active.frame,
-          x,
-          y,
-          inkOverride !== undefined ? inkOverride : (active.color ?? null),
+        await withCanvasUndo(document, () =>
+          bridge.fillCells(
+            id,
+            active.layer,
+            active.frame,
+            x,
+            y,
+            inkOverride !== undefined ? inkOverride : (active.color ?? null),
+          ),
         );
       } catch (error) {
-        disarmUndoCapture();
         flagKey("store.fill_failed", { error: String(error) });
       }
     },
 
     runEditorOps: async (ops, frameHint) => {
       const id = getState().activeId;
+      const document = getState().document;
       if (!id) return null;
-      undoCapture = true;
       // 先把帧选择意图挂上：新文档还在路上，到了就按这个落点选帧。
       if (frameHint !== undefined) setState({ pendingFrameIndex: frameHint });
       try {
-        return await bridge.applyEditorOps(id, ops);
+        return await withCanvasUndo(document, () => bridge.applyEditorOps(id, ops));
       } catch (error) {
         setState({ pendingFrameIndex: null });
-        disarmUndoCapture();
         flagKey("store.edit_failed", { error: String(error) });
         return null;
       }
@@ -1791,8 +2112,9 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       ]);
     },
 
-    deletePalette: async (id) => {
-      await getState().runEditorOps([{ op: "delete_palette", id }]);
+    deletePalette: async (id, fallback) => {
+      // 还有层在引用时带 fallback：Rust 会把那些层改指过去再删，不再死循环。
+      await getState().runEditorOps([{ op: "delete_palette", id, fallback: fallback ?? null }]);
     },
 
     renamePalette: async (id, name) => {
@@ -1807,8 +2129,11 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       await getState().runEditorOps([{ op: "add_palette_color", id, color: hex }]);
     },
 
-    removePaletteColor: async (id, index) => {
-      await getState().runEditorOps([{ op: "remove_palette_color", id, index }]);
+    removePaletteColor: async (id, index, replacement) => {
+      // 带 replacement：画面上用了被删色的像素跟着改写，不靠索引前移碰运气。
+      await getState().runEditorOps([
+        { op: "remove_palette_color", id, index, replacement: replacement ?? null },
+      ]);
     },
 
     setLayerPalette: async (layerId, paletteId) => {
@@ -1907,27 +2232,55 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       await getState().runEditorOps([{ op: "move_layer", id: layerId, to_index: target }]);
     },
 
+    /**
+    * 撤销一步：把「动手之前」的文档拍回画布，当前文档挪进重做栈。
+    * 账先结再拍回——连点撤销时每一步都得当场落下，不能等后端回话；
+    * 拍失败了原样还回去，不然栈会凭空少一步，用户点着点着就没了。
+    * 文档也得当场换掉：不等后端回话的话，连点第二下时 document 还是改前那份，
+    * 它会被当成「当前画面」再压一遍重做栈——重做一下就越过了中间态。
+    */
     undoEdit: async () => {
       const id = getState().activeId;
       const stack = getState().undoStack;
       const previous = stack[stack.length - 1];
-      if (!id || !previous) return;
-      setState({ undoStack: stack.slice(0, -1), pendingFrameIndex: null });
+      const current = getState().document;
+      if (!id || !previous || !current) return;
+      const undoBack = stack;
+      const redoBack = getState().redoStack;
+      setState({
+        document: previous,
+        undoStack: stack.slice(0, -1),
+        redoStack: pushDocStack(getState().redoStack, current),
+        pendingFrameIndex: null,
+      });
       try {
-        await bridge.syncDocument(id, previous);
-        // sync_document 不发 document_updated：状态和预览都得自己结算。
-        const frameIndex = Math.max(0, Math.min(getState().frameIndex, previous.frames.length - 1));
-        const frame = previous.frames[frameIndex];
-        setState({
-          document: previous,
-          revision: previous.revision,
-          pngRevision: previous.revision,
-          frameIndex,
-          active: frame ? { ...getState().active, frame: frame.id } : getState().active,
-        });
-        await getState().refreshPng();
+        await queueRestore(() => restoreDocument(id, previous));
       } catch (error) {
+        setState({ document: current, undoStack: undoBack, redoStack: redoBack });
         flagKey("store.undo_failed", { error: String(error) });
+      }
+    },
+
+    /** 重做一步：把刚才撤销掉的画面拍回来，当前文档退回撤销栈。 */
+    redoEdit: async () => {
+      const id = getState().activeId;
+      const stack = getState().redoStack;
+      const next = stack[stack.length - 1];
+      const current = getState().document;
+      if (!id || !next || !current) return;
+      const undoBack = getState().undoStack;
+      const redoBack = stack;
+      setState({
+        document: next,
+        redoStack: stack.slice(0, -1),
+        undoStack: pushDocStack(getState().undoStack, current),
+        pendingFrameIndex: null,
+      });
+      try {
+        await queueRestore(() => restoreDocument(id, next));
+      } catch (error) {
+        setState({ document: current, undoStack: undoBack, redoStack: redoBack });
+        flagKey("store.redo_failed", { error: String(error) });
       }
     },
 

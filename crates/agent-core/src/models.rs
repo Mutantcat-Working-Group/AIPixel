@@ -4,6 +4,7 @@
 //! 全部可序列化，方便跨 Tauri 命令边界与未来的持久化层。
 
 use super::workflows::WorkflowKind;
+use pixel_core::DocPatch;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -52,6 +53,8 @@ pub struct Message {
 }
 
 impl Message {
+    /// 纯文本用户消息。图片不进这个构造器：附件带角色（快照 / 参考），
+    /// 角色必须在过协议边界之前定好，所以带图的消息另行组装。
     pub fn user_text(text: impl Into<String>) -> Self {
         Message {
             role: Role::User,
@@ -59,6 +62,8 @@ impl Message {
         }
     }
 
+    /// 助手消息。直传 blocks 而不是拼字符串：工具调用和推理块都在这里，
+    /// 提前拼平成文本会把「模型调了哪个工具」从历史里抹掉。
     pub fn assistant(blocks: Vec<ContentBlock>) -> Self {
         Message {
             role: Role::Assistant,
@@ -66,6 +71,8 @@ impl Message {
         }
     }
 
+    /// 工具结果消息。`is_error` 一路带到协议层：把失败也写成成功，
+    /// 模型会因为「看起来做完了」而收工，用户拿到一张空画布。
     pub fn tool_result(
         tool_use_id: impl Into<String>,
         content: impl Into<String>,
@@ -81,6 +88,8 @@ impl Message {
         }
     }
 
+    /// 只取文本块。用于展示和续写判定，不含工具调用——
+    /// 「这一轮到底动没动笔」要看的是有没有画图工具，不是说了多少话。
     pub fn text_of(&self) -> String {
         self.content
             .iter()
@@ -316,6 +325,8 @@ pub enum ReferenceMode {
 }
 
 impl ReferenceMode {
+    /// 字符串形式给模型入参和提示词用：工具 schema 里没有枚举类型，
+    /// 模型写进来的是字符串，回出去的也必须是同一个词，否则对不上账。
     pub fn as_str(self) -> &'static str {
         match self {
             ReferenceMode::Style => "style",
@@ -454,7 +465,10 @@ pub enum AgentEvent {
     /// 工具改完文档后把新文档推回前端（文本网格为权威）。
     DocumentUpdated {
         revision: u64,
-        document: serde_json::Value,
+        /// 相对上一次广播的增量，不是整份文档。256x256x8层x30帧整份序列化
+        /// 约 47MB，一轮几十次工具调用会把 IPC 灌满；前端本地已持有一份
+        /// 完整文档，所以只推元数据加变化过的 cel。
+        patch: DocPatch,
     },
     Usage {
         input_tokens: Option<u32>,
@@ -508,6 +522,7 @@ pub enum LlmEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pixel_core::Document;
 
     #[test]
     fn caption_numbers_attachments_in_order_and_names_their_role() {
@@ -567,11 +582,12 @@ mod tests {
 
     #[test]
     fn the_envelope_carries_the_session_alongside_the_event() {
+        let doc = Document::new("t", 8, 8).expect("8x8 is within limits");
         let envelope = AgentEventEnvelope {
             session_id: "s-1".into(),
             event: AgentEvent::DocumentUpdated {
                 revision: 7,
-                document: serde_json::json!({ "width": 8 }),
+                patch: DocPatch::full(&doc),
             },
         };
         let value = serde_json::to_value(&envelope).unwrap();
@@ -582,6 +598,13 @@ mod tests {
             serde_json::json!("document_updated")
         );
         assert_eq!(value["event"]["revision"], serde_json::json!(7));
+        // 载荷是增量不是整份文档：patch 里的 cel 是 (layer, frame, indices) 三元组。
+        assert_eq!(value["event"]["patch"]["width"], serde_json::json!(8));
+        // full 增量带着全部 cel：8x8 文档每层每帧一格，新文档就是一格。
+        assert_eq!(
+            value["event"]["patch"]["cels"].as_array().map(|c| c.len()),
+            Some(1)
+        );
         // 回程也得通：前端那条路是反序列化，字段名一字都不能差。
         let back: AgentEventEnvelope = serde_json::from_value(value).unwrap();
         assert_eq!(back.session_id, "s-1");

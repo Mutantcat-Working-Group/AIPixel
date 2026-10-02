@@ -5,12 +5,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { briefToText, probeSummary, videoBriefToText } from "./dock-format";
 import { DEFAULT_BATCH_RECIPE, EMPTY_BATCH_RUN } from "./batch";
 import { AGENT_EVENT_CHANNEL } from "./bridge";
-import { STALL_SECONDS, blankDocument, useStore, type WorkflowParams } from "./store";
+import { STALL_SECONDS, blankDocument, undoBudget, useStore, type WorkflowParams } from "./store";
 import { publishLocal } from "./local-bus";
 import type {
   BatchRecipe,
   BatchRecipeEntry,
   BatchScan,
+  DocPatch,
   ModelRole,
   RecipeImportReport,
   RoleBinding,
@@ -55,6 +56,29 @@ function lastOps(): Array<Record<string, unknown>> {
 /** 往 agent-event 通道上发一条带会话归属的事件，和 Rust 的载荷同形。 */
 function publishAgent(sessionId: string, event: Record<string, unknown>): void {
   publishLocal(AGENT_EVENT_CHANNEL, { session_id: sessionId, event });
+}
+
+/** 把一份文档打包成「第一次广播」那种全量增量。真机上后端没有基准可比，
+ * 第一次就是这么发的；测试里拿它把前端那份文档整体对齐到目标状态。 */
+function fullPatch(doc: PixelDocument): DocPatch {
+  const cels: DocPatch["cels"] = [];
+  for (const [layerId, frames] of Object.entries(doc.cels)) {
+    for (const [frameId, cel] of Object.entries(frames)) {
+      cels.push([layerId, frameId, cel.indices]);
+    }
+  }
+  return {
+    name: doc.name,
+    width: doc.width,
+    height: doc.height,
+    palette: doc.palette,
+    layers: doc.layers,
+    frames: doc.frames,
+    palettes: doc.palettes,
+    revision: doc.revision,
+    cels,
+    dropped: [],
+  };
 }
 
 /** 两图层两帧的文档：帧时长与图层排序的边界都要有两个元素才测得出来。 */
@@ -276,7 +300,7 @@ describe("编辑器结构动作（store -> bridge）", () => {
 });
 
 describe("撤销栈只记编辑器自己那一下", () => {
-  it("落笔失败就缴械，紧跟着模型那次改动不该被塞进撤销栈", async () => {
+  it("落笔失败就把账退回去，模型那次改动也不该被塞进撤销栈", async () => {
     const doc = seedDocument();
     // boot 是 store 唯一挂事件监听的地方（真实进程里开机就挂）。它一路上要读
     // 六七样东西，这里把可能抛的那几样预制好，别让它在半路炸掉。
@@ -317,21 +341,148 @@ describe("撤销栈只记编辑器自己那一下", () => {
 
     // 正面例子先立规矩：成功的那一笔，撤销栈吃到的是改前的快照。
     await useStore.getState().paintStroke([{ x: 1, y: 1 }]);
-    publishAgent("doc-01", { kind: "document_updated", revision: 5, document: doc });
     expect(useStore.getState().undoStack).toEqual([doc]);
 
-    // 失败的那一笔不产新文档，旗子却还悬着：下一个到达的 document_updated
-    // 会把它当成编辑器笔触吃掉，用户自己随后那一下笔反而没了撤销。
+    // 落空的那一笔当场退账：撤销栈顶那一格得摘回去，不然一次点空的画笔
+    // 也会白吃一步撤销。
     invokeErrors["editor_paint_stroke"] = "stroke rejected";
     try {
       await useStore.getState().paintStroke([{ x: 2, y: 2 }]);
       expect(useStore.getState().undoStack).toEqual([doc]);
       // 模型自己的一次改动（跑完 Lua 脚本）：现在不该再进撤销栈。
-      publishAgent("doc-01", { kind: "document_updated", revision: 6, document: doc });
+      publishAgent("doc-01", { kind: "document_updated", revision: 6, patch: fullPatch(doc) });
       expect(useStore.getState().undoStack).toEqual([doc]);
+      expect(useStore.getState().redoStack).toEqual([]);
     } finally {
       delete invokeErrors["editor_paint_stroke"];
     }
+  });
+
+  it("撤销栈超字节预算先丢最老，裁到一步也得留住那一步", async () => {
+    const doc = seedDocument();
+    useStore.setState({
+      activeId: "doc-01",
+      document: doc,
+      revision: 4,
+      pngRevision: 4,
+      undoStack: [],
+      redoStack: [],
+      frameIndex: 0,
+      active: { layer: "L0", frame: "F0", color: "#ffffff" },
+    });
+
+    // 一份快照 = 3 个 8x8 的 cel = 768 字节。连点五笔把栈压满（3840），
+    // 预算压到 1600：丢到两份 1536 就打住，最老的三份先走、最新的留下。
+    const original = undoBudget.bytes;
+    undoBudget.bytes = 1600;
+    try {
+      for (let i = 0; i < 5; i++) {
+        await useStore.getState().paintStroke([{ x: i, y: 0 }]);
+      }
+      expect(useStore.getState().undoStack).toEqual([doc, doc]);
+      // 预算再砍到比一份还小：也得留一步，一步都没有的话撤销整个废掉。
+      undoBudget.bytes = 100;
+      await useStore.getState().paintStroke([{ x: 7, y: 7 }]);
+      expect(useStore.getState().undoStack).toEqual([doc]);
+    } finally {
+      undoBudget.bytes = original;
+    }
+  });
+
+  it("撤销把当前文档挪进重做栈，重做再原样挪回来", async () => {
+    const first = seedDocument();
+    const second: PixelDocument = { ...first, revision: 5 };
+    useStore.setState({
+      activeId: "doc-01",
+      document: second,
+      revision: 5,
+      pngRevision: 5,
+      undoStack: [first],
+      redoStack: [],
+      frameIndex: 0,
+      active: { layer: "L0", frame: "F0", color: "#ffffff" },
+    });
+    invokeCalls.length = 0;
+
+    await useStore.getState().undoEdit();
+    // 撤销栈见底，画面退回改前那一版；退掉的那版挪进了重做栈。
+    expect(useStore.getState().document).toBe(first);
+    expect(useStore.getState().undoStack).toEqual([]);
+    expect(useStore.getState().redoStack).toEqual([second]);
+    // 拍回走的是整份同步，不是编辑器 op：撤销要的是回到那一版，不是改哪几笔。
+    const syncCall = invokeCalls.filter((call) => call.cmd === "agent_sync_document").at(-1);
+    expect(syncCall?.args.document).toBe(first);
+
+    await useStore.getState().redoEdit();
+    // 重做把画面拍回来，这一格又回到撤销栈里，两步可以来回踩。
+    expect(useStore.getState().document).toBe(second);
+    expect(useStore.getState().undoStack).toEqual([first]);
+    expect(useStore.getState().redoStack).toEqual([]);
+
+    // 再动一笔，重做栈作废：重做的画面已经被新笔触盖掉，没有「找回来」可言。
+    await useStore.getState().paintStroke([{ x: 3, y: 3 }]);
+    expect(useStore.getState().redoStack).toEqual([]);
+    expect(useStore.getState().undoStack).toEqual([first, second]);
+  });
+
+  it("拍回失败时两个栈原样还回去，不凭空少一步", async () => {
+    const first = seedDocument();
+    const second: PixelDocument = { ...first, revision: 5 };
+    useStore.setState({
+      activeId: "doc-01",
+      document: second,
+      revision: 5,
+      pngRevision: 5,
+      undoStack: [first],
+      redoStack: [],
+      frameIndex: 0,
+      active: { layer: "L0", frame: "F0", color: "#ffffff" },
+    });
+    invokeErrors["agent_sync_document"] = "sync rejected";
+    try {
+      await useStore.getState().undoEdit();
+      expect(useStore.getState().undoStack).toEqual([first]);
+      expect(useStore.getState().redoStack).toEqual([]);
+    } finally {
+      delete invokeErrors["agent_sync_document"];
+    }
+  });
+
+  it("拍回旧快照后选中跟着夹过去，后端收到同一条 active", async () => {
+    // 当前文档两层两帧，手里停在 L1 的 F1 上；撤销栈顶那份更早，只剩 L0 的 F0。
+    const older: PixelDocument = { ...blankDocument(8, 8), revision: 3 };
+    const current: PixelDocument = { ...seedDocument(), revision: 5 };
+    useStore.setState({
+      activeId: "doc-01",
+      document: current,
+      revision: 5,
+      pngRevision: 5,
+      undoStack: [older],
+      redoStack: [],
+      frameIndex: 1,
+      active: { layer: "L1", frame: "F1", color: "#ffffff" },
+    });
+    invokeCalls.length = 0;
+
+    await useStore.getState().undoEdit();
+    // 帧和层都不在新文档里，双双夹到首个；快照本身原样拍回。
+    expect(useStore.getState().document).toBe(older);
+    expect(useStore.getState().frameIndex).toBe(0);
+    expect(useStore.getState().active).toEqual({ layer: "L0", frame: "F0", color: "#ffffff" });
+    // 关键一步：选中回传。sync_document 只在选中「不存在」时才修，而这里夹出来的
+    // 帧名层名在新文档里都真实存在，不补这一条模型下一步就画到用户没在看的帧上。
+    const activeCall = invokeCalls.find((call) => call.cmd === "agent_set_active");
+    expect(activeCall?.args.id).toBe("doc-01");
+    expect(activeCall?.args.active).toEqual(useStore.getState().active);
+
+    // 重做走同一条拍回路径，选中也得回传：回到两层两帧后帧号仍是 0、层仍是 L0。
+    await useStore.getState().redoEdit();
+    expect(useStore.getState().document).toBe(current);
+    expect(useStore.getState().undoStack).toEqual([older]);
+    expect(useStore.getState().redoStack).toEqual([]);
+    const redoActiveCall = invokeCalls.filter((call) => call.cmd === "agent_set_active").at(-1);
+    expect(redoActiveCall?.args.active).toEqual(useStore.getState().active);
+    expect(useStore.getState().active).toEqual({ layer: "L0", frame: "F0", color: "#ffffff" });
   });
 });
 
@@ -785,6 +936,41 @@ describe("runWorkflow / runPixelize 派发（kind -> Rust 命令 -> params）", 
     expect(useStore.getState().workflowBusy).toBe(false);
   });
 
+  // 微调这条链路曾经两样都不带：用户在输入区选了「写实渲染」，点一下微调，
+  // 出来的九行提示词里一条渲染规矩都没有。规矩不能只活在输入区。
+  it("微调把这一句锁的画风与预设一起带上", async () => {
+    reset();
+    // 每次只看这一次调用：共享一份 invokeCalls，不清掉的话前面的调用会先撞上。
+    invokeCalls.length = 0;
+    await useStore.getState().refinePrompt("一只写实的乌鸦");
+    expect(invokeCalls[0]).toMatchObject({
+      cmd: "prompt_refine",
+      args: { idea: "一只写实的乌鸦", width: 0, height: 0, style: null, presets: [] },
+    });
+
+    // 两把锁是平行的两根轴：换画风不动预设，摘画风也不动预设。
+    useStore.getState().setStyleOverride("realistic");
+    useStore.getState().setPresetOverrides(["microdetail", "occlusion"]);
+    invokeCalls.length = 0;
+    await useStore.getState().refinePrompt("一只写实的乌鸦");
+    expect(invokeCalls[0]).toMatchObject({
+      cmd: "prompt_refine",
+      args: { style: "realistic", presets: ["microdetail", "occlusion"] },
+    });
+
+    useStore.getState().setStyleOverride(null);
+    invokeCalls.length = 0;
+    await useStore.getState().refinePrompt("一只写实的乌鸦");
+    expect(invokeCalls[0]).toMatchObject({
+      cmd: "prompt_refine",
+      args: { style: null, presets: ["microdetail", "occlusion"] },
+    });
+    expect(useStore.getState().workflowBusy).toBe(false);
+    // 两把锁要还回去：后续用例不少直接 useStore.setState，不从这里收，
+    // 它们会带着这一组的偏好上路，红的还是不相干的那几条。
+    useStore.setState({ styleOverride: null, presetOverrides: [] });
+  });
+
   it("frame_tween 落到 workflow_tween，插值参数照搬", async () => {
     reset();
     const params: WorkflowParams = {
@@ -911,16 +1097,189 @@ describe("静默提醒（模型半天不吭声）", () => {
 
     // 出路只有两个：重发刚才那句，或者中断。先看重发。
     invokeCalls.length = 0;
-    await useStore.getState().retry();
+    // 这一轮假死了，回合占用还压在 Rust 手上：重试得先把它收掉才发得出去。
+    const retrying = useStore.getState().retry();
+    await flushUntil(() => invokeCalls.some((call) => call.cmd === "agent_interrupt"));
+    expect(invokeCalls.some((call) => call.cmd === "agent_interrupt")).toBe(true);
+    publishAgent("doc-01", { kind: "interrupted" });
+    await retrying;
     expect(invokeCalls.filter((call) => call.cmd === "agent_send_message")).toEqual([
-      { cmd: "agent_send_message", args: { id: "doc-01", text: "画一只八帧橘猫行走图", attachments: [], modelId: null } },
+      { cmd: "agent_send_message", args: { id: "doc-01", text: "画一只八帧橘猫行走图", attachments: [], modelId: null, style: null, presets: [] } },
     ]);
     expect(useStore.getState().stalled).toBe(false);
   });
 
+  /** 退让出微任务队列，直到条件成立或让够了次数。用来等一条异步链走到某一步。 */
+  async function flushUntil(ready: () => boolean, hops = 200): Promise<void> {
+    for (let i = 0; i < hops && !ready(); i++) await Promise.resolve();
+  }
+
+  it("上一轮赖着不走时不硬发：把话说明白，不留第二个占位节点", async () => {
+    vi.useFakeTimers();
+    useStore.setState({
+      activeId: "doc-01",
+      lang: "zh",
+      entries: [],
+      lastQuery: null,
+      attachments: [],
+      running: false,
+      stalled: false,
+      notice: null,
+    });
+
+    await useStore.getState().send("画一只八帧橘猫行走图");
+    expect(useStore.getState().running).toBe(true);
+
+    // 中断打了，回执始终不来：等不到交还就不能硬发，那样只是把用户消息重复一遍。
+    invokeCalls.length = 0;
+    const sending = useStore.getState().send("再画一只");
+    await vi.advanceTimersByTimeAsync(9000);
+    await sending;
+
+    expect(invokeCalls.some((call) => call.cmd === "agent_send_message")).toBe(false);
+    expect(useStore.getState().notice).toMatchObject({ isError: true });
+    expect(useStore.getState().entries.filter((entry) => entry.kind === "user")).toHaveLength(1);
+    // 占位节点跟着失败一起封口，不留一枚一直闪的光标。
+    expect(useStore.getState().entries.filter((entry) => entry.kind === "pending")).toHaveLength(0);
+  });
+
+  it("回车再发一句：先收掉上一轮，用户那句话在对话里只有一条", async () => {
+    vi.useFakeTimers();
+    useStore.setState({
+      activeId: "doc-01",
+      lang: "zh",
+      entries: [],
+      lastQuery: null,
+      attachments: [],
+      running: false,
+      stalled: false,
+      notice: null,
+    });
+
+    await useStore.getState().send("画一只八帧橘猫行走图");
+    invokeCalls.length = 0;
+
+    const sending = useStore.getState().send("顺便把背景也画了");
+    await flushUntil(() => invokeCalls.some((call) => call.cmd === "agent_interrupt"));
+    publishAgent("doc-01", { kind: "interrupted" });
+    await sending;
+
+    expect(invokeCalls.filter((call) => call.cmd === "agent_send_message")).toEqual([
+      { cmd: "agent_send_message", args: { id: "doc-01", text: "顺便把背景也画了", attachments: [], modelId: null, style: null, presets: [] } },
+    ]);
+    expect(useStore.getState().entries.filter((entry) => entry.kind === "user")).toHaveLength(2);
+    expect(useStore.getState().entries.filter((entry) => entry.kind === "pending")).toHaveLength(1);
+  });
+
+  it("锁了画风和收尾规矩就跟着这一句过去，自动则不带", async () => {
+    vi.useFakeTimers();
+    useStore.setState({
+      activeId: "doc-01",
+      lang: "zh",
+      entries: [],
+      lastQuery: null,
+      attachments: [],
+      running: false,
+      stalled: false,
+      notice: null,
+      styleOverride: null,
+    });
+
+    /** 发一句，等它落到 invoke 上。用不到真时间，发送链本身是同步落库的。 */
+    async function sendOnce(text: string) {
+      useStore.setState({ running: false });
+      const done = useStore.getState().send(text);
+      await flushUntil(() => invokeCalls.some((call) => call.cmd === "agent_send_message"));
+      await done;
+      return invokeCalls.at(-1);
+    }
+
+    expect(await sendOnce("画一只写实的猫")).toEqual({
+      cmd: "agent_send_message",
+      args: {
+        id: "doc-01",
+        text: "画一只写实的猫",
+        attachments: [],
+        modelId: null,
+        style: null,
+        presets: [],
+      },
+    });
+
+    // 换锁：下一次发送带的就是新锁，旧的那份不会赖着。
+    useStore.getState().setStyleOverride("realistic");
+    expect(await sendOnce("画一只猫")).toEqual({
+      cmd: "agent_send_message",
+      args: {
+        id: "doc-01",
+        text: "画一只猫",
+        attachments: [],
+        modelId: null,
+        style: "realistic",
+        presets: [],
+      },
+    });
+
+    useStore.getState().setStyleOverride(null);
+    expect((await sendOnce("画一只猫"))?.args.style).toBe(null);
+
+    // 收尾规矩那一柄是平行的另一根轴：两把锁可以同时挂，互不覆盖。
+    useStore.getState().setPresetOverrides(["cinematic"]);
+    useStore.getState().setStyleOverride("gameboy");
+    expect(await sendOnce("画一只猫")).toMatchObject({
+      cmd: "agent_send_message",
+      args: { style: "gameboy", presets: ["cinematic"] },
+    });
+
+    // 只摘画风：规矩那一柄留在原处，跟着下一次发送过去。
+    useStore.getState().setStyleOverride(null);
+    expect(await sendOnce("画一只猫")).toMatchObject({
+      cmd: "agent_send_message",
+      args: { style: null, presets: ["cinematic"] },
+    });
+
+    useStore.getState().setPresetOverrides([]);
+    expect((await sendOnce("画一只猫"))?.args.presets).toEqual([]);
+
+    // 叠加是这套机制的全部意义：「写实渲染」讲整张图按什么规矩收尾，
+    // 「微细结构」讲最后一两个像素放在哪里，「闭塞接触」讲暗部怎么攒起来。
+    // 三条各管一段，一起上路才凑成一张写实的图。
+    useStore.getState().setPresetOverrides(["realistic", "microdetail", "occlusion"]);
+    expect(await sendOnce("画一只猫")).toMatchObject({
+      args: { presets: ["realistic", "microdetail", "occlusion"] },
+    });
+
+    // 第四条绝不静默丢：清单收在前三条，但通知要亮——点上去没反应，
+    // 用户会盯着没变化的图猜原因，而不是猜自己点多了。
+    useStore.getState().setPresetOverrides([
+      "realistic",
+      "microdetail",
+      "occlusion",
+      "polish",
+    ]);
+    expect(useStore.getState().presetOverrides).toEqual([
+      "realistic",
+      "microdetail",
+      "occlusion",
+    ]);
+    expect(useStore.getState().notice).not.toBe(null);
+
+    // 重复 id 和认不出的 id 都在这里收窄：下拉里只认 PRESET_IDS，但从别处
+    // 塞进来的脏值不该一路漏到 Rust 让整条发送失败。
+    useStore.getState().setPresetOverrides(["realistic", "realistic", "photoshop"]);
+    expect(await sendOnce("画一只猫")).toMatchObject({
+      args: { presets: ["realistic"] },
+    });
+
+    useStore.getState().setPresetOverrides([]);
+    await vi.runAllTimersAsync();
+    // 静默看护的定时器跟着假时间走，不在这里收掉会漏进下一个用例。
+    vi.useRealTimers();
+  });
+
   it("发不出去就把表撤了，不留一个到点自爆的计时器", async () => {
     vi.useFakeTimers();
-    useStore.setState({ activeId: null, lang: "zh", entries: [], notice: null });
+    useStore.setState({ activeId: null, lang: "zh", entries: [], notice: null, running: false, stalled: false });
 
     await useStore.getState().send("画一只八帧橘猫行走图");
     expect(useStore.getState().running).toBe(false);
@@ -991,6 +1350,21 @@ describe("回合只由它自己结束，侧道失败不陪葬", () => {
     expect(state.entries.some((e) => e.kind === "pending")).toBe(true);
     expect(state.notice?.isError).toBe(true);
     expect(state.notice?.text).toContain("渲染画布失败");
+  });
+
+  it("权威 PNG 记着自己属于哪一帧：切了帧，旧图就得从画布上让位", async () => {
+    liveTurn();
+    invokeResults["document_png_url"] = "data:image/png;base64,AAAA";
+    useStore.setState({ activeId: "doc-01", document: useStore.getState().document, pngFrame: -1 });
+    await useStore.getState().refreshPng();
+    // 图到手时顺手记下它是哪一帧的，之后界面照这个判断该不该显示它。
+    expect(useStore.getState().pngFrame).toBe(0);
+
+    // 切到第二帧：帧层是同步重画的，而权威图还在后端路上、仍属于第 0 帧。
+    // 两个帧号对不上，旧图再挂着就是新旧两张脸叠在一起。
+    useStore.setState({ frameIndex: 1 });
+    expect(useStore.getState().pngFrame).toBe(0);
+    delete invokeResults["document_png_url"];
   });
 
   it("用户落笔失败也只报警：画崩了不关模型那一回合的事", async () => {
@@ -1066,7 +1440,7 @@ describe("切走之后，上一个会话残着的事件不能落到这一轮", (
     publishAgent("doc-other", {
       kind: "document_updated",
       revision: 99,
-      document: stranger,
+      patch: fullPatch(stranger),
     });
 
     const state = useStore.getState();
@@ -1159,6 +1533,30 @@ describe("新建会话与模型定义改动", () => {
     await useStore.getState().createSession();
 
     expect(useStore.getState().notice).toBeNull();
+  });
+
+  // 会话名：填了就带到 Rust 去，空白名当没填。少了这一条，用户填的名字会被
+  // 悄悄丢掉，侧栏只剩 s1、s2，或者反过来多出一个空名会话。
+  it("新建会话把用户填的名字带给 Rust，空白名当没填", async () => {
+    const created = sessionOf(32, 32);
+    invokeResults["session_create"] = created;
+    invokeResults["agent_document"] = { id: "s-2", revision: 0, document: blankDocument(32, 32) };
+    invokeResults["session_list"] = [created];
+    invokeResults["workflow_catalog"] = [];
+    useStore.setState({ activeId: null, sessions: [], notice: null });
+    invokeCalls.length = 0;
+
+    await useStore.getState().createSession(32, 32, "橘猫");
+
+    const sent = invokeCalls.find((call) => call.cmd === "session_create")?.args;
+    expect(sent?.title).toBe("橘猫");
+    expect(useStore.getState().activeId).toBe(created.id);
+
+    invokeCalls.length = 0;
+    await useStore.getState().createSession(32, 32, "   ");
+
+    const blank = invokeCalls.find((call) => call.cmd === "session_create")?.args;
+    expect(blank?.title).toBeNull();
   });
 
   it("改完模型定义要重拉会话列表，侧栏名字才跟着设置走", async () => {
@@ -1271,6 +1669,39 @@ describe("会话改名与排序", () => {
   });
 });
 
+describe("删除会话要先问过，失败了还得留着", () => {
+  it("删成功才点名 session_drop，并把会话从列表里摘掉", async () => {
+    const a = { id: "doc-a", title: "橘猫" } as SessionInfo;
+    const b = { id: "doc-b", title: "小狗" } as SessionInfo;
+    useStore.setState({ sessions: [a, b], activeId: "doc-a" });
+    invokeCalls.length = 0;
+    // 删的是当前会话，所以收尾会切到剩下那条、顺手重拉一遍列表。
+    // 预置返回值：不然 mock 会把编辑器操作的默认值 1 当成会话列表塞回来。
+    invokeResults["session_list"] = [b];
+
+    await useStore.getState().removeSession("doc-a");
+
+    const drop = invokeCalls.find((call) => call.cmd === "session_drop");
+    expect(drop?.args).toMatchObject({ id: "doc-a" });
+    expect(useStore.getState().sessions.map((s) => s.id)).toEqual(["doc-b"]);
+  });
+
+  it("Rust 没删成：会话列表原样不动，通知说明原因，并且往上抛", async () => {
+    // 确认弹窗靠这个 rethrow 停在原处：删失败不能装作成功把窗子关掉，
+    // 不然用户以为删干净了，其实那一会话连聊天带画布还在盘上。
+    const a = { id: "doc-a", title: "橘猫" } as SessionInfo;
+    useStore.setState({ sessions: [a], activeId: "doc-a" });
+    invokeCalls.length = 0;
+    invokeErrors["session_drop"] = "会话还在跑";
+
+    await expect(useStore.getState().removeSession("doc-a")).rejects.toThrow("会话还在跑");
+
+    expect(useStore.getState().sessions.map((s) => s.id)).toEqual(["doc-a"]);
+    expect(useStore.getState().notice?.isError).toBe(true);
+    delete invokeErrors["session_drop"];
+  });
+});
+
 describe("画布刷新靠 revision 翻倍", () => {
   it("落笔之后文档和 revision 一起涨，帧缩略图这种二线视图才跟得上", async () => {
     const doc = seedDocument();
@@ -1310,11 +1741,118 @@ describe("画布刷新靠 revision 翻倍", () => {
         L0: { F0: { indices: [1, ...doc.cels.L0.F0.indices.slice(1)] } },
       },
     };
-    publishAgent("doc-01", { kind: "document_updated", revision: 5, document: painted });
+    publishAgent("doc-01", { kind: "document_updated", revision: 5, patch: fullPatch(painted) });
 
     const state = useStore.getState();
     expect(state.revision).toBe(5);
     expect(state.document).toEqual(painted);
+  });
+
+  it("增量只带改过的 cel，没动的 cel 原样留着", async () => {
+    const doc = seedDocument();
+    useStore.setState({
+      activeId: "doc-01",
+      document: doc,
+      revision: doc.revision,
+      pngRevision: doc.revision,
+    });
+    // 后端 diff 出来的增量：元数据全给，cel 只报动过的那一格。
+    const touched = [2, ...doc.cels.L0.F0.indices.slice(1)];
+    publishAgent("doc-01", {
+      kind: "document_updated",
+      revision: 12,
+      patch: {
+        ...fullPatch({ ...doc, revision: 12 }),
+        cels: [["L0", "F0", touched]],
+      },
+    });
+
+    const state = useStore.getState();
+    expect(state.revision).toBe(12);
+    // 改过的那一格落下去了，别的层、别的帧一格都没丢——增量是合并不是替换。
+    expect(state.document?.cels.L0.F0).toEqual({ indices: touched });
+    expect(state.document?.cels.L1).toEqual(doc.cels.L1);
+    expect(state.document?.cels.L0.F1).toEqual(doc.cels.L0.F1);
+  });
+
+  it("增量里的 dropped 把删掉的 cel 摘下去", async () => {
+    const doc = seedDocument();
+    useStore.setState({
+      activeId: "doc-01",
+      document: doc,
+      revision: doc.revision,
+      pngRevision: doc.revision,
+    });
+    // 后端那边删掉的 cel 只会出现在 dropped 里，不会再出现在 cels 里。
+    const patch = fullPatch({ ...doc, revision: 13 });
+    patch.cels = patch.cels.filter(([layerId, frameId]) => layerId !== "L1" || frameId !== "F1");
+    publishAgent("doc-01", {
+      kind: "document_updated",
+      revision: 13,
+      patch: { ...patch, dropped: [["L1", "F1"]] },
+    });
+
+    expect(useStore.getState().document?.cels.L1.F1).toBeUndefined();
+    expect(useStore.getState().document?.cels.L1.F0).toBeDefined();
+  });
+
+  it("带着 dropped 的那条增量丢了，下一条也照元数据把死层收尸", () => {
+    const doc = seedDocument();
+    useStore.setState({
+      activeId: "doc-01",
+      document: doc,
+      revision: doc.revision,
+      pngRevision: doc.revision,
+    });
+    // 后端已经删掉 L1：元数据里只剩 L0 和它那一帧，dropped 却整条没送到
+    // （事件桥还没挂上监听、窗口藏着那一阵都可能）。合并不能只会等 dropped，
+    // 层号是会复用的——不收尸的话新层拿回 "L1" 时，旧像素跟着新层一起显形。
+    const after: PixelDocument = {
+      ...doc,
+      layers: doc.layers.filter((layer) => layer.id !== "L1"),
+      frames: doc.frames.filter((frame) => frame.id !== "F1"),
+      cels: { L0: { F0: doc.cels.L0.F0 } },
+    };
+    publishAgent("doc-01", {
+      kind: "document_updated",
+      revision: 20,
+      patch: { ...fullPatch({ ...after, revision: 20 }), cels: [], dropped: [] },
+    });
+
+    expect(useStore.getState().document?.cels.L1).toBeUndefined();
+    expect(useStore.getState().document?.cels.L0.F1).toBeUndefined();
+    expect(useStore.getState().document?.cels.L0.F0).toEqual(doc.cels.L0.F0);
+  });
+
+  it("选色归队只在本层配色范围里找，不拿文档自带调色板顶数", () => {
+    const base = seedDocument();
+    const ink = { r: 255, g: 119, b: 168, a: 255 };
+    const doc: PixelDocument = {
+      ...base,
+      // 基础调色板里正摆着当前这支笔的色：拿它当归队候选，这支色原地不动，
+      // 而它压根不在 L1 自己的范围（Game Boy 四色）里。
+      palette: [ink, { r: 0, g: 0, b: 0, a: 255 }],
+      layers: [base.layers[0], { ...base.layers[1], palette_id: "gameboy" }],
+    };
+    useStore.setState({
+      activeId: "doc-01",
+      document: doc,
+      revision: 4,
+      pngRevision: 4,
+      frameIndex: 0,
+      active: { layer: "L1", frame: "F1", color: "#ff77a8" },
+    });
+
+    publishAgent("doc-01", {
+      kind: "document_updated",
+      revision: 5,
+      patch: fullPatch({ ...doc, revision: 5 }),
+    });
+
+    // 落回 L1 自己的四色里：各层配色范围独立，不该被文档级调色板牵着走。
+    expect(["#0f380f", "#306230", "#8bac0f", "#9bbc0f"]).toContain(
+      useStore.getState().active.color,
+    );
   });
 });
 
@@ -1407,5 +1945,164 @@ describe("工具块的展开态按调用 id 记", () => {
     useStore.getState().toggleToolOpen("call_read", false);
     expect(useStore.getState().toolOpen).toEqual({ call_ops: false, call_read: true });
     useStore.setState({ toolOpen: {} });
+  });
+});
+
+describe("连点撤销/重做", () => {
+  /** 往 agent_sync_document 上发货门：不放行，那趟拍回就一直悬着。 */
+  function gateSync(): { release: () => void } {
+    let release: () => void = () => {};
+    const gate = new Promise<number>((resolve) => {
+      release = () => resolve(1);
+    });
+    invokeResults["agent_sync_document"] = gate;
+    return { release };
+  }
+
+  function syncDocs(): PixelDocument[] {
+    return invokeCalls
+      .filter((call) => call.cmd === "agent_sync_document")
+      .map((call) => call.args.document as PixelDocument);
+  }
+
+  it("第二下等第一下真落地，两步撤销不会退成一步", async () => {
+    const first = { ...seedDocument(), revision: 3 };
+    const second = { ...seedDocument(), revision: 4 };
+    const third = { ...seedDocument(), revision: 5 };
+    const current = { ...seedDocument(), revision: 6 };
+    useStore.setState({
+      activeId: "doc-01",
+      document: current,
+      revision: 6,
+      pngRevision: 6,
+      undoStack: [first, second, third],
+      redoStack: [],
+      frameIndex: 0,
+      active: { layer: "L0", frame: "F0", color: "#ffffff" },
+    });
+    const gate = gateSync();
+    try {
+      // 连着点两下，中间不等：真实用户连点撤销就是这么点的。
+      const firstClick = useStore.getState().undoEdit();
+      const secondClick = useStore.getState().undoEdit();
+      // 让出一次微任务队列：第一下已经发起拍回，第二下必须还悬在闸门外。
+      await Promise.resolve();
+      expect(syncDocs().map((doc) => doc.revision)).toEqual([5]);
+      gate.release();
+      await Promise.all([firstClick, secondClick]);
+      // 按第三份、第二份的顺序拍过去，两步都算数。
+      expect(syncDocs().map((doc) => doc.revision)).toEqual([5, 4]);
+    } finally {
+      delete invokeResults["agent_sync_document"];
+    }
+    // 文档停在第二份上；重做栈顶是刚退掉的那一份，再点一次redo只退回一步。
+    expect(useStore.getState().document).toBe(second);
+    expect(useStore.getState().undoStack).toEqual([first]);
+    expect(useStore.getState().redoStack).toEqual([current, third]);
+
+    await useStore.getState().redoEdit();
+    expect(useStore.getState().document).toBe(third);
+    expect(useStore.getState().redoStack).toEqual([current]);
+  });
+
+  it("拍回失败就把乐观换上的文档原样还回去", async () => {
+    const first = { ...seedDocument(), revision: 3 };
+    const current = { ...seedDocument(), revision: 6 };
+    useStore.setState({
+      activeId: "doc-01",
+      document: current,
+      revision: 6,
+      pngRevision: 6,
+      undoStack: [first],
+      redoStack: [],
+      frameIndex: 0,
+      active: { layer: "L0", frame: "F0", color: "#ffffff" },
+    });
+    invokeErrors["agent_sync_document"] = "sync rejected";
+    try {
+      await useStore.getState().undoEdit();
+      expect(useStore.getState().document).toBe(current);
+      expect(useStore.getState().undoStack).toEqual([first]);
+      expect(useStore.getState().redoStack).toEqual([]);
+    } finally {
+      delete invokeErrors["agent_sync_document"];
+    }
+  });
+});
+
+describe("整份快照晚到，不能盖掉模型刚画的那一笔", () => {
+  /** 当前会话里停着一份 revision 更高的文档：模型还在往里画。 */
+  function live() {
+    const doc = seedDocument();
+    useStore.setState({
+      activeId: "doc-01",
+      document: doc,
+      revision: 10,
+      pngRevision: 10,
+      undoStack: [],
+      redoStack: [],
+      frameIndex: 0,
+      active: { layer: "L0", frame: "F0", color: "#ffffff" },
+    });
+    return doc;
+  }
+
+  /** 一份号更小的旧快照：往返半路上模型又改过画布，它就是那个过时状态。 */
+  function staleSnapshot() {
+    return { id: "doc-01", revision: 7, document: { ...seedDocument(), revision: 7 } };
+  }
+
+  it("revision 更低的快照直接不收", async () => {
+    const doc = live();
+    invokeResults["agent_document"] = staleSnapshot();
+    try {
+      await useStore.getState().refreshDocument();
+    } finally {
+      delete invokeResults["agent_document"];
+    }
+    // 收下这份旧快照，模型刚并进本地的那一笔就被抹掉了，而后端广播基线已经
+    // 推进过去，那一笔再也不会补发。
+    expect(useStore.getState().document).toBe(doc);
+    expect(useStore.getState().revision).toBe(10);
+  });
+
+  it("导入了外来文件时要认领低号文档", async () => {
+    live();
+    invokeResults["agent_document"] = staleSnapshot();
+    try {
+      await useStore.getState().refreshDocument(true);
+    } finally {
+      delete invokeResults["agent_document"];
+    }
+    expect(useStore.getState().revision).toBe(7);
+  });
+});
+
+describe("号更小的增量也得照合", () => {
+  it("撤销把计数器退回旧号之后，模型的增量不能当成过期丢掉", () => {
+    const doc = seedDocument();
+    useStore.setState({
+      activeId: "doc-01",
+      document: doc,
+      revision: 10,
+      pngRevision: 10,
+      frameIndex: 0,
+      active: { layer: "L0", frame: "F0", color: "#ffffff" },
+    });
+    // patch 是「相对上一次广播」的增量，不是第 N 版全量：号小不代表内容旧。
+    const touched = [7, ...doc.cels.L0.F0.indices.slice(1)];
+    publishAgent("doc-01", {
+      kind: "document_updated",
+      revision: 6,
+      patch: {
+        ...fullPatch({ ...doc, revision: 6 }),
+        cels: [["L0", "F0", touched]],
+      },
+    });
+
+    const state = useStore.getState();
+    expect(state.revision).toBe(6);
+    expect(state.pngRevision).toBe(6);
+    expect(state.document?.cels.L0.F0).toEqual({ indices: touched });
   });
 });

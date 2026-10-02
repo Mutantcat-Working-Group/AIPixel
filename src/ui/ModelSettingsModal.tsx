@@ -1,6 +1,6 @@
 // Copyright (C) 2026 Mutantcat Working Group
 // SPDX-License-Identifier: GPL-3.0-only
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Alert,
   Button,
@@ -9,9 +9,9 @@ import {
   Input,
   InputNumber,
   Modal,
+  Popconfirm,
   Segmented,
   Select,
-  Switch,
   Tooltip,
 } from "antd";
 import { KeyRound, Plus, RefreshCw, RotateCcw, ScanEye, Star, Trash2 } from "lucide-react";
@@ -22,6 +22,7 @@ import { DEFAULT_LOOP_LIMITS, type LoopLimits, type SettingsTab } from "../lib/t
 import { LANG_OPTIONS, type Lang } from "../lib/i18n";
 import { useT, type T } from "../lib/t";
 import type { TKey } from "../lib/i18n";
+import McpSection from "./McpSection";
 
 /** 「关于」里摆出去的站点与源码仓库地址。 */
 const PUBLISHER_SITE = "https://mutantcat.org";
@@ -211,28 +212,6 @@ function LimitsSection() {
   );
 }
 
-/** MCP 总闸：单个服务器去留在 MCP 面板里管，这里只说「用不用」。 */
-function McpSection() {
-  const t = useT();
-  const enabled = useStore((s) => s.mcpEnabled);
-  const setEnabled = useStore((s) => s.setMcpEnabled);
-  return (
-    <SettingsSection
-      title={t("settings.mcp")}
-      hint={enabled ? t("settings.mcp_on") : t("settings.mcp_off")}
-      action={
-        <Switch
-          size="small"
-          checked={enabled}
-          onChange={(next) => void setEnabled(next)}
-        />
-      }
-    >
-      <p className="settings-blurb">{t("settings.mcp_hint")}</p>
-    </SettingsSection>
-  );
-}
-
 /** 界面说什么话。放「关于」里：跟着版本、发行者这些「这台机器长什么样」的信息一伙。 */
 function LanguageSection() {
   const t = useT();
@@ -340,7 +319,9 @@ export default function ModelSettingsModal() {
   const capsWatch = Form.useWatch<Capabilities>("capabilities", form);
   const autoHint = maxTokensHint(modelWatch.trim());
   // 自动填过的记录：用户手动改过就不再抢，换模型才重新接手。
-  const [autoMax, setAutoMax] = useState<{ model: string; value: number } | null>(null);
+  // 上一次自动顶的 Max tokens。这数只是效果里的账本，从来不驱动渲染，所以用 ref：
+  // 放 state 里就得进依赖数组，写一次就触一次重跑，纯属自己绕自己。
+  const autoMaxRef = useRef<{ model: string; value: number } | null>(null);
 
   const selected: ModelView | null = models.find((m) => m.id === selectedId) ?? null;
   const activeSession = sessions.find((s) => s.id === activeSessionId) ?? null;
@@ -360,17 +341,22 @@ export default function ModelSettingsModal() {
   ];
 
   // 只在开关时决定选中项；保存后不抢焦点，避免选中项跳回激活模型。
-  useEffect(() => {
+  // open 一变就地处理，不放 effect：effect 体内同步 setState 要多走一次提交，
+  // React 明确不推荐。读的是 store 快照，只在开合那一刻发生一次。
+  const [openSeen, setOpenSeen] = useState(open);
+  if (open !== openSeen) {
+    setOpenSeen(open);
     if (!open) {
       setSelectedId(null);
       setError(null);
       setProbe(null);
-      return;
+    } else {
+      const current = useStore.getState().models;
+      const fallback =
+        current.entries.find((m) => m.id === current.active_id) ?? current.entries[0] ?? null;
+      setSelectedId(fallback ? fallback.id : null);
     }
-    const current = useStore.getState().models;
-    const fallback = current.entries.find((m) => m.id === current.active_id) ?? current.entries[0] ?? null;
-    setSelectedId(fallback ? fallback.id : null);
-  }, [open]);
+  }
 
   useEffect(() => {
     form.setFieldsValue(toForm(selected));
@@ -390,14 +376,11 @@ export default function ModelSettingsModal() {
     const hint = maxTokensHint(name);
     if (!hint) return;
     // 手动改过的字段不抢：同一个模型下值 != 记下的自动值，就当用户自己在管。
-    if (autoMax && autoMax.model === name && maxWatch !== autoMax.value) return;
+    const auto = autoMaxRef.current;
+    if (auto && auto.model === name && maxWatch !== auto.value) return;
     form.setFieldsValue({ max_tokens: hint });
-    // 值没变就得把原对象交回去：每次渲染都造一个新对象，下游 useEffect 的依赖
-    // 永远在变，自己会无限重跑下去。
-    setAutoMax((prev) =>
-      prev && prev.model === name && prev.value === hint ? prev : { model: name, value: hint },
-    );
-  }, [open, modelWatch, maxWatch, autoMax, form]);
+    autoMaxRef.current = { model: name, value: hint };
+  }, [open, modelWatch, maxWatch, form]);
 
   // 拉一份 provider 的模型清单。API key 留空时后端会用这个模型已存的密钥，所以不强制重填。
   async function fetchModels() {
@@ -457,7 +440,15 @@ export default function ModelSettingsModal() {
   }
 
   async function save() {
-    const values = await form.validateFields();
+    let values: FormShape;
+    try {
+      // antd 校验不过时 reject 的是一个普通对象（values / errorFields /
+      // outOfDate），不是 Error。不接住就变成未处理的 rejection，
+      // 控制台里只留一句 "Object"，看着像是崩了。字段上已经标红，安静返回即可。
+      values = await form.validateFields();
+    } catch {
+      return;
+    }
     setSubmitting(true);
     setError(null);
     const id = selected?.id ?? `m${Date.now().toString(36)}`;
@@ -750,17 +741,24 @@ export default function ModelSettingsModal() {
                       {t("settings.set_active")}
                     </Button>
                   ) : null}
-                  <Button
-                    size="small"
-                    danger
-                    icon={<Trash2 size={13} />}
-                    onClick={() => {
+                  {/* 模型定义删了 API Key 也跟着没，重新配一遍很烦，所以先问一句。
+                      行内 Popconfirm 就够，不用开会话删档那么重的弹窗。 */}
+                  <Popconfirm
+                    title={t("settings.delete_confirm", {
+                      name: selected.label || selected.model,
+                    })}
+                    okText={t("settings.delete_ok")}
+                    cancelText={t("settings.delete_cancel")}
+                    okButtonProps={{ danger: true }}
+                    onConfirm={() => {
                       void removeModel(selected.id);
                       selectModel(null);
                     }}
                   >
-                    {t("settings.delete")}
-                  </Button>
+                    <Button size="small" danger icon={<Trash2 size={13} />}>
+                      {t("settings.delete")}
+                    </Button>
+                  </Popconfirm>
                 </>
               ) : null}
             </div>

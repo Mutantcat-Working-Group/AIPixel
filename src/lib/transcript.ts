@@ -43,17 +43,19 @@ export function stripImageCaption(text: string): string {
 
 /**
  * 从 Rust 会话历史重建对话视图。
- * tool_use 与 tool_result 分属两条消息，先按 tool_use_id 收拢结果，再顺序展开。
+ * tool_use 与 tool_result 分属两条消息，先按 tool_use_id 排队收拢结果，再顺序展开。
+ * 用队列而不是 Map：中转平台每一轮都把工具编号重启成 call_0，撞车时
+ * 「最后一次写入」会把两回合的结果全挂到第一回合那条上，往回翻看到的是错的。
  */
 export function historyToTranscript(messages: Message[], lang: Lang = "zh"): TranscriptEntry[] {
-  const results = new Map<string, { summary: string; isError: boolean }>();
+  const results = new Map<string, { summary: string; isError: boolean }[]>();
   for (const message of messages) {
     for (const block of message.content) {
       if (block.type === "tool_result") {
-        results.set(block.tool_use_id, {
-          summary: summaryOf(block.content, lang),
-          isError: block.is_error,
-        });
+        const queue = results.get(block.tool_use_id);
+        const result = { summary: summaryOf(block.content, lang), isError: block.is_error };
+        if (queue) queue.push(result);
+        else results.set(block.tool_use_id, [result]);
       }
     }
   }
@@ -87,7 +89,8 @@ export function historyToTranscript(messages: Message[], lang: Lang = "zh"): Tra
       if (block.type === "reasoning") {
         entries.push({ key: key(), kind: "reasoning", text: block.text, live: false });
       } else if (block.type === "tool_use") {
-        const result = results.get(block.id);
+        const queue = results.get(block.id);
+        const result = queue?.shift();
         entries.push({
           key: key(),
           kind: "tool",
@@ -227,7 +230,18 @@ export function reduceEvent(
       ];
     }
     case "tool_result": {
-      const index = entries.findIndex((e) => e.kind === "tool" && e.id === event.id);
+      // 中转平台每一轮回合都从 call_0 重新编号，两回合的 id 会撞车。
+      // 全局 findIndex 会把第二回合的结果封到第一回合的同名条目上：旧块被改写，
+      // 新块永远停在「运行中」。所以只在当前回合内倒序找，撞到 user 就说明出界了。
+      let index = -1;
+      for (let i = entries.length - 1; i >= 0; i -= 1) {
+        const entry = entries[i];
+        if (entry.kind === "user") break;
+        if (entry.kind === "tool" && entry.id === event.id) {
+          index = i;
+          break;
+        }
+      }
       if (index < 0) return entries;
       const next = [...entries];
       const entry = next[index];
@@ -257,11 +271,25 @@ export function reduceEvent(
           return next;
         }
       }
-      return [...entries, { key: key(), kind: "notice", text: note, isError: false }];
-    }
-    case "error": {
+      // 抽帧、重试是同一件事反复播进度：逐条 append 会把历史刷成标语墙，
+      // 用户往回翻看到的全是「正在读取第 N 帧」这种中间态。顶上要是同 key
+      // 的进度条，就地换字不换位——那一行自己往前走，跑完只留最后一条。
+      const last = entries[entries.length - 1];
+      if (last && last.kind === "notice" && !last.isError && last.progress === event.message.key) {
+        const next = [...entries];
+        next[next.length - 1] = { ...last, text: note };
+        return next;
+      }
       return [
         ...entries,
+        { key: key(), kind: "notice", text: note, isError: false, progress: event.message.key },
+      ];
+    }
+    case "error": {
+      // 报错也是回合收尾：live 助手/思考块要在这里就地合上。store 收尾会兜底，
+      // 但从历史读回、或者旁支只推 event 不跑 store 收尾时，没合口的块会一直闪光标。
+      return [
+        ...sealLiveAssistant(entries),
         {
           key: key(),
           kind: "notice",
@@ -294,7 +322,10 @@ export function sealTranscript(entries: TranscriptEntry[]): TranscriptEntry[] {
   // 占位节点一轮收尾都没变成真内容（空回复 / 直接断掉）：直接抹掉，不残留假气泡。
   // 占位只会由紧随其后的事件（token / reasoning / tool_call）顶掉，收尾时还留着就是死的。
   const withoutPending = entries.filter((entry) => entry.kind !== "pending");
-  return sealLiveAssistant(withoutPending).map((entry) =>
-    entry.kind === "reasoning" && entry.live ? { ...entry, live: false } : entry,
-  );
+  return sealLiveAssistant(withoutPending).map((entry) => {
+    // 工具条目同样有 live：发出去没等到 tool_result 就被收尾时，它一直挂着
+    // 「运行中」，用户会以为模型还在跑。封掉之后由 ToolEntry 显示「未完成」。
+    if (entry.kind !== "tool" && entry.kind !== "reasoning") return entry;
+    return entry.live ? { ...entry, live: false } : entry;
+  });
 }

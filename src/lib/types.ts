@@ -71,6 +71,26 @@ export interface NamedPalette {
   builtin: boolean;
 }
 
+/** 文档增量：`document_updated` 的载荷是它，不是整份文档。
+ *
+ * 为什么：256x256x8层x30帧整份推一次约 47MB JSON，一轮 agent 几十次工具调用
+ * 会把 IPC 灌满，webview 直接卡死。前端本地已持有一份完整文档（撤销要整份回传
+ * 后端），所以增量是「合并进已有文档」而不是替换。 */
+export interface DocPatch {
+  name: string;
+  width: number;
+  height: number;
+  palette: Rgba[];
+  layers: Layer[];
+  frames: Frame[];
+  palettes: NamedPalette[];
+  revision: number;
+  /** 整块换掉的 cel：`[layer_id, frame_id, indices]`。 */
+  cels: [string, string, number[]][];
+  /** 删掉的 cel：`[layer_id, frame_id]`。删图层、删帧都落在这里。 */
+  dropped: [string, string][];
+}
+
 export type ContentBlock =
   | { type: "text"; text: string }
   | { type: "image"; media_type: string; data_base64: string }
@@ -227,7 +247,7 @@ export type AgentEvent =
       input: Record<string, unknown>;
     }
   | { kind: "tool_result"; id: string; name: string; summary: string; is_error: boolean }
-  | { kind: "document_updated"; revision: number; document: PixelDocument }
+  | { kind: "document_updated"; revision: number; patch: DocPatch }
   | { kind: "usage"; input_tokens: number | null; output_tokens: number | null }
   | { kind: "completed"; turns: number }
   // 报错也是键控的：Rust 只给键和变量，界面语言跟着前端的字典走。
@@ -286,6 +306,9 @@ export type TranscriptEntry =
     isError: boolean;
     retry?: boolean;
     side?: boolean;
+    /** progress：这条 notice 是某个后台动作的进度播报（抽第 N 帧、第 N 次重试）。
+     * 存消息 key，同 key 的后续播报就地改写上一条，历史里只留最后那一版。 */
+    progress?: string;
   };
 
 export type ToolName =
@@ -331,11 +354,13 @@ export type EditorOperation =
   // ---- 命名配色范围 ----
   // 复制一套现成的当起点：`from` 是内置预设时 Rust 落点是副本，原套一个色都不动。
   | { op: "create_palette"; name: string; from?: string | null; colors?: string[]; layer?: string | null; id?: string | null }
-  // 内置删不得，还被某层引用着的也删不得，Rust 会拒。
-  | { op: "delete_palette"; id: string }
+  // 内置删不得。还有层在引用时给 `fallback`（另一套范围 id）：那些层先改指过去再删；
+  // 不给 fallback，Rust 照旧拒。
+  | { op: "delete_palette"; id: string; fallback?: string | null }
   | { op: "rename_palette"; id: string; name: string }
   | { op: "add_palette_color"; id: string; color: string }
-  | { op: "remove_palette_color"; id: string; index: number }
+  // 给了 `replacement`：画面上用了被删色的像素全改成它，再删颜色；画面不会被索引前移改色。
+  | { op: "remove_palette_color"; id: string; index: number; replacement?: string | null }
   // 换层的配色范围；Rust 会把这一层的像素就地收进新范围。
   | { op: "set_layer_palette"; layer: string; palette_id: string }
   | { op: "set_layer_locked"; layer: string; locked: boolean };
@@ -522,6 +547,10 @@ export interface ImageGenParams {
   layer?: string | null;
   spot?: LandSpot;
   duration_ms?: number;
+  /** 输入区那个画风下拉点的一项，解析与让位规则在 Rust 的 pins / plan 那一份。 */
+  style?: string | null;
+  /** 同时生效的收尾预设 id，可以叠几条。 */
+  presets?: string[] | null;
 }
 
 /** 探测结论：能（带通路）、不能（带原因）、不知道。三态，不让前端替用户下结论。 */

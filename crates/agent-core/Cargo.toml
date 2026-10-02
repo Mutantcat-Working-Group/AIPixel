@@ -3,6 +3,9 @@ name = "agent-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+# 作者与官网随 workspace 继承：每个 crate 的元数据都能看出发行方。
+authors.workspace = true
+homepage.workspace = true
 
 [dependencies]
 serde.workspace = true
@@ -16,4 +19,5 @@ async-trait = "0.1"
 pixel-core = { path = "../pixel-core" }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+http = "1"

@@ -1052,8 +1052,12 @@ fn builtin_presets_are_read_only() {
         PixelOperation::RemovePaletteColor {
             id: "pico8".into(),
             index: 0,
+            replacement: None,
         },
-        PixelOperation::DeletePalette { id: "pico8".into() },
+        PixelOperation::DeletePalette {
+            id: "pico8".into(),
+            fallback: None,
+        },
     ];
     for op in attempts {
         let err = ops::apply_batch(&mut doc, &[op]).expect_err("内置预设动不得");
@@ -1137,6 +1141,7 @@ fn removing_a_palette_color_keeps_pixels_intact() {
         &[PixelOperation::RemovePaletteColor {
             id: palette_id.clone(),
             index: 1,
+            replacement: None,
         }],
     )
     .expect("remove applies");
@@ -1174,11 +1179,118 @@ fn deleting_a_palette_in_use_is_refused() {
 
     let err = ops::apply_batch(
         &mut doc,
-        &[PixelOperation::DeletePalette { id: id.clone() }],
+        &[PixelOperation::DeletePalette {
+            id: id.clone(),
+            fallback: None,
+        }],
     )
     .expect_err("还被图层引用的删不掉");
     assert!(matches!(err, ops::OperationError::PaletteInUse(_, _)));
     assert!(doc.palette_by_id(&id).is_some());
+}
+
+/// 正被自家层引用的预设，给了接盘的那一套就删得掉：层先改指过去，预设才消失。
+/// 缺了这条，用户一套自建范围都清不掉——当前层必然在引用它。
+#[test]
+fn deleting_a_palette_in_use_moves_its_layers_to_the_fallback() {
+    let mut doc = blank();
+    ops::apply_batch(
+        &mut doc,
+        &[PixelOperation::CreatePalette {
+            name: "临时的".into(),
+            from: None,
+            colors: vec!["#ff0000".into()],
+            layer: None,
+            id: None,
+        }],
+    )
+    .expect("create applies");
+    let id = doc.palettes.last().unwrap().id.clone();
+    ops::apply_batch(
+        &mut doc,
+        &[
+            PixelOperation::SetLayerPalette {
+                layer: "L0".into(),
+                palette_id: id.clone(),
+            },
+            PixelOperation::CreateLayer {
+                after: Some("L0".into()),
+                name: Some("第二层".into()),
+                palette_id: Some(id.clone()),
+                locked: None,
+                id: None,
+            },
+        ],
+    )
+    .expect("switch applies");
+
+    ops::apply_batch(
+        &mut doc,
+        &[PixelOperation::DeletePalette {
+            id: id.clone(),
+            fallback: Some("sweetie16".into()),
+        }],
+    )
+    .expect("接了盘就删得掉");
+
+    assert!(doc.palette_by_id(&id).is_none(), "预设真的没了");
+    for layer in &doc.layers {
+        assert_eq!(
+            layer.palette_id, "sweetie16",
+            "引用过它的层都要落到接盘那套上"
+        );
+        assert!(doc.palette_by_id(&layer.palette_id).is_some());
+    }
+}
+
+/// 删色带上接手色：画面用着被删色的像素跟着改写，不会因为索引前移悄悄变色。
+#[test]
+fn removing_a_palette_color_can_hand_its_pixels_to_a_replacement() {
+    let mut doc = blank();
+    let l0 = doc.layers[0].id.clone();
+    let f0 = doc.frames[0].id.clone();
+    ops::apply_batch(
+        &mut doc,
+        &[
+            PixelOperation::CreatePalette {
+                name: "我的配色".into(),
+                from: None,
+                colors: vec!["#ff0000".into(), "#00ff00".into(), "#0000ff".into()],
+                layer: Some(l0.clone()),
+                id: None,
+            },
+            PixelOperation::SetPixels {
+                layer: l0.clone(),
+                frame: f0.clone(),
+                cells: (0..4)
+                    .map(|x| ops::PixelCell {
+                        x,
+                        y: 3,
+                        color: "#ff0000".into(),
+                    })
+                    .collect(),
+            },
+        ],
+    )
+    .expect("batch applies");
+    let palette_id = doc.layer(&l0).unwrap().palette_id.clone();
+
+    ops::apply_batch(
+        &mut doc,
+        &[PixelOperation::RemovePaletteColor {
+            id: palette_id.clone(),
+            index: 0,
+            replacement: Some("#00ff00".into()),
+        }],
+    )
+    .expect("remove applies");
+
+    assert_eq!(doc.palette_by_id(&palette_id).unwrap().colors.len(), 2);
+    for x in 0..4 {
+        let painted =
+            doc.palette[doc.cel(&l0, &f0).unwrap().indices[(3 * 16 + x) as usize] as usize - 1];
+        assert_eq!(painted, Rgba::rgb(0x00, 0xff, 0x00), "像素该跟着接手色走");
+    }
 }
 
 #[test]
@@ -1233,6 +1345,34 @@ fn aip_round_trip_keeps_named_palettes() {
             .colors
     );
     assert!(back.palettes.iter().any(|p| p.id == "pico8" && p.builtin));
+}
+
+/// 63 个颜色正是从护栏缝里溜过去的那个数：符号表 62 个字符，索引 63
+/// 已经没有符号可发。以前护栏写的是 `> 62 + 1`，63 色被放行，紧接着
+/// `SYMBOLS[62]` 越界——用户点一次「导出 .aip」，整个进程连着画布一起没。
+#[test]
+fn exporting_sixty_three_colors_reports_instead_of_panicking() {
+    let mut doc = blank();
+    for i in 0..=(rle::SYMBOLS.len()) {
+        doc.palette.push(Rgba::rgb(i as u8, 255 - i as u8, 128));
+    }
+    assert_eq!(
+        doc.palette.len(),
+        rle::SYMBOLS.len() + 1,
+        "正好卡在护栏缝上"
+    );
+
+    let dumped = aip::dump_v2(&doc);
+    assert!(dumped.is_err(), "63 色必须报错，而不是越界 panic");
+    let message = dumped.unwrap_err().to_string();
+    assert!(message.contains("too large"), "报错要说清原因：{message}");
+
+    // 62 色是上限内的边界，必须照旧导出、照旧读得回来。
+    doc.palette.pop();
+    let text = aip::dump_v2(&doc).expect("62 色照旧能导出");
+    assert!(text.contains("@palette"), "{text}");
+    let back = aip::parse_v2(&text).expect("62 色往返");
+    assert_eq!(back.palette.len(), doc.palette.len());
 }
 
 /// 老 .aip 没有 @palettes 段：读回来必须补上内置库，否则配色面板开天窗。
@@ -1597,4 +1737,710 @@ fn locked_layer_keeps_a_pixelized_bitmap_inside_its_range() {
         open_before,
         doc.palette.len()
     );
+}
+
+#[test]
+fn aip_round_trip_keeps_colors_when_the_first_painted_color_is_not_palette_zero() {
+    // 回归：@cel 段曾经按「索引在画面里首次出现的顺序」发符号，而 @palette 段
+    // 按调色板位置发。两者一旦不一致，导出再导入就把颜色整体换掉，且写读写写
+    // 字节稳定、没有任何报错。这里故意让 palette[0] 完全不登场，逼两套表分叉。
+    let mut doc = blank();
+    let (layer, frame) = (doc.layers[0].id.clone(), doc.frames[0].id.clone());
+    // 偏偏只画最后一色（索引 4）：调色板越靠后、登场越晚，两套符号表分叉得
+    // 越厉害。旧的按序发符号会把索引 4 发成 'a'，而 @palette 段里 'a' 是
+    // palette[0]，于是整幅画换色。
+    ops::apply_batch(
+        &mut doc,
+        &[
+            PixelOperation::AddPaletteColors {
+                colors: vec![
+                    "#111111".into(),
+                    "#222222".into(),
+                    "#778899".into(),
+                    "#112233".into(),
+                ],
+            },
+            PixelOperation::SetPixels {
+                layer: layer.clone(),
+                frame: frame.clone(),
+                cells: vec![ops::PixelCell {
+                    x: 0,
+                    y: 0,
+                    color: "#112233".into(),
+                }],
+            },
+        ],
+    )
+    .unwrap();
+    let original = doc
+        .color_of(
+            doc.cel(&layer, &frame)
+                .unwrap()
+                .get(doc.width, 0, 0)
+                .unwrap(),
+        )
+        .unwrap();
+
+    let text = context::to_aip(&doc).expect("export");
+    let back = aip::import_any(&text).expect("import");
+
+    // 调色板顺序和内容必须原样回来。
+    assert_eq!(
+        back.palette, doc.palette,
+        "往返之后调色板内容变了，说明 @palette 段和 @cel 段用的不是同一套符号表"
+    );
+    let idx = back
+        .cel(&back.layers[0].id, &back.frames[0].id)
+        .unwrap()
+        .get(back.width, 0, 0)
+        .expect("那一格还在");
+    assert_eq!(
+        back.color_of(idx),
+        Some(original),
+        "同一个 cel 索引读回的颜色必须是导出的那个"
+    );
+}
+
+#[test]
+fn encode_row_never_merges_two_identical_colors_into_one_symbol() {
+    // 调色板里出现重复颜色时，「先按颜色找到的符号」会把两种颜色都写成同一个
+    // 符号，读回来整片串成第一种。
+    let palette = vec![Rgba::rgb(10, 20, 30), Rgba::rgb(10, 20, 30)];
+    let legend = rle::Legend::build(&palette, &[1, 2]);
+    let row = rle::encode_row(&[1, 2], &legend);
+    assert_eq!(row, "ab", "重复颜色也必须各占各的符号：{row}");
+}
+
+#[test]
+fn legend_symbols_match_the_row_encoding() {
+    // 图例和行编码必须走同一套「索引 -> 符号」。图例里全是 'a' 的话，
+    // 模型读到的颜色跟画面整体错位，而写读写写字节完全稳定，看不出报错。
+    let palette = vec![
+        Rgba::parse_hex("#FF004D").unwrap(),
+        Rgba::parse_hex("#00E436").unwrap(),
+        Rgba::parse_hex("#29ADFF").unwrap(),
+    ];
+    let legend = rle::Legend::build(&palette, &[1, 2, 3]);
+    let lines = legend.to_lines();
+    assert_eq!(
+        lines,
+        vec![
+            ". = transparent".to_string(),
+            "a = #ff004d".to_string(),
+            "b = #00e436".to_string(),
+            "c = #29adff".to_string(),
+        ],
+        "图例符号必须跟行编码同源：{lines:?}"
+    );
+    // 反方向：行里出现的符号，图例里一定要有一行对应的颜色。
+    let row = rle::encode_row(&[0, 1, 2, 3, 3, 2], &legend);
+    // [0,1,2,3,3,2] -> . a b 2c b（3 和 3 并成一次重复）
+    assert_eq!(row, ".ab2cb", "{row}");
+    for ch in row.chars().filter(|c| c.is_ascii_alphabetic()) {
+        assert!(
+            lines.iter().any(|l| l.starts_with(ch)),
+            "行里的符号 {ch} 在图例里没有对应颜色"
+        );
+    }
+}
+
+/// cel 比调色板长时（索引从 .aip 或者别的进程灌进来），行里会写 `?`。
+/// 图例必须把它讲成「这个位置没有颜色」，而不是跟透明的 `None` 混作一谈：
+/// 那等于告诉模型这片是空白，模型顺手就把它擦了。
+#[test]
+fn an_index_outside_the_palette_is_never_reported_as_transparent() {
+    let palette = vec![Rgba::parse_hex("#FF004D").unwrap()];
+    // 索引 3 超出了调色板长度 1，可 cel 里真有这一格。
+    let legend = rle::Legend::build(&palette, &[1, 3]);
+
+    assert_eq!(legend.dangling.len(), 1, "悬空索引必须登记在册");
+    assert_eq!(
+        legend.dangling[0],
+        rle::Unmapped::OutsidePalette(3),
+        "登记的是索引本身：这一格的颜色压根没定义"
+    );
+    let lines = legend.to_lines();
+    assert_eq!(lines[0], ". = transparent", "透明那一行不许被挤掉");
+    assert_eq!(lines[1], "a = #ff004d", "有颜色的那一行也不许被挤掉");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("? = unmapped") && l.contains('3')),
+        "图例里必须有一行讲清 ? 是什么：{lines:?}"
+    );
+
+    // 行编码和图例同源：同一个索引 3 在行里也是 ?，不会是图例里的 c。
+    assert_eq!(rle::encode_row(&[1, 3], &legend), "a?");
+    for ch in "a?".chars() {
+        assert!(
+            !ch.is_ascii_alphabetic() || lines.iter().any(|l| l.starts_with(ch)),
+            "行里的符号 {ch} 在图例里没有对应颜色"
+        );
+    }
+}
+
+/// 第 63 个颜色往后没有单字符符号可发。以前图例会照样写一行 `? = #xxxxxx`，
+/// 于是好几种颜色共用同一个符号：模型照着 `?` 写一笔，整片像素悄悄收敛成
+/// 一种色，写读写写的字节还全都稳定，没人看得出来。
+#[test]
+fn colors_without_a_symbol_are_named_by_hex_not_by_the_question_mark() {
+    // 66 个颜色：前 62 个拿得到符号，后 4 个只能共用 `?`。
+    let palette: Vec<Rgba> = (0..66u16)
+        .map(|i| Rgba::rgb((i * 3) as u8, (i * 5) as u8, (i * 7) as u8))
+        .collect();
+    let used: Vec<u16> = (1..=66).collect();
+    let legend = rle::Legend::build(&palette, &used);
+
+    // 拿得到符号的那 62 个照旧逐色一行，一个都不许被 ? 顶掉。
+    assert_eq!(legend.entries.len(), 1 + 62, "透明加 62 个有符号的颜色");
+    assert!(
+        legend.entries.iter().all(|(sym, _)| *sym != '?'),
+        "图例里不该出现 ? 冒充某一种颜色"
+    );
+    // 剩下 4 个进悬空清单，而且带着各自的 hex。
+    assert_eq!(legend.dangling.len(), 4);
+    for (slot, index) in legend.dangling.iter().zip(63..=66u16) {
+        match slot {
+            rle::Unmapped::SymbolsExhausted { index: idx, color } => {
+                assert_eq!(*idx, index);
+                assert_eq!(color.to_hex(), palette[index as usize - 1].to_hex());
+            }
+            other => panic!("索引 {index} 该归到符号用尽，却是 {other:?}"),
+        }
+    }
+
+    // 行里这些格子写 ?，可图例必须告诉模型 ? 不是颜色，并给出 hex。
+    let row = rle::encode_row(&[63, 63, 64], &legend);
+    assert_eq!(row, "2??", "每个没符号的索引都写成 ?：{row}");
+    let text = legend.to_lines().join("\n");
+    let third_color = palette[62].to_hex();
+    assert!(
+        text.contains("symbol limit") && text.contains(&third_color),
+        "图例必须点明符号用尽并给出真实 hex：{text}"
+    );
+    assert!(
+        !text.lines().any(|l| l.starts_with("? = #")),
+        "? 不许再冒充某一种颜色：{text}"
+    );
+}
+#[test]
+fn truncated_quotes_degrade_instead_of_killing_the_process() {
+    // 手写的 .aip 少了收尾引号时，解析器过去会在多字节内容上切出越界切片，
+    // 整个进程带着 panic 消失，用户一次误触就丢掉整张画布。
+    let broken = [
+        "AIP 2",
+        "@meta name=\"未闭合",
+        "@palette",
+        ". transparent",
+        "a #111111",
+        "@layers",
+        "L0 \"第二层",
+        "@frames",
+        "F0 100",
+        "@cel L0 F0 2x1 rle",
+        "aa",
+    ]
+    .join("\n");
+
+    let doc = aip::parse_v2(&broken).expect("缺引号的文件应当降级解析而不是 panic");
+    // 引号后面的 key=value 被整段吞进名字，但图层本身和像素都还在。
+    assert_eq!(doc.layers.len(), 1, "图层没解析出来：{:?}", doc.layers);
+    assert!(doc.layers[0].name.contains("第二层"), "{:?}", doc.layers[0]);
+    assert_eq!(doc.width, 2);
+    let idx = doc.cel("L0", "F0").expect("cel 还在").get(2, 0, 0);
+    assert_eq!(idx, Some(1), "颜色索引没读回来");
+}
+
+#[test]
+fn cel_header_with_astronomical_dims_is_refused_before_it_allocates() {
+    // cel 头的宽高是 Vec 分配的直接参数。过去这里不设防，写个 100000x100000
+    // 就要在报错之前先把几十 GB 的索引数组开出来，进程直接被 OOM 打死。
+    let mut huge = vec![
+        "AIP 2".to_string(),
+        "@palette".into(),
+        ". transparent".into(),
+        "a #111111".into(),
+        "@layers".into(),
+        "L0 \"only\"".into(),
+        "@frames".into(),
+        "F0 100".into(),
+        "@cel L0 F0 100000x100000 rle".into(),
+    ];
+    // 真给满行数的话测试自己就得跑一年，所以只写一行：位置在 cel 头，不该走到分配。
+    huge.push("a".repeat(100000));
+    let outcome = aip::parse_v2(&huge.join("\n"));
+    let message = outcome
+        .expect_err("天文数字的 cel 头必须被拒绝")
+        .to_string();
+    assert!(message.contains("cel"), "{message}");
+}
+
+#[test]
+fn duplicate_layer_ids_are_refused_instead_of_sharing_one_cel() {
+    // 图层 id 重名时 cels 的 BTreeMap 会把两层合成一格：改一层、另一层跟着变，
+    // 前端侧栏还会撞出重复的 React key。
+    let broken = [
+        "AIP 2",
+        "@palette",
+        ". transparent",
+        "a #111111",
+        "@layers",
+        "L0 \"第一层\"",
+        "L0 \"第二层\"",
+        "@frames",
+        "F0 100",
+        "@cel L0 F0 2x1 rle",
+        "aa",
+    ]
+    .join("\n");
+
+    let message = aip::parse_v2(&broken)
+        .expect_err("重名图层 id 必须拒绝")
+        .to_string();
+    assert!(message.contains("L0"), "{message}");
+}
+
+#[test]
+fn cel_header_that_grows_an_existing_cel_is_refused() {
+    // 同一个 cel 写两遍、第二遍尺寸更大：Cel::new 已按旧尺寸分配过，
+    // 照旧写下去 copy_from_slice 会切出越界片，进程带着 panic 消失。
+    let broken = [
+        "AIP 2",
+        "@palette",
+        ". transparent",
+        "a #111111",
+        "@layers",
+        "L0 \"only\"",
+        "@frames",
+        "F0 100",
+        "@cel L0 F0 2x1 rle",
+        "aa",
+        "@cel L0 F0 4x2 rle",
+        "aaaa",
+        "aaaa",
+    ]
+    .join("\n");
+
+    let message = aip::parse_v2(&broken)
+        .expect_err("同一 cel 换尺寸必须拒绝")
+        .to_string();
+    assert!(message.contains("inconsistent"), "{message}");
+}
+
+#[test]
+fn named_palette_line_without_a_closing_quote_reports_a_plain_error() {
+    // 配色范围段缺引号时名字会吃掉后面的颜色表，剩下空 tokens。
+    // 这种文件只能拒绝，但不能 panic：调用方要拿到的是 AipError。
+    let broken = "p0 \"我的配色 custom #ff0000";
+    let outcome = std::panic::catch_unwind(|| {
+        aip::parse_v2(&format!(
+            "AIP 2\n@palettes\n{broken}\n@palette\n. transparent\na #111111\n"
+        ))
+        .map(|doc| doc.palettes.len())
+    });
+    let parsed = outcome.expect("解析残缺引号不该 panic");
+    assert!(
+        parsed.is_err() || parsed.as_ref().unwrap().eq(&0),
+        "{parsed:?}"
+    );
+}
+
+#[test]
+fn oversized_run_count_is_rejected_before_it_allocates() {
+    // 一行 2x1 的 cel 写成 `100000000a`，解码器过去先按计数铺索引，
+    // 校验行宽之前就把几百兆内存申请出去。现在必须先被行宽拦住。
+    let text = [
+        "AIP 2",
+        "@meta name=\"x",
+        "@palette",
+        ". transparent",
+        "a #111111",
+        "@layers",
+        "L0 \"Layer 1\" visible 255 palette=default unlocked",
+        "@frames",
+        "F0 100",
+        "@cel L0 F0 2x1 rle",
+        "100000000a",
+    ]
+    .join("\n");
+
+    let parsed = aip::parse_v2(&text);
+    assert!(parsed.is_err(), "超宽的 run 必须在分配内存之前被拒绝");
+}
+
+#[test]
+fn batch_that_breaks_the_layer_limit_leaves_the_document_alone() {
+    // 上限检查过去在循环外面，`?` 直接带着半个文档返回：129 次 CreateLayer
+    // 走到第 129 个才失败，可文档里已经实实在在多了 128 层。
+    let mut doc = blank();
+    let ops: Vec<PixelOperation> = (0..200)
+        .map(|_| PixelOperation::CreateLayer {
+            after: None,
+            name: None,
+            id: None,
+            palette_id: None,
+            locked: None,
+        })
+        .collect();
+
+    let outcome = ops::apply_batch(&mut doc, &ops);
+    assert!(outcome.is_err(), "超过图层上限必须整批失败");
+    assert_eq!(doc.layers.len(), 1, "失败之后文档不应该留下任何半成品图层");
+}
+
+#[test]
+fn create_with_an_id_that_already_exists_is_refused() {
+    // 显式 id 撞名会留下两条同 id 的帧/层，cel 按 id 索引时互相冲掉。
+    let mut doc = blank();
+    let existing = doc.layers[0].id.clone();
+
+    assert!(
+        ops::apply_one(
+            &mut doc,
+            &PixelOperation::CreateLayer {
+                after: None,
+                name: Some("重名层".into()),
+                id: Some(existing.clone()),
+                palette_id: None,
+                locked: None,
+            }
+        )
+        .is_err(),
+        "同 id 的图层必须被拒绝"
+    );
+    assert!(
+        ops::apply_one(
+            &mut doc,
+            &PixelOperation::CreateFrame {
+                after: None,
+                duration_ms: 100,
+                id: Some("F0".into()),
+            }
+        )
+        .is_err(),
+        "同 id 的帧必须被拒绝"
+    );
+    assert_eq!(doc.layers.len(), 1);
+    assert_eq!(doc.frames.len(), 1);
+}
+
+#[test]
+fn emptying_the_palette_is_refused_instead_of_wiping_the_canvas() {
+    // 空配色表让就近映射全程落空，索引全归 0，整幅画静默擦成透明。
+    let mut doc = blank();
+    let (layer, frame) = (doc.layers[0].id.clone(), doc.frames[0].id.clone());
+    ops::apply_batch(
+        &mut doc,
+        &[
+            PixelOperation::AddPaletteColors {
+                colors: vec!["#ff0000".into()],
+            },
+            PixelOperation::SetPixels {
+                layer: layer.clone(),
+                frame: frame.clone(),
+                cells: vec![ops::PixelCell {
+                    x: 1,
+                    y: 1,
+                    color: "#ff0000".into(),
+                }],
+            },
+        ],
+    )
+    .expect("setup");
+
+    let outcome = ops::apply_one(&mut doc, &PixelOperation::SetPalette { colors: vec![] });
+    assert!(outcome.is_err(), "清空调色板必须报错");
+    assert_eq!(
+        doc.cel(&layer, &frame).unwrap().get(doc.width, 1, 1),
+        Some(1),
+        "画上去的像素不该被抹掉"
+    );
+}
+
+#[test]
+fn cel_set_refuses_x_past_the_row_width() {
+    // 只查扁平下标的话，x 超过 width 的点会被写进下一行，右边溢出悄悄串到下面。
+    let mut doc = blank();
+    let (w, h) = (doc.width, doc.height);
+    let cel = doc.cel_mut("L0", "F0").unwrap();
+    assert!(!cel.set(w, w, 0, 1), "越列写入必须失败");
+    assert!(!cel.set(w, 0, h, 1), "越行写入必须失败");
+    assert!(cel.set(w, 0, 0, 1), "合法格子照样能写");
+    assert_eq!(cel.get(w, 0, 0), Some(1));
+}
+
+#[test]
+fn a_failed_animate_run_restores_the_frames_it_already_cleared() {
+    // 逐帧执行先清 cel 再跑脚本，报错的那一帧之前清空的格子必须还原，
+    // 否则画面凭空少半截，而 revision 也没动，前端还以为「什么都没发生」。
+    let mut doc = blank();
+    let layer = doc.layers[0].id.clone();
+    ops::apply_batch(
+        &mut doc,
+        &[
+            PixelOperation::AddPaletteColors {
+                colors: vec!["#29ADFF".into()],
+            },
+            PixelOperation::CreateFrame {
+                after: None,
+                duration_ms: 80,
+                id: None,
+            },
+        ],
+    )
+    .unwrap();
+    ops::apply_batch(
+        &mut doc,
+        &[PixelOperation::SetPixels {
+            layer: layer.clone(),
+            frame: "F0".into(),
+            cells: vec![ops::PixelCell {
+                x: 3,
+                y: 3,
+                color: "#29ADFF".into(),
+            }],
+        }],
+    )
+    .unwrap();
+
+    let outcome = shader::run_shader(
+        &mut doc,
+        &layer,
+        // 第一帧画得动，第二帧踩一脚内置名让脚本炸掉。
+        "if frame_index == 0 then pset(1, 1, pal(1)) else local line = 1 line() end",
+        true,
+        &ShaderBudget::default(),
+    );
+    assert!(outcome.is_err(), "脚本报错必须向上抛");
+
+    let cel = doc.cel(&layer, "F0").expect("cel 还在");
+    assert_eq!(
+        cel.get(doc.width, 3, 3),
+        Some(1),
+        "失败之后原先画好的像素必须还在"
+    );
+    assert_eq!(
+        cel.get(doc.width, 1, 1),
+        Some(0),
+        "失败那一帧临时画的点不该留着"
+    );
+}
+
+// ---- 平滑绘制（抗锯齿）经真 Lua 跑一遍 ----
+
+fn aa_doc(size: u32) -> (Document, String, String) {
+    let doc = Document::new("aa", size, size).expect("square within limits");
+    let (layer, frame) = (doc.layers[0].id.clone(), doc.frames[0].id.clone());
+    (doc, layer, frame)
+}
+
+#[test]
+fn aa_lua_softens_a_diagonal_with_intermediate_colors() {
+    let (mut doc, layer, _frame) = aa_doc(24);
+    ops::apply_batch(
+        &mut doc,
+        &[
+            PixelOperation::AddPaletteColors {
+                colors: vec!["#000000".into(), "#FFFFFF".into()],
+            },
+            // 先糊一层黑底：斜线要掺的正是黑与白之间的灰。
+            PixelOperation::SetPixels {
+                layer: layer.clone(),
+                frame: "F0".into(),
+                cells: (0..24)
+                    .flat_map(|y| {
+                        (0..24).map(move |x| ops::PixelCell {
+                            x,
+                            y,
+                            color: "#000000".into(),
+                        })
+                    })
+                    .collect(),
+            },
+        ],
+    )
+    .unwrap();
+    let before = doc.palette.len();
+    let outcome = shader::run_shader(
+        &mut doc,
+        &layer,
+        "aaline(2, 3, 21, 20, '#FFFFFF')",
+        false,
+        &ShaderBudget::default(),
+    )
+    .expect("aaline runs");
+    assert!(outcome.opaque_pixels > 0, "柔线要画出东西来");
+    // 掺出来的灰必须真的进了调色板：像素画的色阶就是这么长出来的。
+    assert!(
+        doc.palette.len() > before,
+        "半覆盖格该掺出新色阶：{} -> {}",
+        before,
+        doc.palette.len()
+    );
+    // 45° 附近的斜线，两行交替出现才叫柔；纯 Bresenham 是同一行串成一条。
+    let rows: Vec<u32> = doc
+        .cel(&layer, "F0")
+        .unwrap()
+        .indices
+        .iter()
+        .enumerate()
+        .filter(|(_, i)| **i != 0)
+        .map(|(i, _)| (i as u32) / doc.width)
+        .collect();
+    assert!(rows.windows(2).any(|w| w[0] != w[1]), "斜线至少要穿过两行");
+}
+
+#[test]
+fn aa_lua_shapes_and_point_tables_all_paint() {
+    let (mut doc, layer, _frame) = aa_doc(32);
+    ops::apply_batch(
+        &mut doc,
+        &[PixelOperation::AddPaletteColors {
+            colors: vec!["#29ADFF".into()],
+        }],
+    )
+    .unwrap();
+    let script = r##"
+      aacurve(2, 28, 30, 28, 16, 2, '#FF004D')
+      aacubic(2, 2, 30, 2, 10, 12, 22, 20, '#FF004D')
+      aapoly({{x=4,y=4},{x=14,y=4},{x=9,y=14}}, '#00E436')
+      aapolyfill({{4,20},{14,20},{9,29}}, '#00E436')
+      aacircle(24, 10, 4, '#FFEC27', true)
+      aaellipse(18, 14, 28, 24, '#FFEC27')
+      aarect(2, 16, 7, 23, '#FF004D', true)
+      blend(31, 31, '#FFFFFF', 0.5)
+      dither(15, 15, '#FFFFFF', 0.5)
+    "##;
+    let outcome = shader::run_shader(&mut doc, &layer, script, false, &ShaderBudget::default())
+        .expect("aa shapes run");
+    assert!(outcome.opaque_pixels > 20, "每个形状都该留下痕迹");
+
+    let cel = doc.cel(&layer, "F0").unwrap();
+    let at = |x: u32, y: u32| cel.get(doc.width, x, y).unwrap_or(0);
+    // 圆心那一格必须是实心圆留下的一笔，填充描边两不落空。
+    assert!(at(24, 10) != 0, "aacircle 实心圆要在圆心落色");
+    // aarect 的角上那格也必须在：填充矩形最老实，它没了说明整条链断了。
+    assert!(at(4, 19) != 0, "aarect 填充要在矩形里落色");
+    // dither 只按阈值落色，50% 覆盖率下一半的格会亮——这里不断言具体哪一格，
+    // 只确认整幅图确实被这一串形状动过。
+    assert!(cel.indices.iter().any(|i| *i != 0), "整幅图要留下痕迹");
+}
+
+#[test]
+fn aa_lua_point_tables_accept_every_writing_style() {
+    let (mut doc, layer, _frame) = aa_doc(32);
+    ops::apply_batch(
+        &mut doc,
+        &[PixelOperation::AddPaletteColors {
+            colors: vec!["#29ADFF".into()],
+        }],
+    )
+    .unwrap();
+    let script = r##"
+      aapoly({{x=2,y=30},{x=16,y=2},{x=30,y=30}}, '#FF004D')
+      aapoly({{2,16},{30,16}}, '#FF004D')
+      aapoly({8,4,24,20}, '#FF004D')
+      aapolyfill({{10,26},{14,26},{12,30}}, '#FF004D')
+    "##;
+    let outcome = shader::run_shader(&mut doc, &layer, script, false, &ShaderBudget::default())
+        .expect("every point table shape parses");
+    assert!(outcome.opaque_pixels > 5);
+}
+
+#[test]
+fn aa_lua_respects_the_palette_lock() {
+    let (mut doc, layer, _frame) = aa_doc(24);
+    let palette_id = doc.palettes[0].id.clone();
+    ops::apply_batch(
+        &mut doc,
+        &[
+            PixelOperation::AddPaletteColors {
+                colors: vec!["#000000".into(), "#FFFFFF".into()],
+            },
+            PixelOperation::SetLayerPalette {
+                layer: layer.clone(),
+                palette_id: palette_id.clone(),
+            },
+            PixelOperation::SetLayerLocked {
+                layer: layer.clone(),
+                locked: true,
+            },
+        ],
+    )
+    .unwrap();
+    shader::run_shader(
+        &mut doc,
+        &layer,
+        "aaline(1, 1, 22, 22, '#00FF00')",
+        false,
+        &ShaderBudget::default(),
+    )
+    .expect("shrunk to the locked range");
+    // 上着锁的层只肯落范围里的颜色：掺出来的灰就近归队，不该出现范围之外的颜色
+    // ——那正是上锁要挡的事。落进来的只可能是范围里那几个色，天然有上界。
+    let range = doc
+        .palette_by_id(&palette_id)
+        .expect("palette still there")
+        .colors
+        .clone();
+    let mut seen: Vec<Rgba> = Vec::new();
+    for index in doc
+        .cel(&layer, "F0")
+        .expect("cel")
+        .indices
+        .iter()
+        .filter(|i| **i != 0)
+    {
+        let color = doc.color_of(*index).expect("index in range");
+        assert!(
+            range.contains(&color),
+            "锁着的层落出了范围之外的色 {}",
+            color.to_hex()
+        );
+        if !seen.contains(&color) {
+            seen.push(color);
+        }
+    }
+    assert!(!seen.is_empty(), "这条线至少要画上几格");
+}
+
+#[test]
+fn aa_lua_clips_geometry_that_flies_off_the_canvas() {
+    let (mut doc, layer, _frame) = aa_doc(16);
+    ops::apply_batch(
+        &mut doc,
+        &[PixelOperation::AddPaletteColors {
+            colors: vec!["#29ADFF".into()],
+        }],
+    )
+    .unwrap();
+    let script = r##"
+      aacircle(400, 400, 90, '#FF004D', true)
+      aaellipse(-300, -300, -100, -100, '#FF004D')
+      aarect(900, 900, 1000, 1000, '#FF004D')
+      aacurve(500, 500, 900, 900, 700, 700, '#FF004D')
+      aaline(-50, -50, -10, -10, '#FF004D')
+    "##;
+    // 半径写飞、坐标写飞都不许把沙箱拖死，也不许往画布外写色。
+    shader::run_shader(&mut doc, &layer, script, false, &ShaderBudget::default())
+        .expect("canvas-external geometry is clipped, not fatal");
+    let cel = doc.cel(&layer, "F0").unwrap();
+    assert!(
+        cel.indices.iter().all(|i| *i == 0),
+        "全在画布外的几何一格都不该落"
+    );
+}
+
+#[test]
+fn aa_lua_bad_arguments_report_the_usual_cause() {
+    let (mut doc, layer, _frame) = aa_doc(16);
+    let err = shader::run_shader(
+        &mut doc,
+        &layer,
+        "aapoly({{x=2,y=2}, 9}, '#FF004D')",
+        false,
+        &ShaderBudget::default(),
+    );
+    let text = err.err().map(|e| e.to_string()).unwrap_or_default();
+    assert!(text.contains("point"), "点表写错要把话说清楚： {text}");
 }

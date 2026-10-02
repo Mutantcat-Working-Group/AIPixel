@@ -115,6 +115,8 @@ fn scatter_key(x: u32, y: u32) -> u64 {
     h
 }
 
+/// 定这些像素「谁先谁后」翻面。Migrate 一帧只翻一个，顺序本身就是
+/// 动画：从左上往右下扫是常规的显影感，打散则是溶解，径向由内向外爆开。
 fn order_positions(mut positions: Vec<(u32, u32)>, order: MigrateOrder) -> Vec<(u32, u32)> {
     match order {
         MigrateOrder::Scan => {}
@@ -136,7 +138,16 @@ fn order_positions(mut positions: Vec<(u32, u32)>, order: MigrateOrder) -> Vec<(
 /// 第 `offset` 个未被占用的帧 id，形如 F3。
 /// 一次 tween 要生成多个 id，而帧还没真正插入文档，所以必须靠 offset 保证不自我重复。
 fn next_frame_id(doc: &Document, offset: usize) -> String {
-    let mut n = doc.frames.len() + offset;
+    // 起点取现有数字编号的最大值：按 frames.len() 猜会让跳过编号的文档
+    // 反复生成同一个 id，两帧同名后 cel 互相冲掉。
+    let base = doc
+        .frames
+        .iter()
+        .filter_map(|f| f.id.strip_prefix('F'))
+        .filter_map(|s| s.parse::<usize>().ok())
+        .max()
+        .unwrap_or(0);
+    let mut n = base + 1 + offset;
     loop {
         let candidate = format!("F{n}");
         if !doc.frames.iter().any(|f| f.id == candidate) {
@@ -245,7 +256,12 @@ pub fn insert_tween_frames(
                 }
             }
         }
-        let room = MAX_PALETTE - doc.palette.len();
+        let used = doc.palette.len();
+        if used > MAX_PALETTE {
+            // 导入不跑 check_limits，满载的文档也能到得了这里，减法会下溢。
+            return Err(format!("palette already holds {used} colors"));
+        }
+        let room = MAX_PALETTE - used;
         if needed.len() > room {
             return Err(format!(
                 "blend tween needs {} new palette colors but only {room} slots are free; use fewer frames or mode=migrate",

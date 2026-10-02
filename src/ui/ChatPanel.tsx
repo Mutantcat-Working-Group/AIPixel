@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Mutantcat Working Group
 // SPDX-License-Identifier: GPL-3.0-only
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { Button, Input, Tooltip } from "antd";
+import { Button, Input, Select, Tooltip } from "antd";
 import {
   AlertTriangle,
   Camera,
@@ -21,10 +21,20 @@ import {
 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 
+import { ART_STYLE_IDS } from "../lib/artstyle";
+import {
+  BUNDLE_PREFIX,
+  MAX_STACKED_PRESETS,
+  PRESET_BUNDLES,
+  PRESET_IDS,
+  bundlePresetIds,
+  expandPresetChoice,
+  isPresetId,
+} from "../lib/presets";
 import { STALL_SECONDS, useStore } from "../lib/store";
 import { useT } from "../lib/t";
 import { translateText } from "../lib/i18n";
-import { parsePlanRows } from "../lib/plan-node";
+import { parsePlanRows, PINNED_HIT, COMPANION_HIT } from "../lib/plan-node";
 import Markdown from "./Markdown";
 import type { ApprovalDecision, PendingAttachment, TranscriptEntry } from "../lib/types";
 
@@ -47,6 +57,7 @@ const PLAN_LABEL_FALLBACK: Record<string, string> = {
   "plan.intent": "Deliverable",
   "plan.style": "Art style",
   "plan.knowledge": "Craft notes",
+  "plan.preset": "Finish preset",
 };
 
 /** 本轮对话的计时器：跑着的时候每秒走一格，收尾后把这一圈的最终耗时冻在那儿。 */
@@ -57,9 +68,13 @@ function TurnTimer() {
   const elapsedMs = useStore((s) => s.runElapsedMs);
   const [now, setNow] = useState(() => Date.now());
 
+  // 为什么 effect 体里不跟着「新一轮开跑」同步拨一次表：渲染期调 Date.now()
+  // 读墙钟，purity 规则判不纯（同一帧渲染两遍两个时刻）；effect 体里同步
+  // setState 又踩 set-state-in-effect。两条都不沾的办法是干脆不拨——起步那
+  // 一刻 now 还是上一圈的旧值，减出来是负数，下面 Math.max(0) 一夹就是
+  // 00:00，下一秒由定时器接上，读数不会残、也不会歪。
   useEffect(() => {
     if (!running || startedAt === null) return;
-    setNow(Date.now());
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, [running, startedAt]);
@@ -115,7 +130,17 @@ function PlanBody({ input }: { input: unknown }) {
               .join(t("plan.sep"))}
           </span>
           {row.because ? (
-            <span className="plan-because">{t("plan.because", { words: row.because })}</span>
+            <span className="plan-because">
+              {row.because === PINNED_HIT
+                ? // 界面钉的不是一句原话，显示成「已锁定」；把 Rust 那个英文串
+                  // 原样摆出来，中文界面里会多一句谁也看不懂的判据。
+                  t("chat.style_pinned")
+                : row.because === COMPANION_HIT
+                  ? // 画风自带的那几条同理：它讲的是来源，不是用户说过的话，
+                    // 摆英文串等于让用户去读一份内部协议。
+                    t("chat.preset_companion")
+                : t("plan.because", { words: row.because })}
+            </span>
           ) : null}
         </div>
       ))}
@@ -137,6 +162,9 @@ function ToolEntry({
 }) {
   const t = useT();
   const pending = entry.summary === null;
+  // 没拿到结果、又已经不在跑了：这一条是被收尾打断的，不能再写「运行中」。
+  // summary 为 null 而 live 已封，是「发出去没等到回执」的唯一标识。
+  const unfinished = pending && !entry.live;
   const lang = useStore((s) => s.lang);
   const labelKey = TOOL_LABEL[entry.name];
   const name = labelKey ? translateText(lang, labelKey, undefined, entry.name) : entry.name;
@@ -155,7 +183,13 @@ function ToolEntry({
         {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
         <span className="tool-name">{name}</span>
         <span className="tool-summary">
-          {awaiting ? t("chat.awaiting") : pending ? t("chat.tool_running") : entry.summary}
+          {awaiting
+            ? t("chat.awaiting")
+            : unfinished
+              ? t("chat.tool_unfinished")
+              : pending
+                ? t("chat.tool_running")
+                : entry.summary}
         </span>
       </button>
       {body}
@@ -323,7 +357,20 @@ export default function ChatPanel() {
   const running = useStore((s) => s.running);
   const stalled = useStore((s) => s.stalled);
   const attachments = useStore((s) => s.attachments);
-  const [draft, setDraft] = useState("");
+  const styleOverride = useStore((s) => s.styleOverride);
+ const presetOverrides = useStore((s) => s.presetOverrides);
+ // 收尾下拉的开合自己管：套餐按钮铺完一套就该收起，antd 默认只在点遮罩或
+ // 普通选项时关下拉，点自定义按钮不会关，用户还得再点一下空白处。
+ const [presetMenuOpen, setPresetMenuOpen] = useState(false);
+ /** 点一下套餐：整套铺开（替换，不是合并），顺手收起下拉。 */
+ const applyPresetBundle = (bundleId: string) => {
+   // 认不出的套餐 id 不猜：按钮只从内置三套里长出来，
+   // 真收到了野 id 说明代码和数据对不上，什么都不做比铺一套错的结果好。
+   if (!bundlePresetIds(bundleId)) return;
+   useStore.getState().setPresetOverrides(expandPresetChoice([`${BUNDLE_PREFIX}${bundleId}`]));
+   setPresetMenuOpen(false);
+ };
+ const [draft, setDraft] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const compose = useStore((s) => s.composeRequest);
 
@@ -334,11 +381,17 @@ export default function ChatPanel() {
   }, [entries]);
 
   // 工作流坞「Send to chat」：已经有内容就追加，别把用户正写的半句吃掉。
-  useEffect(() => {
-    if (!compose) return;
-    const text = compose.text;
-    setDraft((prev) => (prev.trim() === "" ? text : `${prev}\n\n${text}`));
-  }, [compose]);
+  // 只在 compose 换了一个新对象时吃一次：渲染期比对再吃掉，比 effect 里
+  // setState 少一次提交。composeRequest 每次都带新 nonce，引用必变，
+  // 所以判等和原来 effect 的依赖比对是一回事。
+  const [composeSeen, setComposeSeen] = useState(compose);
+  if (compose !== composeSeen) {
+    setComposeSeen(compose);
+    if (compose) {
+      const text = compose.text;
+      setDraft((prev) => (prev.trim() === "" ? text : `${prev}\n\n${text}`));
+    }
+  }
 
   async function pickReferenceImages() {
     const picked = await open({ multiple: true, filters: [{ name: t("dialog.image"), extensions: IMAGE_EXTENSIONS }] });
@@ -438,15 +491,141 @@ export default function ChatPanel() {
         <div className="composer-hint">
           <span className="composer-actions">
             <Tooltip title={t("chat.attach_reference")}>
-              <Button size="small" type="text" icon={<ImagePlus size={14} />} onClick={pickReferenceImages} />
+              <Button
+                size="small"
+                type="text"
+                aria-label={t("chat.attach_reference")}
+                icon={<ImagePlus size={14} />}
+                onClick={pickReferenceImages}
+              />
             </Tooltip>
             <Tooltip title={t("chat.attach_snapshot")}>
               <Button
                 size="small"
                 type="text"
+                aria-label={t("chat.attach_snapshot")}
                 icon={<Camera size={14} />}
                 onClick={() => void useStore.getState().attachSnapshot()}
               />
+            </Tooltip>
+            {/* 画风锁定：选了预设，这一句就按它画，话里没提也不许改主意。
+                选「自动」就把锁定撤掉，模型按这句话自己判断。 */}
+            <Tooltip
+              title={
+                styleOverride
+                  ? `${t("chat.style_label")} · ${t("chat.style_pinned")}`
+                  : t("chat.style_label")
+              }
+            >
+              <Select
+                size="small"
+                variant="borderless"
+                className="composer-style"
+                // 15 项一次摆完：默认 256px 会把后五个预设藏进虚拟滚动，
+                // 用户得滚动才知道有霓虹/厚涂这些。
+                listHeight={520}
+                value={styleOverride ?? "auto"}
+                aria-label={t("chat.style_label")}
+                options={[
+                  { value: "auto", label: t("chat.style_auto") },
+                  ...ART_STYLE_IDS.map((id) => ({ value: id, label: t(`style.${id}`) })),
+                ]}
+                onChange={(value: string) =>
+                  useStore.getState().setStyleOverride(value === "auto" ? null : value)
+                }
+              />
+            </Tooltip>
+            {/* 收尾规矩：与画风并列、分管另一半。画风钉色数和描边，这里钉这张图
+                按什么规矩收尾——形体明暗怎么算、材质怎么分光、柔边从哪里来。
+                两个都选上时不打架：色数听画风的，其余照常上路。 */}
+            {/* 可以叠几条：细节这件事是乘法，「写实渲染」管整张图怎么收尾，
+                「微细结构」管最后一两个像素放哪里，两条一起才是一张写实的图。 */}
+            <Tooltip
+              title={
+                // 只写「收尾」两个字，用户不知道这颗螺丝拧的是什么——它恰恰是
+                // 「不咋写实」时唯一能拧的那一颗。所以提示里说清三件事：同样配色
+                // 下它管什么、和画风怎么分工、能叠几条。已经选了的再把名单挂到
+                // 第二行：窄框里摆不下几条标签，悬停这一刻是界面上唯一能看全
+                // 「选了哪几条」的地方。
+                presetOverrides.length > 0
+                  ? `${t("chat.preset_tip")}\n${presetOverrides
+                      .filter(isPresetId)
+                      .map((id) => t(`preset.${id}`))
+                      .join(" / ")}`
+                  : t("chat.preset_tip")
+              }
+            >
+              <Select
+                size="small"
+                variant="borderless"
+                className="composer-preset"
+                mode="multiple"
+                // 第四条不让选上：选上又被 Rust 拒收，用户看到的是一次没头没尾
+                // 的失败。上限和 presets::MAX_STACKED 是同一个数。
+                maxCount={MAX_STACKED_PRESETS}
+                allowClear
+                // 窄框里摆标签是场必输的测量赛：118px 减去输入框，antd 的自适应
+                // 算法测下来一条 4 字中文标签都摆不下，最后只剩一个「+ 3 ...」——
+                // 数量看得见，选了哪几条全看不见。换成一条固定 chip：单条时报
+                // 名字，多条时报「名字 +N」，不随宽度变形；maxTagCount 也一起去掉，
+                // 它是按标签裁显示的，和这条 chip 的活计重复。
+                tagRender={(props) =>
+                  props.value === presetOverrides[0] ? (
+                    <span className="composer-preset-chip">
+                      {presetOverrides.length > 1
+                        ? `${props.label} +${presetOverrides.length - 1}`
+                        : props.label}
+                    </span>
+                  ) : (
+                    <></>
+                  )
+                }
+                placeholder={t("chat.preset_auto")}
+                listHeight={520}
+               value={presetOverrides}
+               aria-label={t("chat.preset_label")}
+                open={presetMenuOpen}
+                onOpenChange={setPresetMenuOpen}
+                options={PRESET_IDS.map((id) => ({ value: id, label: t(`preset.${id}`) }))}
+               onChange={(value: string[]) =>
+                  useStore.getState().setPresetOverrides(expandPresetChoice(value))
+                }
+                // 套餐挂在下拉底部而不是做成普通选项：选项叠满三条之后，
+                // rc-select 会把未选项整批复灰（overMaxCount），那时想换一套
+                // 套餐点谁都没反应，只能先手动一条条取消——「点了但什么都
+                // 没发生」比没有入口更糟。按钮不受 maxCount 管束，栈满也
+                // 照样一键整套换掉，替不合并也和 expandPresetChoice 的约定对齐。
+                popupRender={(menu) => (
+                  <div className="composer-preset-pop">
+                    {menu}
+                    <div className="composer-preset-bundles">
+                      <div className="composer-preset-bundle-head">
+                        {t("preset_bundle.group")}
+                      </div>
+                      <div className="composer-preset-bundle-row">
+                        {PRESET_BUNDLES.map((bundle) => (
+                          <Tooltip
+                            key={bundle.id}
+                            // 悬停先看清这一套铺开是哪三条，再决定点不点：
+                            // 套餐名只说「写实」，里面还有两条用户没听说过
+                            // 的规矩，藏在 tooltip 里比让他在十六条里猜省事。
+                            title={bundle.presetIds.map((id) => t(`preset.${id}`)).join(" + ")}
+                          >
+                            <Button
+                              size="small"
+                              type="link"
+                              className="composer-preset-bundle-btn"
+                              onClick={() => applyPresetBundle(bundle.id)}
+                            >
+                              {t(`preset_bundle.${bundle.id}`)}
+                            </Button>
+                          </Tooltip>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+             />
             </Tooltip>
           </span>
           <span className="composer-actions">

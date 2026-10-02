@@ -3,6 +3,9 @@ name = "aipixel"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+# 作者与官网随 workspace 继承：每个 crate 的元数据都能看出发行方。
+authors.workspace = true
+homepage.workspace = true
 
 [lib]
 name = "aipixel_lib"

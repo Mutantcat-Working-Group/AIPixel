@@ -34,5 +34,11 @@
     "typescript-eslint": "^8.70.1",
     "vite": "^6",
     "vitest": "^2"
+  },
+  "author": "Mutantcat Working Group <https://www.mutantcat.org>",
+  "homepage": "https://github.com/Mutantcat-Working-Group/AIPixel#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Mutantcat-Working-Group/AIPixel.git"
   }
 }

@@ -7,6 +7,15 @@ pub const MAX_DIMENSION: u32 = 1024;
 pub const MAX_LAYERS: usize = 128;
 pub const MAX_FRAMES: usize = 2000;
 pub const MAX_PALETTE: usize = 256;
+
+/// 全文档格子总量上限。逐项都合规时，乘起来仍是个天文数字：
+/// 1024x1024 x 128 层 x 2000 帧 = 2680 亿格，每格一个 u16 索引就是 512GB。
+/// 所以除了逐项查上限，还必须查这个乘积——它是内存的真实账单，
+/// 也是每次序列化、每次 .aip 落盘的真实体量。
+///
+/// 取 6400 万格：索引数据约 128MB，够到 1024x1024 x 60 帧，
+/// 或者 256x256 x 976 个 cel，正经项目摸不到这条线。
+pub const MAX_TOTAL_CELLS: usize = 64_000_000;
 pub const MAX_FRAME_DURATION_MS: u32 = 60_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,6 +40,12 @@ impl Rgba {
 
     pub fn parse_hex(text: &str) -> Option<Self> {
         let t = text.trim().trim_start_matches('#');
+        // 只吃纯 ASCII 十六进制。长度匹配用的是字节数，两个汉字也是 6 字节，
+        // 下面的 2 字节切片会切在字符中间——str 切片遇到非字符边界直接 panic。
+        // 颜色字面量来自 .aip 文件、模型下发的操作、Lua 脚本，都是不可信输入。
+        if !matches!(t.len(), 6 | 8) || !t.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
         let parse = |s: &str, shift: u32| u8::from_str_radix(s, 16).ok().map(|v| v << shift);
         match t.len() {
             6 => Some(Rgba {
@@ -124,6 +139,11 @@ impl Cel {
         }
     }
 
+    /// 取一格。`width` 由调用方给而不是存在 cel 里：cel 只持有扁平 Vec，
+    /// 画布尺寸记在 Document 上，同一份 cel 数据在改画布宽高时被原地重排。
+    ///
+    /// 越界返回 `None` 而不是 panic：这里有大量来自模型和脚本的坐标，
+    /// 让一个错坐标把整个 agent 流程炸掉是划不来的。
     pub fn get(&self, width: u32, x: u32, y: u32) -> Option<u16> {
         let w = width as usize;
         let y = y as usize;
@@ -136,8 +156,16 @@ impl Cel {
     }
 
     pub fn set(&mut self, width: u32, x: u32, y: u32, value: u16) -> bool {
-        let w = width as usize;
-        let idx = y as usize * w + x as usize;
+        let w = width.max(1) as usize;
+        let x = x as usize;
+        let y = y as usize;
+        // 也要判行内位置：只查扁平下标的话，x 超过 width 的点会被写进下一行，
+        // 同一片像素悄悄串到别处去。
+        let height = self.indices.len() / w;
+        if x >= w || y >= height {
+            return false;
+        }
+        let idx = y * w + x;
         if idx >= self.indices.len() {
             return false;
         }
@@ -190,6 +218,10 @@ pub enum DocumentError {
     Dimension(u32),
     #[error("would exceed limits: layers={0}, frames={1}, palette={2}")]
     Limits(usize, usize, usize),
+    #[error(
+        "canvas holds too many cells: {0} (limit {MAX_TOTAL_CELLS}); make it smaller, or use fewer layers/frames"
+    )]
+    TotalCells(usize),
     #[error("unknown layer: {0}")]
     UnknownLayer(String),
     #[error("unknown frame: {0}")]
@@ -357,7 +389,57 @@ impl Document {
                 self.palette.len(),
             ));
         }
+        if self.total_cells() > MAX_TOTAL_CELLS {
+            return Err(DocumentError::TotalCells(self.total_cells()));
+        }
         Ok(())
+    }
+
+    /// 全文档格子数：层 x 帧 x 宽 x 高。saturating：这个数只用来和上限比，
+    /// 溢成 usize::MAX 只会让判定更严格，不会误放。
+    pub fn total_cells(&self) -> usize {
+        (self.layers.len())
+            .saturating_mul(self.frames.len())
+            .saturating_mul(self.width as usize)
+            .saturating_mul(self.height as usize)
+    }
+
+    /// 校验一份外部来源的文档：前端回灌、别的进程塞进来的 JSON。
+    /// 尺寸、图层/帧/调色板数量、每个 cel 的长度都必须自洽，否则后面
+    /// 任何一处 `width * height` 的分配都会溢出甚至打死进程。
+    pub fn validated(self) -> Result<Self, DocumentError> {
+        if self.width < 1
+            || self.height < 1
+            || self.width > MAX_DIMENSION
+            || self.height > MAX_DIMENSION
+        {
+            return Err(DocumentError::Dimension(self.width.max(self.height)));
+        }
+        self.check_limits()?;
+        if self.layers.is_empty() || self.frames.is_empty() {
+            return Err(DocumentError::Limits(
+                self.layers.len(),
+                self.frames.len(),
+                self.palette.len(),
+            ));
+        }
+        let expected = (self.width as usize)
+            .checked_mul(self.height as usize)
+            .ok_or(DocumentError::Dimension(self.height))?;
+        for (layer_id, frames) in &self.cels {
+            if !self.layers.iter().any(|l| &l.id == layer_id) {
+                return Err(DocumentError::UnknownLayer(layer_id.clone()));
+            }
+            for (frame_id, cel) in frames {
+                if !self.frames.iter().any(|f| &f.id == frame_id) {
+                    return Err(DocumentError::UnknownFrame(frame_id.clone()));
+                }
+                if cel.indices.len() != expected {
+                    return Err(DocumentError::OutOfCanvas(self.width, self.height));
+                }
+            }
+        }
+        Ok(self)
     }
 
     /// 画布上是不是真有一颗画上去的像素。全图扫一遍 cel，只看有没有
@@ -384,6 +466,17 @@ impl Document {
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), DocumentError> {
         if width < 1 || height < 1 || width > MAX_DIMENSION || height > MAX_DIMENSION {
             return Err(DocumentError::Dimension(width.max(height)));
+        }
+        // 逐维合规也可能把总量顶爆：16 层的 500x500 已经 400 万格，放大到
+        // 1024x1024 就是 1670 万格。先查后改，别白裁一遍再回滚。
+        let after = self
+            .layers
+            .len()
+            .saturating_mul(self.frames.len())
+            .saturating_mul(width as usize)
+            .saturating_mul(height as usize);
+        if after > MAX_TOTAL_CELLS {
+            return Err(DocumentError::TotalCells(after));
         }
         let (old_width, old_height) = (self.width, self.height);
         if old_width == width && old_height == height {
@@ -457,6 +550,23 @@ mod tests {
         );
     }
 
+    /// 长度相同的多字节串（两个汉字正好 6 字节）会被按 2 字节切片切在字符中间：
+    /// str 切片遇到非字符边界直接 panic。颜色字面量来自 .aip、模型操作、Lua，
+    /// 全都是不可信输入，一次「#橘子」就能让整个后端进程消失。
+    #[test]
+    fn non_ascii_color_literals_are_rejected_not_panicked() {
+        assert_eq!(Rgba::parse_hex("#橘子"), None);
+        assert_eq!(Rgba::parse_hex("#红红红红红"), None);
+        assert_eq!(Rgba::parse_hex("橘子狸"), None);
+        assert_eq!(Rgba::parse_hex("猫狸猫"), None);
+        assert_eq!(Rgba::parse_hex("#ff00"), None);
+        assert_eq!(Rgba::parse_hex("#ffzz00"), None);
+        assert_eq!(
+            Rgba::parse_hex("#ff004d"),
+            Some(Rgba::rgb(0xff, 0x00, 0x4d))
+        );
+    }
+
     /// 缩小时右下角被裁掉：那不是 bug，是用户把画布改小了。
     #[test]
     fn shrinking_drops_what_falls_outside() {
@@ -480,5 +590,66 @@ mod tests {
         assert!(d.resize(0, 8).is_err(), "0 不是合法宽高");
         assert!(d.resize(MAX_DIMENSION + 1, 8).is_err(), "超过上限也不行");
         assert_eq!((d.width, d.height), before, "被拒的尺寸不许改动文档");
+    }
+
+    /// 手工搭一个「逐维合规、乘积超限」的文档。先按 1x1 建再改宽高、
+    /// 建完清空 cels：`total_cells()` 只数层/帧/宽高，不碰像素，
+    /// 于是一分钱内存都不花就能摆出一个天文数字。
+    fn stacked_document(layers: usize, frames: usize, width: u32, height: u32) -> Document {
+        let mut d = Document::new("stacked", 1, 1).expect("1x1 stays in limits");
+        d.cels.clear();
+        d.width = width;
+        d.height = height;
+        for i in 1..layers {
+            d.layers.push(Layer {
+                id: format!("L{i}"),
+                name: format!("Layer {i}"),
+                visible: true,
+                opacity: 255,
+                palette_id: DEFAULT_PALETTE_ID.into(),
+                locked: false,
+            });
+        }
+        for f in 1..frames {
+            d.frames.push(Frame {
+                id: format!("F{f}"),
+                duration_ms: 100,
+            });
+        }
+        d
+    }
+
+    /// 逐项都踩线不越线，乘起来照样爆。这正是只查逐项上限时漏掉的那一号：
+    /// 128 层 x 1024x512 = 6711 万格，光索引数据就 128MB。
+    #[test]
+    fn total_cells_is_checked_even_when_every_dimension_is_legal() {
+        let d = stacked_document(MAX_LAYERS, 1, 1024, 512);
+        assert_eq!(d.layers.len(), MAX_LAYERS, "层数踩线但不越线");
+        assert_eq!((d.width, d.height), (1024, 512), "宽高也都在逐项上限内");
+        assert_eq!(d.total_cells(), MAX_LAYERS * 1024 * 512);
+        assert_eq!(
+            d.check_limits(),
+            Err(DocumentError::TotalCells(MAX_LAYERS * 1024 * 512)),
+            "这项查不出来，序列化和落盘都会被打死"
+        );
+    }
+
+    /// resize 也要先查总量：层数一多，放大一丁点就越线。
+    /// 被拒时尺寸不许动，且在线上面的合法尺寸照样放行——查的是总量，不是尺寸本身。
+    #[test]
+    fn resize_rejects_growth_past_the_total_cell_limit() {
+        let mut d = stacked_document(MAX_LAYERS, 1, 4, 3);
+        let before = (d.width, d.height);
+        let oversized = MAX_LAYERS * MAX_DIMENSION as usize * MAX_DIMENSION as usize;
+        assert_eq!(
+            d.resize(MAX_DIMENSION, MAX_DIMENSION),
+            Err(DocumentError::TotalCells(oversized)),
+            "128 层的 1024x1024 = 1.34 亿格"
+        );
+        assert_eq!((d.width, d.height), before, "被拒的尺寸不许改动文档");
+        // 1.28 亿格的 2/3 多一点，仍在 6400 万格这条线下面，必须放行。
+        d.resize(700, 700)
+            .expect("128 layers of 700x700 stay under the total limit");
+        assert_eq!((d.width, d.height), (700, 700));
     }
 }

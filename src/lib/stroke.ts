@@ -11,17 +11,24 @@ import type { StrokeCell } from "./types";
 /** Bresenham：from -> to 之间经过的所有格子（含两端）。 */
 export function lineCells(from: StrokeCell, to: StrokeCell): StrokeCell[] {
   const cells: StrokeCell[] = [];
-  let x = from.x;
-  let y = from.y;
-  const dx = Math.abs(to.x - from.x);
-  const dy = Math.abs(to.y - from.y);
-  const sx = from.x < to.x ? 1 : -1;
-  const sy = from.y < to.y ? 1 : -1;
+  // 端点先落到格子上：调用点有时给的是浮点（圆角、平滑曲线都是先算浮点再取整），
+  // 整数步进的 Bresenham 永远踩不中 2.5 这种坐标，循环就停不下来。
+  let x = Math.round(from.x);
+  let y = Math.round(from.y);
+  const endX = Math.round(to.x);
+  const endY = Math.round(to.y);
+  const dx = Math.abs(endX - x);
+  const dy = Math.abs(endY - y);
+  const sx = x < endX ? 1 : -1;
+  const sy = y < endY ? 1 : -1;
   let err = dx - dy;
+  // 兜底步数：Bresenham 每轮至少推进一个方向，正常绝不会用满；留这个上限是
+  // 为了「万一几何层又冒出一个不自洽的输入」时只画一段错线，而不是把页面卡死。
+  const guard = dx + dy + 8;
   // 对角线步进时两个方向各自偏一步，画出来才是「连续」而不是 L 形折线。
-  for (;;) {
+  for (let step = 0; step <= guard; step += 1) {
     cells.push({ x, y });
-    if (x === to.x && y === to.y) break;
+    if (x === endX && y === endY) break;
     const doubled = err * 2;
     if (doubled > -dy && doubled < dx) {
       x += sx;

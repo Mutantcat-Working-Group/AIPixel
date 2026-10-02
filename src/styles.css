@@ -30,10 +30,26 @@
  * 图层行、调色板这些界面零件一律不许划选——深色 UI 上拖过一排按钮就是一片
  * 蓝色高亮，很脏，拖到边界还会把滚动条带出来。
  * 真正给人复制的内容（回复正文、工具 JSON、.aip 文本）在下面显式放开。
+ *
+ * 后面那批 .ant-* 是弹层：antd 的模态框、下拉、气泡、消息全都 portal 到
+ * document.body 上，不在 .app 这棵子树里，单写 .app 管不到它们。结果是设置
+ * 窗、改尺寸窗、删颜色确认窗一路都能被拖出蓝色选区，与「不许划选」正好反着。
+ *
+ * 只列根节点、不跟 `*`：user-select 是继承属性，根上设一次整棵树都跟着变；
+ * 而下面那张「允许复制」的清单是按元素直接匹配的，弹窗里的 API Key、画布
+ * 宽高输入框照样能选能改。若照 `.gate *` 通配一遍，(0,1,0) 会压过 input 的
+ * (0,0,1)，把弹窗输入框也弄成选不动。
  */
 .app,
 .gate,
-.gate * {
+.gate *,
+.ant-modal-root,
+.ant-modal-wrap,
+.ant-popover,
+.ant-dropdown,
+.ant-tooltip,
+.ant-message,
+.ant-notification {
   user-select: none;
   -webkit-user-select: none;
 }
@@ -89,6 +105,20 @@ body > div:not(#root):not([class]) {
 
 body > div:not(#root):not([class]) > * {
   pointer-events: auto;
+}
+
+/*
+ * 上面那条 "> *" 是给能点的浮层（下拉选单、气泡菜单、取色板）还指针，
+ * 但它一律还出去，连纯提示的气泡也一并要到了手。气泡平时不碍事，一旦
+ * 它锚在某个 Select 上、而这个 Select 又被点开，常驻气泡就横躺在列表前
+ * 两项上头（.ant-tooltip 的 zIndex 是 1070，压过 .ant-select-dropdown 的
+ * 1050）：鼠标从 Select 直直下移进列表的真实用户，点中的是气泡，不是选项。
+ * 本项目 Tooltip 全是纯文字提示，没有任何可交互内容，直接掐死指针事件；
+ * specificity 要比上面那条 (0,2,2) 高，所以把父选择器原样再抄一遍。
+ */
+body > div:not(#root):not([class]) > .ant-tooltip,
+body > div:not(#root):not([class]) > .ant-tooltip * {
+  pointer-events: none;
 }
 
 body {
@@ -279,6 +309,26 @@ body {
 .session-item.drop-target {
   border-color: rgba(62, 155, 255, 0.55);
   background: var(--accent-soft);
+}
+
+/* 一个会话都没建：给句人话，别让侧栏白晃晃一块。 */
+.session-empty {
+  margin: 0;
+  padding: 22px 12px;
+  text-align: center;
+  color: var(--text-faint);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+/* 删会话确认正文：行高松一点，会话名和尺寸这一行才好读。 */
+.session-drop-body {
+  margin: 0;
+  padding: 4px 0 8px;
+  font-size: 13px;
+  line-height: 1.8;
+  color: var(--text-dim);
+  word-break: break-word;
 }
 
 .sidebar-foot {
@@ -809,6 +859,83 @@ body {
   font-size: 11px;
 }
 
+/* 这一行从左到右依次是两个附件按钮、画风、收尾规矩，右边是发送/停止。
+    窄窗口下两柄下拉会把发送按钮挤出可见区，所以允许整体折行而不是压扁控件——
+    折一行只是变矮，压扁了就看不出选的是哪一项了。 */
+.composer-hint {
+  flex-wrap: wrap;
+  column-gap: 8px;
+  row-gap: 6px;
+  align-items: center;
+}
+
+/* 输入区的画风锁定：占位要够看清预设名，又不能把发送按钮顶出这一行。 */
+.composer-style {
+  width: 128px;
+}
+
+.composer-style .ant-select-selector {
+  font-size: 11px;
+}
+
+/* 收尾规矩那一柄。比画风窄一点：这里的中文名都是四个字，英文名也比画风短，
+    省出来的宽度留给发送按钮，窄窗口下少折一行。 */
+.composer-preset {
+  width: 118px;
+}
+
+.composer-preset .ant-select-selector {
+ font-size: 11px;
+}
+
+/* 收尾下拉底部的套餐区：一条细线把「一条条挑」和「一键铺一套」隔开。
+   按钮用 link 尺寸，别和选项行抢勾选的心智；套餐名四个字，窄下拉里
+   会自动折行，一行大概放得下两个，放不下就折，不许把下拉顶宽。 */
+.composer-preset-pop {
+  border-top: 1px solid var(--border);
+  margin-top: 6px;
+}
+
+.composer-preset-bundles {
+  padding: 0 8px 6px;
+}
+
+.composer-preset-bundle-head {
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 2px 0 4px;
+}
+
+.composer-preset-bundle-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 6px;
+}
+
+.composer-preset-bundle-btn.ant-btn-link {
+  font-size: 11px;
+  height: 22px;
+  padding: 0 6px;
+}
+
+/* 收尾框里的一条汇总 chip。默认标签在 118px 里一条都摆不下（antd 测完只剩
+   「+ 3 ...」），这里固定一条：单条报名字，多条报「名字 +N」，悬停看全名单。
+   宽度打死、溢出省略，保证窄窗口下也不把发送按钮顶出这一行。 */
+.composer-preset-chip {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+  font-size: 11px;
+  line-height: 19px;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
 /* ---------- 文档面板 ---------- */
 
 .doc-preview {
@@ -1104,17 +1231,170 @@ body {
 }
 
 .frame-strip {
-  display: flex;
-  flex-wrap: wrap;
   gap: 5px;
+  /* proximity 吸附：松手后最近的那一格被拉到左沿，裁口永远落在两帧之间，
+     不会停在某一帧的正中间——半帧停在视野里看着就像「没做完」。
+     一行一滚本身（nowrap 与 overflow-x）由 .hstrip-scroll 统一负责，
+     帧条这儿只留自己的间距。 */
+}
+
+/* ---------- 横条与它自带的那根滚动条（HStrip） ---------- */
+
+/*
+ * 横向滚动必须有一根看得见、摸得着的滚动条。
+ *
+ * 为什么不信系统那根：
+ *   macOS 是悬浮滚动条，不拖的那两秒整根隐形；Chrome/WebKit 现在连
+ *   ::-webkit-scrollbar 的尺寸声明都直接忽略（实测既不占布局也不绘制），
+ *   标准的 scrollbar-width 在 macOS 上照样隐形。帧被裁掉一半，用户既看不到
+ *   滑块也想不到能滚，只会得出「横向滚动根本没做」的结论。
+ * 所以滚动条由 HStrip 用 DOM 画：常驻、可拖、点轨道翻页、键盘可操作。
+ * 原生那根则彻底关掉，免得 Windows 上出现两根并排的滚动条。
+ */
+.hstrip {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  /* 滚动条的两个尺寸集中在这里：两端渐隐要按它算覆盖高度，别处不许写死。 */
+  --hstrip-bar-h: 14px;
+  --hstrip-bar-gap: 5px;
+}
+
+.hstrip-scroll {
+  /* 「一行放不下就往右滚」是横条自己的规矩，记在公共类上，不再让每个调用方
+     各自声明一遍：帧条、图层条、参考帧条一旦各写各的，漏掉哪一处，那一条就
+     静默换行——帧多了一折行，底下的小节被顶出视野，而代码评审从字面上根本
+     看不出哪儿错了。调用方只留 gap 这类各自的间距。 */
+  display: flex;
+  flex-wrap: nowrap;
+  scroll-snap-type: x proximity;
+  overflow-x: auto;
+  overflow-y: hidden;
+  min-width: 0;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+/* WebKit 里把原生滚动条连皮带骨收掉：只留 HStrip 画的那一根。 */
+.hstrip-scroll::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+/*
+ * 轨道：一道有衬底的沟。
+ * 深色面板上一道 rgba(255,255,255,.05) 等于没有——既不像沟，滑块也没地方
+ * 落脚，老远看过去跟一块空白面板没有区别。给足 0.09 的底加一圈内描边，
+ * 「这儿有一条能滚」才立得住。
+ */
+.hstrip-bar {
+  position: relative;
+  height: var(--hstrip-bar-h);
+  margin-top: var(--hstrip-bar-gap);
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  /* 沟要「凹」才像沟：内投影 + 比面板亮一截的底。只涂一层 0.05 的白，
+     在 #11161d 上等于没有，扫一眼过去只会当成小节之间的缝。 */
+  background: rgba(255, 255, 255, 0.13);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.45);
+  cursor: pointer;
+}
+
+/*
+ * 滑块长度跟着「可见部分占全部的比」走，帧越多越短；下限由 MIN_THUMB 兜着。
+ * 造型照原生滚动条那个胶囊来：中间亮、上下压暗，再加一道握把线——扁平一块
+ * 纯色在深色 UI 上太容易被当成分隔线而直接忽略过去。
+ */
+.hstrip-thumb {
+  position: absolute;
+  top: 1px;
+  left: 0;
+  width: 26px;
+  height: calc(var(--hstrip-bar-h) - 4px);
+  border-radius: 999px;
+  /* 滑块是整条横滚里唯一的「能滚」信号，必须扎眼：浅色渐变胶囊 + 握把线，
+     站在深沟里才立得住。原来那支 --text-dim 的灰在深色面板上一扫就过去，
+     用户看不见滑块，帧又被裁着，只能得出「横向滚动根本没做」的结论。 */
+  background: linear-gradient(180deg, #cfdaea 0%, #93a4bb 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.28),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.3),
+    0 1px 2px rgba(0, 0, 0, 0.45);
+  transition: background 120ms ease, box-shadow 120ms ease;
+  will-change: transform, width;
+}
+
+/* 握把线：一眼能看出这是能抓的东西，不是装饰。 */
+.hstrip-thumb::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 10px;
+  height: 4px;
+  border-radius: 2px;
+  background: repeating-linear-gradient(
+    90deg,
+    rgba(13, 17, 23, 0.72) 0 1px,
+    transparent 1px 3px
+  );
+  pointer-events: none;
+}
+
+/*
+ * 三档明度讲一件事：这儿有个滑块，抓手上了就变色。
+ * 每档都写足 .hstrip-bar 父级：悬停整条沟那条是 (0,3,0)，光写
+ * .hstrip-thumb:hover（0,2,0）会被它吃掉，抓手自己倒是永远点不亮。
+ */
+.hstrip-bar:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.hstrip-bar:hover .hstrip-thumb {
+  background: linear-gradient(180deg, #ffffff 0%, #c2d0e2 100%);
+}
+
+.hstrip-bar .hstrip-thumb:hover,
+.hstrip-bar .hstrip-thumb:focus-visible,
+.hstrip-bar .hstrip-thumb:active {
+  background: var(--accent);
+  outline: none;
+}
+
+/* 两端渐隐：边缘像「被裁断了」还是「还有内容」，全看这一道。 */
+.hstrip-fade {
+  position: absolute;
+  top: 0;
+  /* 只盖住滚动区，不压到下面那根轨道。高度跟着轨道尺寸算、不再写死像素：
+     上一版写死的 13px，轨道一改高就压到滚动条上去了。 */
+  height: calc(100% - var(--hstrip-bar-h) - var(--hstrip-bar-gap));
+  width: 28px;
+  pointer-events: none;
+}
+
+/*
+ * 两端渐隐是「边缘外还有内容」的唯一暗示，清到全透就等于没有。原来那道
+ * 一路 transparent 的渐变在深色面板上几乎看不出来，只剩帧被裁断的断口。
+ */
+.hstrip-fade-l {
+  left: 0;
+  background: linear-gradient(90deg, var(--bg-panel) 20%, rgba(17, 22, 29, 0.82) 58%, transparent);
+}
+
+.hstrip-fade-r {
+  right: 0;
+  background: linear-gradient(270deg, var(--bg-panel) 20%, rgba(17, 22, 29, 0.82) 58%, transparent);
 }
 
 /* 帧条一格一帧：缩略图在上、帧号与时长在下，像底片一样竖着排。 */
 .frame-chip {
   display: flex;
   flex-direction: column;
+  flex: none;
   align-items: center;
   gap: 2px;
+  scroll-snap-align: start;
   width: 56px;
   padding: 4px 4px 3px;
   border: 1px solid var(--border);
@@ -1151,11 +1431,10 @@ body {
 
 /* 坞里的帧选择：横向一条，帧再多也只占一行高，剩下靠滚。 */
 .frame-picker {
-  display: flex;
   gap: 4px;
-  overflow-x: auto;
-  overflow-y: hidden;
-  padding-bottom: 2px;
+  /* 顶上那圈 padding 是早先给原生滚动条腾的位置；现在滚动条由 HStrip 自己
+     画在底下，再留它就是条多余的缝。 */
+  align-items: flex-start;
 }
 
 .frame-pick {
@@ -1164,6 +1443,7 @@ body {
   flex-direction: column;
   align-items: center;
   gap: 2px;
+  scroll-snap-align: start;
   width: 36px;
   padding: 3px 2px 2px;
   border: 1px solid var(--border);
@@ -1339,26 +1619,43 @@ body {
 
 .swatch-cell .swatch {
   display: block;
+  position: relative;
+  z-index: 1;
 }
 
+/*
+ * 删色扣：一颗探出格角的小圆点，不是一张盖住整格的罩子。
+ *
+ * 这里栽过一次：早先 inset:0 让这颗扣把 18x18 的格整个蒙住，而 opacity:0
+ * 只是看不见、照样吃指针事件。于是自建预设里左键点色块，命中的是这颗扣，
+ * 弹出来的是「删色要选接手色」的确认框——想换个墨色的人只会以为色块坏了。
+ * 现在色块自己抬到 z-index:1，扣缩到右上角 11x11，中心那一下稳稳落在色块上；
+ * 没悬停时它藏在 visibility 里而不是 opacity 里，那样连指针都不接。
+ */
 .swatch-remove {
   position: absolute;
-  inset: 0;
+  top: -4px;
+  right: -4px;
+  z-index: 2;
   display: grid;
   place-items: center;
+  width: 11px;
+  height: 11px;
   padding: 0;
-  border: 0;
-  border-radius: 4px;
-  background: rgba(13, 17, 23, 0.78);
+  border: 1px solid rgba(10, 13, 18, 0.92);
+  border-radius: 50%;
+  background: rgba(13, 17, 23, 0.94);
   color: var(--danger);
   cursor: pointer;
   opacity: 0;
+  visibility: hidden;
   transition: opacity 0.12s ease;
 }
 
 .swatch-cell:hover .swatch-remove,
 .swatch-remove:focus-visible {
   opacity: 1;
+  visibility: visible;
 }
 
 .aip-text {
@@ -1486,9 +1783,100 @@ body {
   gap: 6px;
 }
 
+/* 新建会话才有的会话名一栏：放在预览上面，和下面的宽高各占一行，
+   高度就那么多，宁可窄一点也不和预览挤在一起。 */
+.size-name {
+  display: block;
+}
+
+.size-name .k {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
 .size-hint {
   font-size: 11px;
   color: var(--text-dim);
+}
+
+/* 配色范围三问的确认弹窗：先读警告，再挑接手对象。行高收得比正文紧，
+   一处放得下，用户不用滚动就能看完再点确定。 */
+.palette-ops-modal .ant-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.palette-ops-warn {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text);
+}
+
+.palette-ops-label {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.palette-ops-empty {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* 接手色用色块单选：一排排开，选中态直接用底色说话，不靠勾。 */
+.palette-ops-choices {
+  display: flex !important;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.palette-ops-choice {
+  display: inline-flex !important;
+  align-items: center;
+  gap: 6px;
+  margin: 0 !important;
+  padding: 0 8px !important;
+  height: 26px;
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1;
+}
+
+
+.palette-ops-dot {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+  border: 1px solid rgba(0, 0, 0, 0.35);
+  border-radius: 3px;
+}
+
+.palette-ops-select {
+  width: 100%;
+}
+
+/* 接盘范围里的小色条：一套范围的配色性格一眼看出来，不用点开。 */
+.palette-ops-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.palette-ops-dots {
+  display: inline-flex;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+
+.palette-ops-dots i {
+  width: 8px;
+  height: 12px;
+  border: 1px solid rgba(0, 0, 0, 0.35);
+  border-radius: 2px;
 }
 
 .model-fetch {
@@ -1516,7 +1904,10 @@ body {
   grid-template-rows: auto minmax(0, 1fr);
   gap: 16px;
   padding-top: 16px;
-  max-height: min(612px, calc(100vh - 172px));
+  /* 减去的 252px 是 antd 弹窗自己的开销：top 100 + 标题 22 + 页脚 32 +
+     边框与内边距约 84，另留 14px 余量。少减一截，小窗口下页脚就被顶到
+     屏幕外，用户得先拖动窗口才点得到保存。 */
+  max-height: min(612px, calc(100vh - 252px));
   align-items: stretch;
 }
 
@@ -1546,6 +1937,9 @@ body {
   min-height: 0;
   min-width: 0;
   overflow-y: auto;
+  /* overflow-y 单独写会让 overflow-x 隐式变成 auto：内容一宽，
+     鼠标扫过这里就会横着滚一下。clip 掉，只留着上下滚。 */
+  overflow-x: clip;
   overscroll-behavior: contain;
   padding-right: 4px;
 }
@@ -1586,6 +1980,7 @@ body {
   border-right: 1px solid var(--border);
   padding-right: 12px;
   overflow-y: auto;
+  overflow-x: clip;
   overscroll-behavior: contain;
 }
 
@@ -1731,15 +2126,16 @@ body {
   font-size: 11.5px;
 }
 
-/* ---------- 追加：MCP 工具服务器弹窗 ---------- */
+/* ---------- MCP 外部工具：并进设置页后跟着设置分区走 ---------- */
 
-.mcp-modal .ant-modal-body {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  padding-top: 16px;
-  max-height: min(70vh, 560px);
-  overflow-y: auto;
+/* 表单一展开就把分区撑高，底部留点缝，别贴着分区边框。 */
+.mcp-section {
+  padding-bottom: 10px;
+}
+
+/* 行内按钮多（连接/编辑/删除），窄一丁点就换行，别把名称挤出分区。 */
+.mcp-section .mcp-row-head {
+  gap: 4px 6px;
 }
 
 .mcp-list {
@@ -2208,6 +2604,30 @@ a.about-val {
   font-size: 11px;
 }
 
+/* 数字输入的单位后缀。addonAfter 弃用后这里自己拼那一小块，高度按小号输入框的
+   24px 来，圆角只留在右端，让两截看着是一整个控件而不是粘在一起的两个。 */
+.number-unit {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  box-sizing: border-box;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  background: var(--bg-panel-2);
+  color: var(--text-faint);
+  font-size: 11px;
+  white-space: nowrap;
+  user-select: none;
+}
+
+/* 后缀块接了左边那道框，输入框自己那条右框就成了双线，抹掉。 */
+.ant-space-compact > .ant-input-number-sm:has(+ .number-unit) {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
 .dock-path {
   display: flex;
   align-items: center;
@@ -2534,6 +2954,12 @@ a.about-val {
   display: none;
 }
 
+/* 权威 png 停在别的帧上时同样让位：切帧后帧层已经画好新的一帧，旧图再挂一会儿
+ * 就是新旧两层叠成一张花脸。播放那条规则管不到不播的时候，这里是它的白天版。 */
+.canvas-img[data-stale="true"] {
+  display: none;
+}
+
 /* 开关类按钮：按下的状态得看得出来，不然洋葱皮开没开只能靠猜。 */
 .tool-on {
   color: var(--accent) !important;
@@ -2617,6 +3043,10 @@ a.about-val {
   z-index: 1200;
   min-width: 150px;
   max-width: 260px;
+  /* 项特别多时（瓦片份数、配色预设）菜单自己也要能滚，不能撑出窗口。 */
+  max-height: min(70vh, 420px);
+  overflow-y: auto;
+  overflow-x: clip;
   padding: 4px;
   border: 1px solid var(--border-strong);
   border-radius: 8px;

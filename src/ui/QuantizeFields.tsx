@@ -34,6 +34,7 @@ export function QuantizeFields({
         {t("dock.advanced")}
       </summary>
       <Field label={t("dock.max_colors", { count: value.max_colors })}>
+        {/* 中位切分上限：位图里最多提取几种主色。给得小，颗粒感和色块都更「像素画」。 */}
         <Slider
           min={2}
           max={64}
@@ -42,6 +43,8 @@ export function QuantizeFields({
         />
       </Field>
       <Field label={t("dock.alpha_cutoff", { count: value.alpha_threshold })}>
+        {/* 半透明判官：alpha 低于它的输出像素直接算透明（索引 0），
+            所以调低它能把 PNG 里朦胧的边缘救回来。 */}
         <Slider
           min={0}
           max={255}
@@ -50,6 +53,8 @@ export function QuantizeFields({
         />
       </Field>
       <Field label={t("dock.snap_tolerance", { count: value.snap_tolerance })}>
+        {/* 复用旧色的容差：新主色离画布已有颜色多近就直接并进去，不新增。
+            拉到 0 等于不复用，每次量化都会把调色板撑大一轮。 */}
         <Slider
           min={0}
           max={128}
@@ -58,6 +63,7 @@ export function QuantizeFields({
         />
       </Field>
       <div className="dock-flag">
+        {/* 有序抖动（Bayer 4x4）：渐变色区的救命稻草，代价是画面起网格纹理。 */}
         <Switch
           size="small"
           checked={value.dither}
@@ -66,6 +72,8 @@ export function QuantizeFields({
         <span>{t("dock.dither")}</span>
       </div>
       <div className="dock-flag">
+        {/* 允许新增色板项：关掉之后找不到近似色的主色会被并进已有颜色，
+            调色板永远不涨——适合已经定好色数的项目。 */}
         <Switch
           size="small"
           checked={value.expand_palette}

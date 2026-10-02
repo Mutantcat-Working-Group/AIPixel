@@ -29,6 +29,10 @@ use std::sync::Arc;
 
 pub const MAX_IMAGE_BYTES: usize = 24 * 1024 * 1024;
 
+/// images 端点响应体的上限。`b64_json` 会把位图放大 4/3（再加 JSON 外衣），
+/// 按位图上限翻倍取就够；少了它，一张贴着上限的图会在 JSON 阶段被误杀。
+const IMAGE_JSON_CAP: usize = MAX_IMAGE_BYTES * 2;
+
 /// 一次生图的产出：原始字节 + media type + 实际走通的传输方式。
 #[derive(Debug, Clone)]
 pub struct GeneratedImage {
@@ -146,8 +150,10 @@ impl OpenAiCompatGenerator {
                 "images/edits needs a reference image".into(),
             ));
         };
-        let bytes = pixel_core::decode::decode_base64(&reference.data_base64)
-            .map_err(ProviderError::Decode)?;
+        let bytes = capped_image(
+            pixel_core::decode::decode_base64(&reference.data_base64)
+                .map_err(ProviderError::Decode)?,
+        )?;
         let mut form = reqwest::multipart::Form::new()
             .text("model", self.model.clone())
             .text("prompt", params.prompt.clone())
@@ -187,17 +193,36 @@ impl OpenAiCompatGenerator {
             body["image_config"] = json!({"aspect_ratio": aspect_from_size(size)});
         }
         let value = self.post("chat/completions", &body).await?;
-        let message = value
+        // 挑一个真有图的 choice：中转偶尔在第一个塞一个只填了 finish_reason 的
+        // 空壳，按 first() 取会把「端点不回图」的结论冤枉安到模型头上。
+        let choice = value
             .get("choices")
             .and_then(|c| c.as_array())
-            .and_then(|c| c.first())
-            .and_then(|c| c.get("message"))
+            .and_then(|c| {
+                c.iter()
+                    .find(|one| {
+                        one.pointer("/message/images").is_some()
+                            || !one
+                                .pointer("/message/content")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .trim()
+                                .is_empty()
+                    })
+                    .or_else(|| c.first())
+            })
             .ok_or_else(|| {
                 ProviderError::Decode(format!(
                     "chat/completions returned no choice: {}",
                     short(&value)
                 ))
             })?;
+        let message = choice.get("message").ok_or_else(|| {
+            ProviderError::Decode(format!(
+                "chat/completions choice carried no message: {}",
+                short(&value)
+            ))
+        })?;
         let note = message
             .get("content")
             .and_then(|c| c.as_str())
@@ -240,26 +265,32 @@ impl OpenAiCompatGenerator {
         if self.api_key.trim().is_empty() {
             return Err(ProviderError::Config("missing api key".into()));
         }
-        let resp = self
+        let request = self
             .client
             .post(format!("{}/{path}", self.base_url))
             .header("authorization", format!("Bearer {}", self.api_key))
             .header("content-type", "application/json")
-            .json(body)
-            .send()
-            .await
-            .map_err(|e| ProviderError::Network(e.to_string()))?;
+            .json(body);
+        // 超时和 body 上限走公共护栏。生图这条链路以前一样超时都没带：端点
+        // 接了连接却迟迟不回图，界面就是一个转到天荒地老的圈，而聊天链路
+        // 早就收口了——同一条链路上两种命运，用户只当软件不稳。
+        let resp = super::http::send(request, super::http::IMAGE_TIMEOUT).await?;
         let status = resp.status();
         if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
+            let text = super::http::read_text(
+                resp,
+                super::http::TEXT_BODY_CAP,
+                super::http::IMAGE_TIMEOUT,
+                400,
+            )
+            .await?;
             return Err(ProviderError::Http {
                 status: status.as_u16(),
                 body: text,
             });
         }
-        resp.json()
-            .await
-            .map_err(|e| ProviderError::Decode(e.to_string()))
+        // JSON 里躺着 base64 位图，上限按位图上限翻倍取；读满即失败，不整段吞。
+        super::http::read_json(resp, IMAGE_JSON_CAP, super::http::IMAGE_TIMEOUT).await
     }
 
     /// multipart 变体。content-type 必须由 reqwest 从 Form 推（boundary 在里面），
@@ -272,25 +303,29 @@ impl OpenAiCompatGenerator {
         if self.api_key.trim().is_empty() {
             return Err(ProviderError::Config("missing api key".into()));
         }
-        let resp = self
+        let request = self
             .client
             .post(format!("{}/{path}", self.base_url))
             .header("authorization", format!("Bearer {}", self.api_key))
-            .multipart(form)
-            .send()
-            .await
-            .map_err(|e| ProviderError::Network(e.to_string()))?;
+            .multipart(form);
+        // content-type 由 reqwest 从 Form 推（boundary 在里面），所以不能和 post
+        // 共用同一条请求链；护栏照旧共用。
+        let resp = super::http::send(request, super::http::IMAGE_TIMEOUT).await?;
         let status = resp.status();
         if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
+            let text = super::http::read_text(
+                resp,
+                super::http::TEXT_BODY_CAP,
+                super::http::IMAGE_TIMEOUT,
+                400,
+            )
+            .await?;
             return Err(ProviderError::Http {
                 status: status.as_u16(),
                 body: text,
             });
         }
-        resp.json()
-            .await
-            .map_err(|e| ProviderError::Decode(e.to_string()))
+        super::http::read_json(resp, IMAGE_JSON_CAP, super::http::IMAGE_TIMEOUT).await
     }
 
     /// 图可能是 data URL（多数）或 http URL（少数）；后者要真的去取。
@@ -298,16 +333,13 @@ impl OpenAiCompatGenerator {
         if url.starts_with("data:") {
             let (media_type, payload) =
                 pixel_core::decode::split_data_url(url).map_err(ProviderError::Decode)?;
-            let bytes =
-                pixel_core::decode::decode_base64(payload).map_err(ProviderError::Decode)?;
+            let bytes = capped_image(
+                pixel_core::decode::decode_base64(payload).map_err(ProviderError::Decode)?,
+            )?;
             return Ok((media_type, bytes));
         }
-        let resp = self
-            .client
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| ProviderError::Network(e.to_string()))?;
+        let request = self.client.get(url);
+        let resp = super::http::send(request, super::http::IMAGE_TIMEOUT).await?;
         let status = resp.status();
         if !status.is_success() {
             return Err(ProviderError::Http {
@@ -321,21 +353,27 @@ impl OpenAiCompatGenerator {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("image/png")
             .to_string();
-        let bytes = resp
-            .bytes()
+        // 边读边对上限。以前是 `resp.bytes()` 整段落进内存再量长度：超大图早早
+        // 就把内存吃穿，那个 MAX_IMAGE_BYTES 检查形同虚设。上限多带一个字节，
+        // 好让「正好卡在限量上」的图放行，超了的部分一个字节都不缓冲。
+        let bytes = super::http::read_capped(resp, MAX_IMAGE_BYTES + 1, super::http::IMAGE_TIMEOUT)
             .await
-            .map_err(|e| ProviderError::Network(e.to_string()))?;
-        if bytes.len() > MAX_IMAGE_BYTES {
-            return Err(ProviderError::Decode(format!(
-                "generated image is {} bytes; above the {} byte limit",
-                bytes.len(),
-                MAX_IMAGE_BYTES
-            )));
-        }
-        Ok((media_type, bytes.to_vec()))
+            .map_err(|e| {
+                if e.too_large() {
+                    ProviderError::Decode(format!(
+                        "generated image is above the {} byte limit",
+                        MAX_IMAGE_BYTES
+                    ))
+                } else {
+                    e.into_error()
+                }
+            })?;
+        Ok((media_type, bytes))
     }
 }
 
+/// 按协议挑生图实现。Anthropic 协议直接给一个必失败的实现而不是 `None`：
+/// 调用点少一条分支，错误也说得清是「这个协议不出图」而不是「生图坏了」。
 pub fn build_image_generator(config: &ModelConfig) -> Arc<dyn ImageGenerator> {
     let client = super::providers::http_client();
     match config.protocol {
@@ -512,6 +550,8 @@ fn aspect_from_size(size: &str) -> Option<String> {
     Some(format!("{}:{}", w / g, h / g))
 }
 
+/// 辗转相除。`1920x1080` 要约成 `16:9`：Gemini 的 image_config 只认
+/// 这种最简比，带像素值的比例它当非法参数整个拒掉。
 fn gcd(a: u32, b: u32) -> u32 {
     if b == 0 {
         a
@@ -521,21 +561,12 @@ fn gcd(a: u32, b: u32) -> u32 {
 }
 
 fn short(value: &Value) -> String {
-    let text = value.to_string();
-    if text.len() > 400 {
-        format!("{}...", &text[..400])
-    } else {
-        text
-    }
+    super::providers::truncate_chars(&value.to_string(), 400)
 }
 
 /// 探测理由的截断。给用户看的原始报文，截到一眼能读完的长度就够。
 fn short_text(text: &str) -> String {
-    if text.len() > 160 {
-        format!("{}...", &text[..160])
-    } else {
-        text.to_string()
-    }
+    super::providers::truncate_chars(text, 160)
 }
 
 impl OpenAiCompatGenerator {
@@ -546,18 +577,36 @@ impl OpenAiCompatGenerator {
         value: &Value,
         transport: &'static str,
     ) -> Result<GeneratedImage, ProviderError> {
-        let first = value
+        let entries = value
             .get("data")
             .and_then(|d| d.as_array())
-            .and_then(|d| d.first())
             .ok_or_else(|| {
                 ProviderError::Decode(format!(
                     "image endpoint returned no data entry: {}",
                     short(value)
                 ))
             })?;
+        // 第一个 entry 未必带图：有的实现在前面塞一个只填 revised_prompt 的
+        // 空壳。先挑第一个真有位图或链接的，一个都没有再退回第一条报错，
+        // 这样报的是「端点回了空壳」而不是一句没头没尾的 neither b64 nor url。
+        let has_payload = |e: &Value| {
+            e.get("b64_json").and_then(|v| v.as_str()).is_some()
+                || e.get("url").and_then(|v| v.as_str()).is_some()
+        };
+        let first = entries
+            .iter()
+            .find(|e| has_payload(e))
+            .or_else(|| entries.first())
+            .ok_or_else(|| {
+                ProviderError::Decode(format!(
+                    "image endpoint returned an empty data array: {}",
+                    short(value)
+                ))
+            })?;
         if let Some(b64) = first.get("b64_json").and_then(|v| v.as_str()) {
-            let bytes = pixel_core::decode::decode_base64(b64).map_err(ProviderError::Decode)?;
+            let bytes = capped_image(
+                pixel_core::decode::decode_base64(b64).map_err(ProviderError::Decode)?,
+            )?;
             let media_type = first
                 .get("media_type")
                 .and_then(|v| v.as_str())
@@ -591,6 +640,21 @@ impl OpenAiCompatGenerator {
 }
 
 /// media type 转文件后缀，给 multipart 的垫图命名用。
+/// 位图字节的硬闸。`b64_json`、`data:` URL 和垫图这三条支路都不进 fetch_image 的
+/// 逐字节上限，而 JSON 外衣是按位图上限翻倍封的——base64 解开会 swell 到大约 1.5 倍。
+/// 没这一道，一张贴着上限的图就是直挺挺穿过来的，`MAX_IMAGE_BYTES` 名存实亡。
+fn capped_image(bytes: Vec<u8>) -> Result<Vec<u8>, ProviderError> {
+    if bytes.len() > MAX_IMAGE_BYTES {
+        return Err(ProviderError::Decode(format!(
+            "image is above the {} byte limit",
+            MAX_IMAGE_BYTES
+        )));
+    }
+    Ok(bytes)
+}
+
+/// media type -> 落盘后缀。认不出的按 png 走：探测日志要把位图存下来给人看，
+/// 存不出去的诊断信息和没存是一样的。
 fn extension_for(media_type: &str) -> &'static str {
     match media_type {
         "image/jpeg" | "image/jpg" => "jpg",
@@ -604,6 +668,31 @@ fn extension_for(media_type: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn short_and_short_text_survive_multibyte_bodies() {
+        // 中文报文按字节截断会 panic：slice 落在汉字中间。两条截断路径都要钉住。
+        let value = serde_json::json!({"error": {"message": "生图失败：套餐额度不足".repeat(80)}});
+        let one = short(&value);
+        assert!(one.chars().count() <= 403);
+        assert!(one.ends_with("..."));
+        let two = short_text("探测失败：该端点不支持图像生成。".repeat(30).as_str());
+        assert!(two.chars().count() <= 163);
+        assert!(two.ends_with("..."));
+    }
+
+    #[test]
+    fn capped_image_lets_the_limit_through_and_stops_the_byte_after() {
+        // b64_json / data: URL / multipart 三条支路都走这道闸：贴限放行、越界拒收。
+        // 放宽一格就是往 24MB 后面挪一个字节，闸门等于不存在。
+        let exactly = capped_image(vec![0u8; MAX_IMAGE_BYTES]);
+        assert!(exactly.is_ok(), "贴上限的位图必须放行");
+        assert_eq!(exactly.unwrap().len(), MAX_IMAGE_BYTES);
+        let over = capped_image(vec![0u8; MAX_IMAGE_BYTES + 1]);
+        assert!(over.is_err(), "越过一个字节就必须拒");
+        let msg = format!("{}", over.unwrap_err());
+        assert!(msg.contains("byte limit"), "报错要说清是字节上限: {msg}");
+    }
 
     fn params(prompt: &str) -> ImageGenParams {
         ImageGenParams {

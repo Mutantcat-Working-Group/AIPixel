@@ -7,6 +7,7 @@
 use super::models::{ChatRequest, ContentBlock, LlmEvent, Message, ModelConfig, Protocol, Role};
 use async_trait::async_trait;
 use futures_util::Stream;
+use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::pin::Pin;
@@ -33,6 +34,29 @@ pub(crate) fn http_client() -> reqwest::Client {
 /// 没配 Max tokens 时的输出上限兜底。真值在 `limits`，这里只留一个别名，
 /// 免得两处数字各自漂移。
 pub const DEFAULT_MAX_TOKENS: u32 = crate::limits::FALLBACK_MAX_TOKENS;
+
+/// 按字符截断：provider 回的错误报文多为中文，按字节切会正好切在汉字
+/// 三个字节的中间，Rust 直接 panic，挂掉的还是 async 任务——前端只看到
+/// 一个永不返回的请求。给用户看的报文截到一眼读完就够。
+pub(crate) fn truncate_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        text.to_string()
+    } else {
+        format!("{}...", text.chars().take(max).collect::<String>())
+    }
+}
+
+/// 只给有值的可选字段占位。
+///
+/// `json!` 宏对 `Option::None` 会老实写成 `null`。不少中转（以及按严格 schema
+/// 校验的 vLLM 部署）把 `"temperature": null` 当非法值，整条请求 400 拒掉。
+/// 用户视角是「我什么都没改，就是没填温度，现在发不出消息了」。可选字段一律
+/// 「有值才写进 body」，缺省交给端点自己的默认值。
+fn set_some<T: serde::Serialize>(body: &mut Value, key: &str, value: Option<T>) {
+    if let Some(v) = value {
+        body[key] = serde_json::to_value(v).unwrap_or(Value::Null);
+    }
+}
 
 /// 这个模型要不要把上一轮的推理内容原样带回。
 ///
@@ -187,8 +211,13 @@ pub fn build_provider(config: &ModelConfig) -> Arc<dyn LlmProvider> {
     }
 }
 
+/// 归一 base_url：去掉首尾空白，再去掉右斜杠。
+///
+/// 从输入框拷过来的地址常带一个尾部换行或空格，`url::Url` 解析阶段不会报错，
+/// 但拼出来的 host 是空串，最后只给一句看不出原因的「builder error」。
+/// 空白和斜杠都在这里收口，两个 provider 都受益。
 fn trim_trailing_slash(s: &str) -> String {
-    s.trim_end_matches('/').to_string()
+    s.trim().trim_end_matches('/').trim().to_string()
 }
 
 /// 拉一份 provider 的模型清单，给设置界面让用户挑着填。
@@ -215,15 +244,24 @@ pub async fn list_models(config: &ModelConfig) -> Result<Vec<String>, ProviderEr
                 req.header("authorization", format!("Bearer {}", config.api_key))
             }
         };
-        let resp = match req.send().await {
+        // 模型列表以前一样裸奔：端点接了连接却迟迟不回，设置里点「获取模型」
+        // 就是一个永远转的圈，而且第一个候选 URL 挂住还堵着后面那次尝试。
+        let resp = match super::http::send(req, super::http::ONESHOT_TIMEOUT).await {
             Ok(resp) => resp,
             Err(e) => {
-                last_err = Some(ProviderError::Network(e.to_string()));
+                last_err = Some(e);
                 continue;
             }
         };
         let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
+        let body = super::http::read_text(
+            resp,
+            super::http::TEXT_BODY_CAP,
+            super::http::ONESHOT_TIMEOUT,
+            400,
+        )
+        .await
+        .unwrap_or_default();
         if !status.is_success() {
             last_err = Some(ProviderError::Http {
                 status: status.as_u16(),
@@ -248,6 +286,9 @@ pub(crate) fn model_list_urls(base: &str) -> Vec<String> {
     out
 }
 
+/// 从 base_url 里取 `scheme://host`。探测模型列表要打 `${origin}/models`，
+/// 而用户填的 base_url 常带版本路径（.../v1、.../v4）：照整个 URL 拼会变成
+/// /v1/models 之外的四不像，只取源是唯一对两头都成立的做法。
 fn origin_of(base: &str) -> Option<String> {
     let (scheme, rest) = base.split_once("://")?;
     let host = rest.split('/').next().filter(|h| !h.is_empty())?;
@@ -297,6 +338,91 @@ mod tests {
             extract_model_ids(body),
             vec!["claude-sonnet-4-5".to_string()]
         );
+    }
+
+    /// 没填温度时请求体里连字段都不该有：`null` 会让严格校验 schema 的端点
+    /// 整条 400，症状是「我什么都没改，就是突然发不出消息了」。
+    #[test]
+    fn an_unset_temperature_is_absent_rather_than_null() {
+        let req = ChatRequest {
+            system: "你是像素助手".into(),
+            messages: vec![Message::user_text("画只猫")],
+            tools: Vec::new(),
+            max_tokens: 1024,
+            temperature: None,
+            disable_thinking: false,
+            echo_reasoning: false,
+        };
+        let body = openai_body("some-model", &req);
+        assert!(
+            body.get("temperature").is_none(),
+            "没填温度就不该发这个字段，实际 body 是 {}",
+            serde_json::to_string(&body).unwrap()
+        );
+        // 填了就得真发出去：缺字段和发错值一样是故障。f32 转 f64 会带尾差，
+        // 按浮点数比大小而不是比相等。
+        let filled = ChatRequest {
+            temperature: Some(0.7),
+            ..req
+        };
+        let sent = openai_body("m", &filled)["temperature"].as_f64();
+        assert_eq!(sent.map(|v| (v * 10.0).round() as i64), Some(7));
+    }
+
+    /// 只剩推理的 assistant 回合不许进请求：推理过网就被丢掉，剩一条
+    /// `content: null` 且没有工具调用的空消息，端点只当它是坏请求。
+    #[test]
+    fn an_assistant_message_with_only_reasoning_never_reaches_the_request() {
+        let messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Reasoning {
+                text: "先在脑子里过一遍".into(),
+            }],
+        }];
+        assert!(
+            to_openai_messages(&messages, false).is_empty(),
+            "推理被端点字典挡掉之后，这条消息就该整条消失"
+        );
+        let kept = to_openai_messages(&messages, true);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0]["reasoning_content"], json!("先在脑子里过一遍"));
+    }
+
+    /// Anthropic 要求 user/assistant 严格交替。续写时「只吐推理」的半截会被
+    /// 推成紧挨着的第二条 user 指令，逐条发出去就是 400。相邻同角色必须并成一轮。
+    #[test]
+    fn anthropic_never_sees_two_user_turns_in_a_row() {
+        let messages = vec![
+            Message::user_text("画一只五帧橘猫"),
+            Message::user_text("接着写"),
+            Message::assistant(vec![ContentBlock::Text {
+                text: "画完了".into(),
+            }]),
+        ];
+        let out = to_anthropic_messages(&messages);
+        assert_eq!(out.len(), 2, "两条相邻 user 必须并成一整轮，实际 {out:?}");
+        assert_eq!(out[0]["role"], json!("user"));
+        assert_eq!(out[1]["role"], json!("assistant"));
+    }
+
+    /// 同理，只剩推理的 assistant 回合推平就是空 content 数组，Anthropic 直接拒。
+    #[test]
+    fn anthropic_drops_a_turn_that_would_carry_no_blocks_at_all() {
+        let messages = vec![
+            Message::user_text("画猫"),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Reasoning {
+                    text: "想想怎么画".into(),
+                }],
+            },
+            Message::user_text("改一下"),
+        ];
+        let out = to_anthropic_messages(&messages);
+        assert_eq!(out.len(), 1, "空 assistant 该整条消失，实际 {out:?}");
+        assert_eq!(out[0]["role"], json!("user"));
+        let blocks = out[0]["content"].as_array().expect("content 是块数组");
+        assert_eq!(blocks.len(), 2, "两条 user 的正文都要留下");
     }
 
     /// 中转偶尔会把同一个模型在不同端点各报一次，去重排序后再给用户挑。
@@ -470,6 +596,47 @@ mod tests {
         assert_eq!(tool_args(&ev), "{}");
     }
 
+    /// 更刁钻的一批中转：整条流一个 id 都不发，只有 name 和 arguments。
+    /// 老逻辑要求 id 到齐才登记 start，工具会被整条吞掉——症状正是
+    /// 「模型把预算全花在思考上了，一个工具都没调」。现在名字到了就按
+    /// index 造 id 顶上，调用必须发得出去，参数一个字节都不能丢。
+    #[test]
+    fn a_provider_that_never_sends_ids_still_fires_the_tool() {
+        let ev = openai_stream(&[
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"pixel_plan","arguments":"{\"a\""}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":":1}"}}]}}]}"#,
+        ]);
+        assert_eq!(
+            tool_starts(&ev),
+            vec![("call-0".to_string(), "pixel_plan".to_string())]
+        );
+        assert_eq!(tool_args(&ev), "{\"a\":1}");
+    }
+
+    /// 收摊前没来得及发 start 的半条调用，flush 必须发生在 Done 之前。
+    /// 排在 Done 后面的 ToolUseStart 会被 runner 当成下一回合的开头丢掉，
+    /// 工具白发。这里连 name 都没到的纯 arguments 碎片，宁可丢也不瞎编工具名。
+    #[test]
+    fn a_half_arrived_tool_call_is_flushed_before_done() {
+        let mut acc = ToolAcc::default();
+        let mut out = VecDeque::new();
+        let slot = acc.calls.entry(0).or_default();
+        slot.name = "pixel_run_shader".into();
+        slot.pre_args = "{\"shape\":\"ellipse\"}".into();
+        let orphan = acc.calls.entry(1).or_default();
+        orphan.pre_args = "{\"junk\":true}".into(); // 连名字都没有，该丢。
+        acc.flush_unstarted(&mut out);
+
+        let starts = tool_starts(out.iter().cloned().collect::<Vec<_>>().as_slice());
+        assert_eq!(
+            starts,
+            vec![("call-0".to_string(), "pixel_run_shader".to_string())],
+            "没名字的那条不许被编出来"
+        );
+        let args = tool_args(out.iter().cloned().collect::<Vec<_>>().as_slice());
+        assert_eq!(args, "{\"shape\":\"ellipse\"}");
+    }
+
     #[test]
     fn a_provider_that_names_its_ceiling_gets_clamped_to_it() {
         // 中转站嫌我们给的 max_tokens 太大，顺手告诉我们它允许多少。
@@ -558,27 +725,172 @@ mod tests {
         assert_eq!(with[0]["content"], json!("我来画"));
         assert_eq!(without[0]["content"], json!("我来画"));
     }
+
+    // ---- SseStream 字节级重组 ----
+
+    /// 拿若干字节分片攒一条真实会来分片的 SSE 流。
+    fn sse_from_chunks(chunks: Vec<Vec<u8>>) -> SseStream {
+        let inner = futures_util::stream::iter(
+            chunks
+                .into_iter()
+                .map(|c| Ok::<_, reqwest::Error>(bytes::Bytes::from(c))),
+        );
+        SseStream {
+            inner: Box::pin(inner),
+            buf: Vec::new(),
+            pending: VecDeque::new(),
+            inner_done: false,
+            held_cr: false,
+        }
+    }
+
+    async fn drain_sse(stream: SseStream) -> (Vec<String>, Vec<ProviderError>) {
+        use futures_util::StreamExt as _;
+        let mut stream = stream;
+        let mut data = Vec::new();
+        let mut errs = Vec::new();
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(d) => data.push(d),
+                Err(e) => errs.push(e),
+            }
+        }
+        (data, errs)
+    }
+
+    /// 汉字正好从三个字节的中间下刀。按分片做 `from_utf8_lossy` 的老逻辑会把
+    /// 残缺字节换成 U+FFFD：帧拼回来了，内容却是乱的——重试再多次也只是再拿
+    /// 一段乱码。现在逐字节缓冲，凑齐整帧才一次性解码。
+    #[tokio::test]
+    async fn a_multibyte_character_split_across_chunks_is_not_mangled() {
+        let frame = "data: {\"content\":\"橘猫行走图\"}\n\n".as_bytes();
+        // 每个可能的切点都试一遍：三字节的任何一刀都不该出乱码。
+        for cut in 1..frame.len() {
+            let (head, tail) = frame.split_at(cut);
+            let (data, errs) = drain_sse(sse_from_chunks(vec![head.to_vec(), tail.to_vec()])).await;
+            assert!(errs.is_empty(), "在 {cut} 处分片被判成非法 UTF-8");
+            assert_eq!(
+                data,
+                vec!["{\"content\":\"橘猫行走图\"}".to_string()],
+                "在 {cut} 处分片把汉字切坏了"
+            );
+        }
+    }
+
+    /// `\r\n` 行尾的帧边界。分片正好切在 `\r` 和 `\n` 之间时，一看见 `\r` 就
+    /// 改写成 `\n` 的老逻辑会把帧空行判错，整帧丢掉——模型说完了这句话，界面
+    /// 一个字都不显示，然后干等超时。
+    #[tokio::test]
+    async fn crlf_frame_boundaries_split_across_chunks_still_parse() {
+        let raw = b"data: one\r\n\r\ndata: two\r\n\r\n";
+        for cut in 1..raw.len() {
+            let (head, tail) = raw.split_at(cut);
+            let (data, errs) = drain_sse(sse_from_chunks(vec![head.to_vec(), tail.to_vec()])).await;
+            assert!(errs.is_empty(), "在 {cut} 处分片被当成非法 UTF-8");
+            assert_eq!(
+                data,
+                vec!["one".to_string(), "two".to_string()],
+                "在 {cut} 处切开漏掉了帧"
+            );
+        }
+    }
+
+    /// 200 但内容不是 SSE 的响应（整段 JSON 的错误页、HTML 登录跳转页都这样）
+    /// 永远等不到空行。不设上限就能把缓冲吃到底；撞限要报成解码失败，好让上层
+    /// 按可重试错误走，而不是静默返回一段空流、再空转掉全部重试次数。
+    #[tokio::test]
+    async fn an_endpoint_that_never_sends_a_frame_boundary_fails_instead_of_buffering_forever() {
+        let blob = vec![b'x'; 4 * 1024 * 1024];
+        let (_data, errs) =
+            drain_sse(sse_from_chunks(vec![blob.clone(), blob.clone(), blob])).await;
+        let first = errs.first().expect("撞到上限必须报错");
+        assert!(
+            matches!(first, ProviderError::Decode(_)),
+            "对面没在说 SSE 是解码层面的失败，不是网络失败"
+        );
+        assert!(
+            first.to_string().contains("probably not speaking SSE"),
+            "报错要说清楚对面没在说 SSE: {first}"
+        );
+    }
 }
 
 // ---------------- SSE ----------------
 
+/// 无帧边界时的缓冲上限。一条 200 但内容不是 SSE 的响应（整段 JSON 的代理
+/// 最常这样）永远等不来空行，不设限就能把缓冲吃到底；正常 SSE 一帧只有
+/// 几百字节，8MB 已是极端宽松。
+const SSE_FRAME_CAP: usize = 8 * 1024 * 1024;
+
 /// 原始 SSE 流，产出每个 event 的 `data:` 载荷（String）。
+///
+/// 缓冲是字节级的：网络分片会从汉字三个字节的中间下刀，按分片做
+/// `from_utf8_lossy` 会把残缺字节变成 U+FFFD、后面的字节跟着乱码，
+/// 交出一段「格式正确但内容是错」的输出——重试也救不回来。只有凑齐
+/// 整帧才一次性解码，非法字节原样报错，不悄悄替换。
 struct SseStream {
     inner: Pin<Box<dyn Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send>>,
-    buf: String,
+    buf: Vec<u8>,
     pending: VecDeque<String>,
     inner_done: bool,
+    /// 上一个分片以 `\r` 收尾。它可能是独立的 CR 行尾，也可能是 CRLF 的
+    /// 前半截，要等下一个字节才能定，先把解码按住不并进缓冲。
+    held_cr: bool,
 }
 
 impl SseStream {
-    fn drain_frames(&mut self) {
-        while let Some(pos) = self.buf.find("\n\n") {
-            let frame: String = self.buf[..pos].to_string();
+    /// 把新分片按字节并入，行尾统一成 `\n`。
+    fn absorb(&mut self, chunk: &[u8]) {
+        for &b in chunk {
+            if self.held_cr {
+                self.held_cr = false;
+                self.buf.push(b'\n');
+                if b != b'\n' {
+                    self.push_byte(b);
+                }
+            } else {
+                self.push_byte(b);
+            }
+        }
+    }
+
+    fn push_byte(&mut self, b: u8) {
+        if b == b'\r' {
+            self.held_cr = true;
+        } else {
+            self.buf.push(b);
+        }
+    }
+
+    /// 把已就绪的帧从缓冲里摘出来。帧按空行切；迟迟等不到空行又一直涨，
+    /// 说明对面没在说 SSE，直接断流报错，别把内存吃穿。
+    fn drain_frames(&mut self) -> Result<(), ProviderError> {
+        while let Some(pos) = self.buf.windows(2).position(|w| w == b"\n\n") {
+            let frame: Vec<u8> = self.buf[..pos].to_vec();
             self.buf.drain(..pos + 2);
-            if let Some(data) = frame_data(&frame) {
+            let text = decode_frame(&frame)?;
+            if let Some(data) = frame_data(&text) {
                 self.pending.push_back(data);
             }
         }
+        if self.buf.len() > SSE_FRAME_CAP {
+            return Err(ProviderError::Decode(format!(
+                "SSE frame exceeded {} bytes without a frame boundary; the endpoint is probably not speaking SSE",
+                SSE_FRAME_CAP
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// 整帧一次性解码。切帧已经保证字符完整，这里再撞上非法 UTF-8 就是对面
+/// 真的在发脏数据，报错比悄悄替换成 U+FFFD 诚实。
+fn decode_frame(frame: &[u8]) -> Result<String, ProviderError> {
+    match std::str::from_utf8(frame) {
+        Ok(s) => Ok(s.to_string()),
+        Err(e) => Err(ProviderError::Decode(format!(
+            "SSE frame was not valid UTF-8: {e}"
+        ))),
     }
 }
 
@@ -595,20 +907,29 @@ impl Stream for SseStream {
             }
             match this.inner.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(chunk))) => {
-                    let s = String::from_utf8_lossy(&chunk);
-                    this.buf.push_str(&s);
-                    this.buf = this.buf.replace("\r\n", "\n").replace('\r', "\n");
-                    this.drain_frames();
+                    this.absorb(&chunk);
+                    if let Err(e) = this.drain_frames() {
+                        return Poll::Ready(Some(Err(e)));
+                    }
                 }
                 Poll::Ready(Some(Err(e))) => {
                     return Poll::Ready(Some(Err(ProviderError::Network(e.to_string()))));
                 }
                 Poll::Ready(None) => {
                     this.inner_done = true;
+                    if this.held_cr {
+                        this.held_cr = false;
+                        this.buf.push(b'\n');
+                    }
                     if !this.buf.is_empty() {
                         let frame = std::mem::take(&mut this.buf);
-                        if let Some(data) = frame_data(&frame) {
-                            this.pending.push_back(data);
+                        match decode_frame(&frame) {
+                            Ok(text) => {
+                                if let Some(data) = frame_data(&text) {
+                                    this.pending.push_back(data);
+                                }
+                            }
+                            Err(e) => return Poll::Ready(Some(Err(e))),
                         }
                     }
                 }
@@ -641,6 +962,46 @@ struct ToolAcc {
     stop: String,
     input_tokens: Option<u32>,
     output_tokens: Option<u32>,
+}
+
+impl ToolAcc {
+    /// 流收摊时给「只到了一半」的 tool call 兜底，绝不晚于 Done。
+    ///
+    /// 两种漏网：name 到了 id 没到的（feed 里已经就地造 id 顶住），以及
+    /// arguments 分片在最后一包里、SSE 紧跟着就 [DONE] 的。后者要是直接
+    /// push_done，缓存在 pre_args 里的参数会跟着整条报废。
+    /// 只有名字的才补发，连名字都没有的纯 arguments 碎片宁可丢掉——
+    /// 瞎编工具名比丢掉一次调用危险得多。
+    fn flush_unstarted(&mut self, out: &mut VecDeque<LlmEvent>) {
+        let mut pending: Vec<usize> = self
+            .calls
+            .iter()
+            .filter(|(_, c)| !c.started && !c.name.is_empty())
+            .map(|(i, _)| *i)
+            .collect();
+        pending.sort_unstable();
+        for idx in pending {
+            if let Some(call) = self.calls.get_mut(&idx) {
+                out.push_back(LlmEvent::ToolUseStart {
+                    index: idx,
+                    id: if call.id.is_empty() {
+                        format!("call-{idx}")
+                    } else {
+                        call.id.clone()
+                    },
+                    name: call.name.clone(),
+                });
+                let args = std::mem::take(&mut call.pre_args);
+                if !args.is_empty() {
+                    out.push_back(LlmEvent::ToolInputDelta {
+                        index: idx,
+                        json_partial: args,
+                    });
+                }
+                call.started = true;
+            }
+        }
+    }
 }
 
 /// 一个流式 tool call 的分片累加器，OpenAI 与 Anthropic 两条 parser 共用。
@@ -676,6 +1037,13 @@ impl StreamToolCall {
         }
         if let Some(name) = name {
             self.name.push_str(name);
+        }
+        // 有的中转整条流都不发 tool_call.id。死等 id 的话工具会被整条吞掉——
+        // 表现就是「模型把预算全花在思考上了，一个工具都没调」。名字到了就按
+        // index 造一个本地 id 顶上：回传 assistant/tool 两条消息用的是同一个
+        // id，闭环验证时端点自己也分不出真假，比丢掉整次工具调用便宜得多。
+        if self.id.is_empty() && !self.name.is_empty() {
+            self.id = format!("call-{index}");
         }
         if self.id.is_empty() || self.name.is_empty() {
             return; // 还没到齐，继续等下一片。
@@ -736,7 +1104,7 @@ impl Stream for ParsedStream {
             match Pin::new(&mut this.sse).poll_next(cx) {
                 Poll::Ready(Some(Ok(data))) => {
                     if data.trim() == "[DONE]" {
-                        this.push_done();
+                        this.flush_then_done();
                         continue;
                     }
                     match (this.parse)(&data, &mut this.acc) {
@@ -749,7 +1117,7 @@ impl Stream for ParsedStream {
                                 this.out.push_back(ev);
                             }
                             if has_done {
-                                this.push_done();
+                                this.flush_then_done();
                             }
                         }
                         Err(e) => return Poll::Ready(Some(Err(e))),
@@ -757,7 +1125,7 @@ impl Stream for ParsedStream {
                 }
                 Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(e))),
                 Poll::Ready(None) => {
-                    this.push_done();
+                    this.flush_then_done();
                 }
                 Poll::Pending => return Poll::Pending,
             }
@@ -766,6 +1134,16 @@ impl Stream for ParsedStream {
 }
 
 impl ParsedStream {
+    /// 先补发漏掉的 tool call，再收摊。顺序不能颠倒：Done 一进队列，
+    /// runner 就认为这一回合结束，排在它后面的 ToolUseStart 会被丢进
+    /// 下一回合的开头，工具白发。
+    fn flush_then_done(&mut self) {
+        if !self.emitted_done {
+            self.acc.flush_unstarted(&mut self.out);
+        }
+        self.push_done();
+    }
+
     fn push_done(&mut self) {
         if !self.emitted_done {
             let reason = if self.acc.stop.is_empty() {
@@ -961,7 +1339,6 @@ impl LlmProvider for AnthropicProvider {
         let mut body = json!({
             "model": self.model,
             "max_tokens": req.max_tokens,
-            "temperature": req.temperature,
             "stream": true,
             "system": req.system,
             "messages": to_anthropic_messages(&req.messages),
@@ -971,6 +1348,7 @@ impl LlmProvider for AnthropicProvider {
                 "input_schema": t.schema,
             })).collect::<Vec<_>>(),
         });
+        set_some(&mut body, "temperature", req.temperature);
         // Anthropic 默认就不思考，所以只在用户要求关的时候显式声明。
         // 空字段不能写 null：端点会把 null 当非法值整条拒掉。
         if req.disable_thinking {
@@ -1002,6 +1380,52 @@ impl LlmProvider for AnthropicProvider {
 
 // ---------------- OpenAI compatible ----------------
 
+/// 组装 OpenAI 兼容协议的请求体。
+///
+/// 抽成纯函数是为了能测。「可选字段有值才写」这条规矩一旦破防，症状不是崩溃，
+/// 而是「我什么都没改，就是没填温度，现在突然发不出消息了」——严格校验 schema
+/// 的端点会把 `"temperature": null` 当非法值整条 400 拒掉。只有把 body 摊开
+/// 逐字段查才看得出来，所以这里必须是可断言的那一个。
+pub(crate) fn openai_body(model: &str, req: &ChatRequest) -> Value {
+    let mut messages = vec![json!({"role": "system", "content": req.system})];
+    messages.extend(to_openai_messages(&req.messages, req.echo_reasoning));
+    // temperature 只准出现在 set_some 里：`json!` 会把 `Option::None` 老实写成
+    // `null`，而 set_some 只覆盖「有值」那一种，补不回来。曾经就在这里写穿，
+    // 结果是没填温度的用户全部发不出消息。
+    let mut body = json!({
+        "model": model,
+        "max_tokens": req.max_tokens,
+        "stream": true,
+        "stream_options": {"include_usage": true},
+        "messages": messages,
+        "tools": req.tools.iter().map(|t| json!({
+            "type": "function",
+            "function": {
+                "name": t.name,
+                "description": t.description,
+                "parameters": t.schema,
+            },
+        })).collect::<Vec<_>>(),
+    });
+    set_some(&mut body, "temperature", req.temperature);
+    if req.disable_thinking {
+        silence_thinking(&mut body);
+    }
+    body
+}
+
+/// 关掉思考：两种端点方言都发一遍，认不出的那个当未知字段忽略，代价为零。
+///
+/// vLLM / 通义 / LongCat 走 `chat_template_kwargs`，智谱一系走 `thinking.type`。
+/// 抽成共享函数是因为一次性路径（读参考图、读视频简报、提示词微调）也得下这条
+/// 指令：它们的 max_tokens 是按「几百个 token 出结论」定的，模型要是把额度全
+/// 花在思考上，回来的就只有一段推理和一条「没有文本内容」的报错。先前那两个
+/// body 各写一遍，一次性那边还漏了下指令，症状就是侧道任务莫名变慢、莫名失败。
+pub(crate) fn silence_thinking(body: &mut Value) {
+    body["thinking"] = json!({"type": "disabled"});
+    body["chat_template_kwargs"] = json!({"enable_thinking": false});
+}
+
 struct OpenAiCompatProvider {
     client: reqwest::Client,
     base_url: String,
@@ -1015,31 +1439,7 @@ impl LlmProvider for OpenAiCompatProvider {
         if self.api_key.trim().is_empty() {
             return Err(ProviderError::Config("missing api key".into()));
         }
-        let mut messages = vec![json!({"role": "system", "content": req.system})];
-        messages.extend(to_openai_messages(&req.messages, req.echo_reasoning));
-        let mut body = json!({
-            "model": self.model,
-            "max_tokens": req.max_tokens,
-            "temperature": req.temperature,
-            "stream": true,
-            "stream_options": {"include_usage": true},
-            "messages": messages,
-            "tools": req.tools.iter().map(|t| json!({
-                "type": "function",
-                "function": {
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.schema,
-                },
-            })).collect::<Vec<_>>(),
-        });
-        // 关思考的两种写法都发：vLLM / 通义 / LongCat 走 chat_template_kwargs，
-        // 智谱一系走 thinking.type。认不出的端点当未知字段忽略，代价为零；
-        // 认出来的立刻从「想半天」切到「直接调工具」。
-        if req.disable_thinking {
-            body["thinking"] = json!({"type": "disabled"});
-            body["chat_template_kwargs"] = json!({"enable_thinking": false});
-        }
+        let body = openai_body(&self.model, req);
         let url = format!("{}/chat/completions", self.base_url);
         let resp = self
             .client
@@ -1067,18 +1467,65 @@ async fn ensure_ok(resp: reqwest::Response) -> Result<SseStream, ProviderError> 
     let status = resp.status();
     if !status.is_success() {
         let code = status.as_u16();
-        let text = resp.text().await.unwrap_or_default();
         return Err(ProviderError::Http {
             status: code,
-            body: text,
+            body: read_error_body(resp).await,
         });
+    }
+    // 200 但对面不是在说 SSE：整段 JSON 的错误页、HTML 登录跳转页、网关的
+    // 占位响应都长这样。不查 content-type 的话，这些字节会被当成 SSE 慢慢找
+    // 空行，永远找不到——最后靠 SSE_FRAME_CAP 撞限才报，而报出来的还是
+    // 「解码失败」。五次重试全耗在上面，用户只看到一句看不出原因的报错。
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    // 空 content-type 不拦：有服务端确实不写这个头，但照样在吐 SSE。
+    let looks_like_sse = content_type.is_empty()
+        || content_type.contains("event-stream")
+        || content_type.starts_with("text/plain");
+    if !looks_like_sse {
+        let body = read_error_body(resp).await;
+        return Err(ProviderError::Decode(format!(
+            "HTTP 200 came back with content-type `{}` instead of `text/event-stream`, and the body is not an SSE stream: {}",
+            content_type,
+            truncate_chars(body.trim(), 400)
+        )));
     }
     Ok(SseStream {
         inner: Box::pin(resp.bytes_stream()),
-        buf: String::new(),
+        buf: Vec::new(),
         pending: VecDeque::new(),
         inner_done: false,
+        held_cr: false,
     })
+}
+
+/// 读一段响应 body，读到 `ERROR_BODY_CAP` 为止。
+///
+/// `resp.text()` 不设底：端点把连接挂着慢慢吐坏 HTML 时，这个 await 就是
+/// 永远。读满上限立刻收手，反正给用户看的只是前四百来个字符。
+///
+/// 响应 body 以上的传输不由这里设超时——那属于客户端层。调用方若需要整体
+/// 时限，在 `timeout()` 里包住本函数。
+async fn read_error_body(resp: reqwest::Response) -> String {
+    let cap = 256 * 1024;
+    let mut buf: Vec<u8> = Vec::new();
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            Ok(bytes) => {
+                buf.extend_from_slice(&bytes);
+                if buf.len() >= cap {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    String::from_utf8_lossy(&buf).to_string()
 }
 
 // ---------------- message conversion ----------------
@@ -1111,6 +1558,12 @@ fn anthropic_block(b: &ContentBlock) -> Option<Value> {
     })
 }
 
+/// 内部消息 -> Anthropic Messages 的 messages 数组。
+///
+/// 两步重排都是为了 Anthropic 的结构要求：System 不进数组（它只有顶层
+/// `system` 字段，塞进数组会被当成普通 user turn 重复一遍）；连续的
+/// tool_result 必须合并进同一个 user turn——Anthropic 没有 tool 角色，
+/// 拆成多条消息会触发 "tool_result blocks must immediately follow"。
 pub(crate) fn to_anthropic_messages(messages: &[Message]) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
     let mut i = 0;
@@ -1131,15 +1584,15 @@ pub(crate) fn to_anthropic_messages(messages: &[Message]) -> Vec<Value> {
                     }
                     i += 1;
                 }
-                out.push(json!({"role": "user", "content": blocks}));
+                push_anthropic_turn(&mut out, "user", blocks);
             }
             Role::User | Role::Assistant => {
-                let blocks: Vec<Value> = m.content.iter().filter_map(anthropic_block).collect();
                 let role = match m.role {
                     Role::Assistant => "assistant",
                     _ => "user",
                 };
-                out.push(json!({"role": role, "content": blocks}));
+                let blocks: Vec<Value> = m.content.iter().filter_map(anthropic_block).collect();
+                push_anthropic_turn(&mut out, role, blocks);
                 i += 1;
             }
         }
@@ -1147,6 +1600,42 @@ pub(crate) fn to_anthropic_messages(messages: &[Message]) -> Vec<Value> {
     out
 }
 
+/// 追一轮内容；一个块都凑不出来就整轮不发。
+///
+/// 两件事一起办：
+///
+/// 一、已经有一轮同角色的就并进去。Anthropic 要求 user/assistant 严格交替，
+/// 相邻同角色一律 400 "roles must alternate"。这种排列在消息簿里很实在：
+/// 续写时「只吐推理没动笔」的半截会被推成紧挨着的第二条 user 指令
+/// （见 runner::push_resume），而工具结果在协议里本就记在 user 名下，
+/// 所以 [user, tool] 也得并，不能只盯着相邻的两条 user 消息。
+///
+/// 二、空的 content 数组整轮不发。Anthropic 拒收没有任何 content block 的
+/// 回合，而推理块过网前会被丢掉（`anthropic_block` 对 Reasoning 返回 None），
+/// 只剩推理的 assistant 回合滤完必然为空。发出去换来一整轮 400，
+/// 不如让它消失——调用方只在没有 tool_use/tool_result 的回合上走这条路，
+/// 所以消失也拆不散配对。
+fn push_anthropic_turn(out: &mut Vec<Value>, role: &str, blocks: Vec<Value>) {
+    if blocks.is_empty() {
+        return;
+    }
+    let joins = out
+        .last()
+        .is_some_and(|m| m["role"] == json!(role) && m["content"].is_array());
+    if joins {
+        if let Some(arr) = out.last_mut().and_then(|m| m["content"].as_array_mut()) {
+            arr.extend(blocks);
+            return;
+        }
+    }
+    out.push(json!({"role": role, "content": blocks}));
+}
+
+/// 内部消息 -> OpenAI Chat Completions 的 messages 数组。
+///
+/// System 在这里被丢掉（调用方已经把它放在请求顶层）；带图的 user 消息
+/// 必须换成 content 数组形式——字符串 content 表达不了图片，
+/// 照字符串发过去，参考图会被端点静默丢弃，模型只能对着文字猜。
 pub(crate) fn to_openai_messages(messages: &[Message], echo_reasoning: bool) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
     for m in messages {
@@ -1191,15 +1680,6 @@ pub(crate) fn to_openai_messages(messages: &[Message], echo_reasoning: bool) -> 
                     })
                     .collect::<Vec<_>>()
                     .join("");
-                let text = if text.is_empty() {
-                    Value::Null
-                } else {
-                    json!(text)
-                };
-                let mut msg = json!({"role": "assistant", "content": text});
-                if echo_reasoning && !reasoning.is_empty() {
-                    msg["reasoning_content"] = json!(reasoning);
-                }
                 let tool_calls: Vec<Value> = m
                     .content
                     .iter()
@@ -1212,6 +1692,25 @@ pub(crate) fn to_openai_messages(messages: &[Message], echo_reasoning: bool) -> 
                         _ => None,
                     })
                     .collect();
+                // 什么都没带才丢。推理回传是要留下的：DeepSeek 一系要靠它
+                // 才认这段历史（见 `echoes_reasoning`），把它和空消息一起
+                // 扔掉，模型下轮就当新问题重想一遍。
+                // 而「推理说了全部」又正好被端点字典挡掉时，`content: null`
+                // 加没有 tool_calls 会被严格校验的端点整包 400——那才该整条消失。
+                // 它不带 tool_use，所以消失也拆不散 tool_result 的配对。
+                let echoes = echo_reasoning && !reasoning.is_empty();
+                if text.is_empty() && tool_calls.is_empty() && !echoes {
+                    continue;
+                }
+                let text = if text.is_empty() {
+                    Value::Null
+                } else {
+                    json!(text)
+                };
+                let mut msg = json!({"role": "assistant", "content": text});
+                if echo_reasoning && !reasoning.is_empty() {
+                    msg["reasoning_content"] = json!(reasoning);
+                }
                 if !tool_calls.is_empty() {
                     msg["tool_calls"] = json!(tool_calls);
                 }

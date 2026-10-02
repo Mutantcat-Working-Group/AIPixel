@@ -719,10 +719,87 @@ pub fn describe(hex: &str) -> String {
 
 /// 给提示词的对照表：`中 / EN #hex`。一段一名，模型按名字扫过去就能落 hex。
 pub fn prompt_table() -> String {
-    let mut out = String::from(
+    let entries: Vec<&NamedColor> = NAMED_COLORS.iter().collect();
+    render(
         "COLOR NAMES - map user color words to hex; pick the closest name, never a near-miss:\n",
-    );
-    for entry in NAMED_COLORS {
+        entries,
+        false,
+    )
+}
+
+/// 整表一百多条，约 3.6k 字符：每一发请求都原样带着走，二十轮的工序里就是
+/// 一万多 token 的固定开销，而用户这句话多半只碰得到其中两三条。
+///
+/// 裁剪规则：核心色永远在（黑白灰、皮肤、毛发、草绿、天蓝这些躲不掉的），
+/// 用户点名的那个色系整系在，剩下的等命名更明确的那一轮。
+///
+/// 两个必须守住的地方：用户泛泛谈颜色时（「把配色调暗一点」）给全表，见
+/// `talks_about_colors_in_general`；缩过的表必须补一句「不是白名单」，
+/// 见 `shortlist_note`。少了这两条，裁剪就会从省钱变成限制发挥。
+pub fn prompt_table_for(query: &str) -> String {
+    let head =
+        "COLOR NAMES - map user color words to hex; pick the closest name, never a near-miss:\n";
+    if talks_about_colors_in_general(query) {
+        return render(head, NAMED_COLORS.iter().collect(), false);
+    }
+    render(head, select(query), true)
+}
+
+/// 核心色：用户嘴上没提颜色也必须在的那些。同色系只留一两个代表——
+/// 表的作用是「拦住近邻误选」，同一色系堆太多只会让模型反复横跳。
+const CORE_HEX: &[&str] = &[
+    "#000000", "#1a1a1a", "#666666", "#cccccc", "#ffffff", "#8b0000", "#c0392b", "#a93226",
+    "#e67e22", "#d35400", "#f0b27a", "#ca6f1e", "#a04000", "#873600", "#935116", "#c39b6d",
+    "#f1c40f", "#f4d03f", "#1e8449", "#27ae60", "#2e86c1", "#3498db", "#8e44ad", "#ffb6c1",
+    "#f8c471", "#e0ac69", "#c68642", "#909497", "#aab7b8", "#424949",
+];
+
+/// 这一轮该带哪些色。核心色打底，用户点名的追上，顺序沿用原表：
+/// 模型是按色相环扫表的，乱序会让它漏看。
+fn select(query: &str) -> Vec<&'static NamedColor> {
+    let lower = query.to_lowercase();
+    let mut out: Vec<&NamedColor> = NAMED_COLORS
+        .iter()
+        .filter(|entry| CORE_HEX.contains(&entry.hex))
+        .collect();
+    for entry in NAMED_COLORS.iter().filter(|entry| {
+        std::iter::once(entry.en)
+            .chain(std::iter::once(entry.zh))
+            .chain(entry.aliases.iter().copied())
+            .any(|name| super::terms::find_lower(&lower, &name.to_lowercase()).is_some())
+    }) {
+        if !out.iter().any(|kept| kept.hex == entry.hex) {
+            out.push(entry);
+        }
+    }
+    out
+}
+
+/// 这一轮的表是不是缩过的。缩过的表要在末尾补一句，否则模型会把它当成
+/// 「只准用这些色」的白名单，把一张本该用赭石的图硬拗成棕色。
+fn shortlist_note() -> &'static str {
+    "This list is a shortlist for this turn, not a whitelist: colors outside it are \
+     still allowed whenever the subject calls for them.\n"
+}
+
+/// 用户在泛泛谈颜色，而不是点名某一个。这种时候裁剪是负优化：
+/// 这种话一个具体色名都不含，裁完只剩核心色，模型反而失去了挑色的依据。
+fn talks_about_colors_in_general(query: &str) -> bool {
+    const WORDS: &[&str] = &[
+        "颜色", "色彩", "配色", "色板", "色系", "色调", "调色", "冷暖", "冷色", "暖色", "上色",
+        "填色", "染色", "colour", "color", "palette", "hue", "tint", "shade", "swatch", "warm",
+        "cool",
+    ];
+    let lower = query.to_lowercase();
+    WORDS
+        .iter()
+        .any(|word| super::terms::find_lower(&lower, word).is_some())
+}
+
+/// 表体。`entries` 的顺序即输出顺序，排的事调用方负责。
+fn render(head: &str, entries: Vec<&NamedColor>, shortlist: bool) -> String {
+    let mut out = String::from(head);
+    for entry in entries {
         out.push_str(&format!(
             "{} / {} {}{}\n",
             entry.zh,
@@ -734,6 +811,9 @@ pub fn prompt_table() -> String {
                 format!(" (aka {})", entry.aliases.join(", "))
             }
         ));
+    }
+    if shortlist {
+        out.push_str(shortlist_note());
     }
     out
 }
@@ -778,5 +858,65 @@ mod tests {
         assert!(table.contains("#e67e22"));
         assert!(table.contains("orange"));
         assert!(table.contains("橙"));
+    }
+
+    #[test]
+    fn every_core_color_really_is_in_the_table() {
+        // 核心色是按 hex 挑的，表里改一次色值这里就得跟着改，不然静默少一条。
+        for hex in CORE_HEX {
+            assert!(
+                NAMED_COLORS.iter().any(|entry| entry.hex == *hex),
+                "{hex} 不在颜色表里"
+            );
+        }
+    }
+
+    #[test]
+    fn a_named_color_pulls_in_its_whole_family() {
+        let table = prompt_table_for("画一只橘猫");
+        // 点名的色系整系跟上。
+        assert!(table.contains("#e67e22"), "橘色代表色没带上：{table}");
+        // 核心色永远在——用户没提黑白灰，不等于这张图不要勾线。
+        assert!(table.contains("#000000"));
+        // 离得远的色系不带：裁不动才是这张表没在省。
+        assert!(!table.contains("#17a589"), "青色系本该裁掉：{table}");
+        // 缩过的表必须自报不是白名单，不然模型会把核心色当成唯一可选。
+        assert!(table.contains("not a whitelist"), "少了免责句");
+    }
+
+    #[test]
+    fn a_vague_color_request_keeps_the_whole_table() {
+        // 「把配色调暗一点」一个具体色名都没有：裁成核心色等于没收了挑色的依据。
+        for query in ["把配色调暗一点", "换成冷色调", "make the palette cooler"] {
+            assert_eq!(
+                prompt_table_for(query).chars().count(),
+                prompt_table().chars().count(),
+                "泛泛谈颜色时该给全表：{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_quiet_query_still_gets_the_core_colors() {
+        // 省下来的量本身也要被看住：缩完还和全表差不多大，就白担了
+        // 「可能漏色」的代价。
+        let full = prompt_table().chars().count();
+        let quiet = prompt_table_for("画一只猫").chars().count();
+        println!("colornames: full={full} trimmed={quiet}");
+        assert!(quiet * 2 < full, "缩表没省下多少：{quiet} vs {full}");
+        let table = prompt_table_for("画一只猫");
+        assert!(table.contains("#f4d03f"), "核心黄没带上");
+        assert!(table.contains("#1e8449"), "核心绿没带上");
+        assert!(table.lines().count() < prompt_table().lines().count());
+    }
+
+    #[test]
+    fn a_latin_color_word_is_matched_whole() {
+        // 整词才算：prose 里的 rose 不该把玫红拖进来。rose 不在核心色里，
+        // 所以它一旦出现就是误命中，而不是核心色本来就在。
+        let table = prompt_table_for("write some prose about the cat");
+        assert!(!table.contains("#fd79b8"), "rose 被 prose 误命中");
+        // 真点了名的要跟上。
+        assert!(prompt_table_for("a rose in her hair").contains("#fd79b8"));
     }
 }

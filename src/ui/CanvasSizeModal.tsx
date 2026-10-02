@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import type { ReactNode } from "react";
 
-import { Button, InputNumber, Modal } from "antd";
+import { Button, Input, InputNumber, Modal } from "antd";
 
 /** 像素画的常用起步尺寸。点一下就把 W/H 填好，用户仍然能手改。 */
 export const SIZE_PRESETS: { w: number; h: number; label: string }[] = [
@@ -30,8 +30,13 @@ export interface CanvasSizeModalProps {
   presetsLabel: string;
   /** 已经插值好的读数：宽高与格子数由调用方按自己的语言拼好再传进来。 */
   readout: string;
+  /** 会话名那一栏。给了 label 才显示：改尺寸用不到名字。 */
+  nameLabel?: string;
+  namePlaceholder?: string;
+  name?: string;
   hint?: ReactNode;
   onChange: (width: number, height: number) => void;
+  onNameChange?: (name: string) => void;
   onOk: () => void;
   onCancel: () => void;
 }
@@ -55,6 +60,20 @@ export default function CanvasSizeModal(props: CanvasSizeModalProps) {
       width={460}
       className="size-modal"
     >
+      {props.nameLabel ? (
+        <label className="size-name">
+          <span className="k">{props.nameLabel}</span>
+          {/* 可留空：空名由后端给默认编号 s1、s2……，顶上还提示着最大宽度。
+              所以 placeholder 就把「不填会怎样」说清，别只说「请输入」。 */}
+          <Input
+            autoFocus
+            value={props.name ?? ""}
+            placeholder={props.namePlaceholder}
+            onChange={(event) => props.onNameChange?.(event.target.value)}
+            onPressEnter={props.onOk}
+          />
+        </label>
+      ) : null}
       <div className="size-modal-body">
         <div className="size-preview" style={{ aspectRatio: `${width} / ${height}` }} aria-hidden />
         <div className="size-fields">

@@ -19,6 +19,7 @@ use pixel_core::pixelize::{PixelizeOptions, PixelizeReport};
 use pixel_core::png;
 use pixel_core::sheet;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -106,6 +107,8 @@ pub struct BatchRecipeEntry {
 
 /// recipes.json 的落盘结构。与 models.json / mcp.json 并列躺在 app config 目录，
 /// 重启后原样恢复。文件坏了只当空簿子：一条坏配方不该挡住整个批量工作台。
+/// 但那本簿子不许被静默覆盖：坏的那份会挪成 recipes.bak 留着，见
+/// `state::load_json_or_quarantine`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct RecipesFile {
     #[serde(default)]
@@ -182,6 +185,8 @@ pub enum BatchEvent {
     },
 }
 
+/// 往 webview 发一条批处理事件。发送失败一律吞掉：用户可能已经关了窗口，
+/// 而后台的量化线程不该因为「没人听了」跟着 panic。
 fn emit(app: &AppHandle, event: BatchEvent) {
     let _ = app.emit(BATCH_EVENT_CHANNEL, event);
 }
@@ -258,24 +263,22 @@ fn load_recipes(app: &AppHandle) -> RecipesFile {
     let Ok(dir) = config_dir(app) else {
         return RecipesFile::default();
     };
-    let Ok(text) = std::fs::read_to_string(dir.join("recipes.json")) else {
-        return RecipesFile::default();
-    };
-    match serde_json::from_str::<RecipesFile>(&text) {
-        Ok(file) => file,
-        Err(e) => {
-            eprintln!("recipes.json is broken, starting with an empty recipe book: {e}");
-            RecipesFile::default()
-        }
-    }
+    crate::state::load_json_or_quarantine::<RecipesFile>(&dir.join("recipes.json"))
+        .unwrap_or_default()
 }
 
 fn save_recipes(app: &AppHandle, file: &RecipesFile) -> Result<(), String> {
     let dir = config_dir(app)?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create config dir: {e}"))?;
     let text = serde_json::to_string_pretty(file).map_err(|e| e.to_string())?;
-    std::fs::write(dir.join("recipes.json"), text)
-        .map_err(|e| format!("cannot write recipes.json: {e}"))
+    // 和 models.json 一个待遇：原子落盘 + 保存串行化。配方簿是用户攒的活计，
+    // 半截写死的后果是下次读取判它坏、再下次保存就把整本覆写成空簿。
+    app.state::<crate::state::AppState>().write_config(
+        &dir.join("recipes.json"),
+        &text,
+        "recipes.json",
+    );
+    Ok(())
 }
 
 /// 列配方簿。读失败就当空簿：配方簿不影响别处运行，没读到就是没有。
@@ -598,9 +601,13 @@ pub fn batch_recipe_import(app: AppHandle, path: String) -> Result<RecipeImportR
     Ok(report)
 }
 
+/// 跑一批文件。一个文件的失败只计数后继续往下：用户框进来几百张图时，
+/// 中途放弃意味着整批重来，而失败原因已经在回执里逐条列清了。
 fn run_batch(app: &AppHandle, recipe: &BatchRecipe, files: &[PathBuf], out_dir: &Path) {
     let total = files.len();
     emit(app, BatchEvent::Started { total });
+    // 输出名去重要跨文件看，所以集合挂在整批上；顺序即 files 的排序顺序，可复现。
+    let mut used: HashSet<String> = HashSet::new();
     let mut ok = 0usize;
     let mut skipped = 0usize;
     let mut failed = 0usize;
@@ -610,8 +617,8 @@ fn run_batch(app: &AppHandle, recipe: &BatchRecipe, files: &[PathBuf], out_dir: 
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.to_string_lossy().into_owned());
         let result = match recipe.kind {
-            BatchKind::Quantize => quantize_one(path, out_dir, recipe),
-            BatchKind::Export => export_one(path, out_dir, recipe),
+            BatchKind::Quantize => quantize_one(path, out_dir, recipe, &mut used),
+            BatchKind::Export => export_one(path, out_dir, recipe, &mut used),
         };
         let (state, note) = match result {
             Ok(note) => {
@@ -653,7 +660,13 @@ fn run_batch(app: &AppHandle, recipe: &BatchRecipe, files: &[PathBuf], out_dir: 
 }
 
 /// 一张位图 -> 一个 `.aip`。doc 名字取文件词干，画布尺寸看 recipe。
-fn quantize_one(src: &Path, out_dir: &Path, recipe: &BatchRecipe) -> Result<String, String> {
+/// `used` 由整批共享，见 `unique_name`。
+fn quantize_one(
+    src: &Path,
+    out_dir: &Path,
+    recipe: &BatchRecipe,
+    used: &mut HashSet<String>,
+) -> Result<String, String> {
     let bytes = std::fs::read(src).map_err(|e| format!("cannot read: {e}"))?;
     let media = media_type_for(src);
     let (rgba, w, h) = decode::decode_image(&bytes, &media)?;
@@ -679,11 +692,13 @@ fn quantize_one(src: &Path, out_dir: &Path, recipe: &BatchRecipe) -> Result<Stri
     )?;
     let text = aip::dump_v2(&doc).map_err(|e| e.to_string())?;
     let mut out = out_dir.to_path_buf();
-    out.push(format!("{}.aip", doc.name));
+    out.push(unique_name(used, &doc.name, "aip"));
     std::fs::write(&out, text.as_bytes()).map_err(|e| format!("cannot write: {e}"))?;
     Ok(quantize_note(&report))
 }
 
+/// 一张图的量化回执。只报「用了几色、新增几色」：这两项决定用户要不要
+/// 手动收敛调色板，其余统计对下一步操作没有行动价值。
 fn quantize_note(report: &PixelizeReport) -> String {
     format!(
         "{} colors, {} new",
@@ -692,7 +707,13 @@ fn quantize_note(report: &PixelizeReport) -> String {
 }
 
 /// 一个 `.aip` -> 一张 PNG 或一个 GIF。单帧 .aip 的 GIF 也能出，只是没有动画。
-fn export_one(src: &Path, out_dir: &Path, recipe: &BatchRecipe) -> Result<String, String> {
+/// `used` 由整批共享，见 `unique_name`。
+fn export_one(
+    src: &Path,
+    out_dir: &Path,
+    recipe: &BatchRecipe,
+    used: &mut HashSet<String>,
+) -> Result<String, String> {
     let text = std::fs::read_to_string(src).map_err(|e| format!("cannot read: {e}"))?;
     let doc = aip::import_any(&text).map_err(|e| e.to_string())?;
     let stem = src
@@ -707,9 +728,28 @@ fn export_one(src: &Path, out_dir: &Path, recipe: &BatchRecipe) -> Result<String
         ExportFormat::Gif => (sheet::encode_gif(&doc)?, "gif"),
     };
     let mut out = out_dir.to_path_buf();
-    out.push(format!("{stem}.{ext}"));
+    out.push(unique_name(used, &stem, ext));
     std::fs::write(&out, &bytes).map_err(|e| format!("cannot write: {e}"))?;
     Ok(format!("{} bytes", bytes.len()))
+}
+
+/// 给输出文件名去重。`a.aip` 和 `a.AIP` 的词干都是 `a`，都会想写成 `a.png`：
+/// 在大小写不敏感的文件系统上（macOS / Windows 默认卷）后一个会静默吃掉前一个，
+/// 而回执里两条都显示 ok，用户少一张图且毫无提示。
+/// 后缀按 `files` 的排序顺序递增，所以整批重跑仍得到同样的结果。
+fn unique_name(used: &mut HashSet<String>, base: &str, ext: &str) -> String {
+    let plain = format!("{base}.{ext}");
+    if used.insert(plain.clone()) {
+        return plain;
+    }
+    let mut n = 2usize;
+    loop {
+        let candidate = format!("{base}-{n}.{ext}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+        n += 1;
+    }
 }
 
 /// 按 kind 收集目录下的对口文件，按名字排序保证确定性（无关文件系统顺序）。
@@ -760,6 +800,11 @@ fn media_type_for(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 每个用例一份空的去重表：这些用例都只导一个文件，看的是单文件结果。
+    fn fresh() -> HashSet<String> {
+        HashSet::new()
+    }
 
     #[test]
     fn recipe_names_get_trimmed_and_bad_ones_refused() {
@@ -851,7 +896,8 @@ mod tests {
             target_h: 8,
             export_format: ExportFormat::Png,
         };
-        let note = quantize_one(&in_dir.join("sword.png"), &out_dir, &recipe).unwrap();
+        let note =
+            quantize_one(&in_dir.join("sword.png"), &out_dir, &recipe, &mut fresh()).unwrap();
         assert!(note.contains("colors"), "{note}");
         let aip_path = out_dir.join("sword.aip");
         assert!(aip_path.exists());
@@ -883,7 +929,7 @@ mod tests {
             target_h: 16,
             export_format: ExportFormat::Png,
         };
-        quantize_one(&in_dir.join("s.png"), &out_dir, &recipe).unwrap();
+        quantize_one(&in_dir.join("s.png"), &out_dir, &recipe, &mut fresh()).unwrap();
         let doc =
             aip::import_any(&std::fs::read_to_string(out_dir.join("s.aip")).unwrap()).unwrap();
         assert_eq!((doc.width, doc.height), (16, 16));
@@ -913,7 +959,7 @@ mod tests {
             target_h: 4,
             export_format: ExportFormat::Png,
         };
-        let note = export_one(&in_dir.join("hero.aip"), &out_dir, &recipe).unwrap();
+        let note = export_one(&in_dir.join("hero.aip"), &out_dir, &recipe, &mut fresh()).unwrap();
         assert!(note.contains("bytes"), "{note}");
         assert!(out_dir.join("hero.png").exists());
     }
@@ -924,8 +970,50 @@ mod tests {
         let out_dir = tmp("bad-out");
         std::fs::write(in_dir.join("junk.png"), b"not a real png").unwrap();
         let recipe = BatchRecipe::default();
-        let err = quantize_one(&in_dir.join("junk.png"), &out_dir, &recipe).unwrap_err();
+        let err =
+            quantize_one(&in_dir.join("junk.png"), &out_dir, &recipe, &mut fresh()).unwrap_err();
         assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn stems_that_collide_get_distinct_output_files() {
+        // 两个文件只差扩展名大小写，词干同为 `hero`。同一批里若都写 `hero.png`，
+        // 在大小写不敏感的卷上后一个会静默覆盖前一个，回执还显示两条 ok。
+        let in_dir = tmp("dup");
+        let out_dir = tmp("dup-out");
+        let text = {
+            let mut d = Document::new("hero", 4, 4).unwrap();
+            d.intern_color(pixel_core::document::Rgba::rgb(200, 30, 30))
+                .unwrap();
+            let cel = d.cel_mut("L0", "F0").unwrap();
+            cel.indices.iter_mut().for_each(|i| *i = 1);
+            aip::dump_v2(&d).unwrap()
+        };
+        std::fs::write(in_dir.join("hero.AIP"), &text).unwrap();
+        std::fs::write(in_dir.join("hero.aip"), &text).unwrap();
+
+        let recipe = BatchRecipe {
+            kind: BatchKind::Export,
+            input_dir: in_dir.to_string_lossy().into_owned(),
+            output_dir: out_dir.to_string_lossy().into_owned(),
+            options: PixelizeOptions::default(),
+            match_source_size: true,
+            target_w: 4,
+            target_h: 4,
+            export_format: ExportFormat::Png,
+        };
+        let mut used = HashSet::new();
+        export_one(&in_dir.join("hero.AIP"), &out_dir, &recipe, &mut used).unwrap();
+        export_one(&in_dir.join("hero.aip"), &out_dir, &recipe, &mut used).unwrap();
+
+        assert!(
+            out_dir.join("hero.png").exists(),
+            "第一个拿原名，复跑时仍然确定"
+        );
+        assert!(
+            out_dir.join("hero-2.png").exists(),
+            "第二个必须换个名字，不能把第一个吃掉"
+        );
     }
 
     fn recipe_named(name: &str) -> BatchRecipeEntry {

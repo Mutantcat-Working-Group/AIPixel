@@ -190,6 +190,11 @@ pub fn pixelize_rgba(
     }
 
     let palette = build_palette(doc, &rgb, &alpha, opts);
+    // 空调色板没有任何可映射的目标：量化索引会落到兜底的 1 上，
+    // 那个下标不存在，整幅位图无声消失。
+    if palette.is_empty() {
+        return Err("document palette has no color to map pixels onto".into());
+    }
     let palette_added = palette.len().saturating_sub(doc.palette.len());
 
     // 相同取样色只算一次最近色：1024x1024 画布也不会退化成 画布 x 调色板 的平方级扫描。
@@ -249,6 +254,20 @@ pub fn pixelize_into_cel(
     src_h: u32,
     opts: &PixelizeOptions,
 ) -> Result<PixelizeReport, String> {
+    // 先把 cel 的存在性和尺寸查清楚再动调色板：反过来做的话，传错 frame 名时
+    // 调色板已经加了颜色，而像素一个都没落下，也没有回滚。
+    {
+        let expected = (doc.width as usize) * (doc.height as usize);
+        let cel = doc
+            .cel_mut(layer, frame)
+            .ok_or_else(|| format!("unknown cel: {layer}/{frame}"))?;
+        if cel.indices.len() != expected {
+            return Err(format!(
+                "cel {layer}/{frame} holds {} index/indices but the canvas needs {expected}",
+                cel.indices.len()
+            ));
+        }
+    }
     let before = doc.palette.len();
     let mut report = pixelize_rgba(rgba, src_w, src_h, doc, opts)?;
     // 层的配色锁在这里同样有效：位图量化出来的颜色不许绕过范围仲裁。shader 和
@@ -307,17 +326,37 @@ fn lock_remap(
         .collect();
     let mut map = vec![0u16; report.palette.len() + 1];
     let mut pending: Vec<Rgba> = Vec::new();
+    // 同一个 Key 在本轮里只许占一个待落盘槽位：两簇就近归队到同一色时它
+    // 会第二次出现，而 `intern_color` 对重复色只回旧下标、不追加。不压平的
+    // 话，按顺序配出来的 slot 会越过真实落盘位置，重映射随后把像素译到一
+    // 个文档里并不存在的调色板下标上，整片位图静默变成透明。
     for (i, color) in clamped.iter().enumerate() {
-        let next = (doc.palette.len() + pending.len() + 1) as u16;
-        let slot = *lookup.entry(key_of(color)).or_insert(next);
-        if slot == next {
-            pending.push(*color);
+        let key = key_of(color);
+        // 四元组全零就是透明格：它恒占索引 0，调色板里没有它的槽位。
+        if key == (0, 0, 0, 0) {
+            lookup.insert(key, 0);
+            map[i + 1] = 0;
+            continue;
         }
+        let slot = match lookup.get(&key) {
+            Some(&s) => s,
+            None => {
+                let slot = (doc.palette.len() + pending.len() + 1) as u16;
+                pending.push(*color);
+                lookup.insert(key, slot);
+                slot
+            }
+        };
         map[i + 1] = slot;
     }
+    let before = doc.palette.len();
     for color in &pending {
-        doc.intern_color(*color)
-            .map_err(|e| format!("cannot extend palette: {e}"))?;
+        if let Err(e) = doc.intern_color(*color) {
+            // 撞到 MAX_PALETTE 时截回去：半途追加会让「像素一个没落、调色板
+            // 却长了几格」的脏状态溜进调用方。
+            doc.palette.truncate(before);
+            return Err(format!("cannot extend palette: {e}"));
+        }
     }
     Ok((map, pending.len()))
 }
@@ -378,12 +417,15 @@ struct Nearest {
     second_d: u32,
 }
 
+/// 最近两档一起找出来：开抖动时要按距离比例在两条之间二选一，
+/// 只留最近那一档就等于没有抖动可用。
 fn two_nearest(palette: &[Rgba], color: [u8; 3]) -> Nearest {
     let target = Rgba::rgb(color[0], color[1], color[2]);
     let mut found = Nearest {
-        best: 1,
+        // 兜底落 0（透明）而不是 1：1 在空调色板里是个不存在的下标。
+        best: 0,
         best_d: u32::MAX,
-        second: 1,
+        second: 0,
         second_d: u32::MAX,
     };
     for (i, c) in palette.iter().enumerate() {
@@ -542,6 +584,47 @@ mod tests {
             v.extend_from_slice(&[c[0], c[1], c[2], a]);
         }
         (v, w, h)
+    }
+
+    #[test]
+    fn palette_locked_bitmap_never_emits_an_index_past_the_palette() {
+        // 空调调色板 + 上锁层且范围只有一色：源图两簇会被 color_for_layer
+        // 归队到同一色，lock_remap 的 pending 就会见到重复颜色。
+        let mut doc = Document::new("t", 8, 8).unwrap();
+        doc.palettes = vec![crate::document::NamedPalette {
+            id: "range".into(),
+            name: "range".into(),
+            colors: vec![Rgba::rgb(255, 0, 0)],
+            builtin: false,
+        }];
+        doc.layers.iter_mut().for_each(|l| {
+            l.palette_id = "range".into();
+            l.locked = true;
+        });
+
+        let mut rgba = Vec::new();
+        for _y in 0..8u32 {
+            for x in 0..8u32 {
+                let c: [u8; 3] = if x < 4 { [0, 0, 255] } else { [0, 255, 0] };
+                rgba.extend_from_slice(&[c[0], c[1], c[2], 255]);
+            }
+        }
+        let opts = PixelizeOptions {
+            max_colors: 4,
+            snap_tolerance: 0,
+            ..Default::default()
+        };
+        let report = pixelize_into_cel(&mut doc, "L0", "F0", &rgba, 8, 8, &opts).unwrap();
+        assert_eq!(doc.palette.len(), 1, "two clusters collapse onto one color");
+        assert_eq!(
+            report.palette_added, 1,
+            "added count must match the real growth"
+        );
+        let cel = doc.cel("L0", "F0").unwrap();
+        assert!(
+            cel.indices.iter().all(|i| doc.color_of(*i).is_some()),
+            "no index may point past the palette"
+        );
     }
 
     #[test]

@@ -57,10 +57,37 @@ fn color_index(doc: &mut Document, hex: Option<&str>) -> Result<u16, String> {
     }
 }
 
+/// 一次编辑器改动失败就把文档放回动手前的样子。
+/// 编辑器的路径里「先写像素、最后查限额」是常态：一次越过上限的笔画已经
+/// 把格子写进去、把新颜色塞进调色板了，此时只回个 Err，前端弹错而后端文档
+/// 已经变了，两边从此各说各话。像素主数据的 `apply_batch` 早就整批回滚，
+/// 画家这三条路要一样硬。
+fn keep_or_restore<T>(
+    doc: &mut Document,
+    before: &Document,
+    result: Result<T, String>,
+) -> Result<T, String> {
+    if result.is_err() {
+        *doc = before.clone();
+    }
+    result
+}
+
 /// 把一笔笔画落进文档（纯函数，可单测）。
 /// 整笔先校验再落笔：出界或 cel 不存在时一笔作废，不会留下半截笔画，
 /// 也不会为了一个错坐标把新颜色提前塞进调色板。
 pub fn apply_stroke(doc: &mut Document, stroke: &StrokeRequest) -> Result<u64, String> {
+    let before = doc.clone();
+    // 先让内层跑完再交给回滚：同一个调用表达式里把 `doc` 递两次，
+    // 借用检查器不认（一次可变入参、一次可变重借）。
+    let result = stroke_inner(doc, stroke);
+    keep_or_restore(doc, &before, result)
+}
+
+/// 一笔画的内核。坐标分两趟过：先只读把整笔验完，再落笔。合成一趟的话，
+/// 出界的那笔会写进去前几个 cell 才报错，前端只知道「失败」，却不知道
+/// 画布已经变了多少；分两趟则失败时文档一定还原样。
+fn stroke_inner(doc: &mut Document, stroke: &StrokeRequest) -> Result<u64, String> {
     let (w, h) = (doc.width, doc.height);
     {
         let _cel = doc
@@ -96,6 +123,21 @@ pub fn apply_stroke(doc: &mut Document, stroke: &StrokeRequest) -> Result<u64, S
 /// 油漆桶：从 (x,y) 向外浸染同一索引的区域，遇到不同索引就停。
 /// `color` 为 None 时浸成透明——橡皮桶，删一大块比逐格擦快得多。
 pub fn apply_fill(
+    doc: &mut Document,
+    layer: &str,
+    frame: &str,
+    x: u32,
+    y: u32,
+    color: Option<&str>,
+) -> Result<u64, String> {
+    let before = doc.clone();
+    let result = fill_inner(doc, layer, frame, x, y, color);
+    keep_or_restore(doc, &before, result)
+}
+
+/// 浸染的内核。坐标与 cel 的存在性先只读验完，才去 intern 颜色：
+/// 一个错坐标不该顺带把新颜色塞进调色板——那是用户没要求的改动。
+fn fill_inner(
     doc: &mut Document,
     layer: &str,
     frame: &str,
@@ -176,6 +218,12 @@ pub fn editor_fill(
 /// 改画布大小（纯函数，可单测）：左上角锚定，装得下的像素原样保留。
 /// 改完自查一遍限额——上限以内的宽高也可能把格子总量顶到很高，check_limits 是最后一道关。
 pub fn apply_resize(doc: &mut Document, width: u32, height: u32) -> Result<u64, String> {
+    let before = doc.clone();
+    let result = resize_inner(doc, width, height);
+    keep_or_restore(doc, &before, result)
+}
+
+fn resize_inner(doc: &mut Document, width: u32, height: u32) -> Result<u64, String> {
     doc.resize(width, height).map_err(|e| e.to_string())?;
     doc.check_limits().map_err(|e| e.to_string())?;
     doc.bump();
@@ -255,20 +303,20 @@ fn fill_note(fill: &FillRequest) -> String {
 /// cel 的一句话名片：图层名 / 帧号，再加一句「这是第几帧」。
 /// 模型读到的 layer/frame 是 id（L0/F2），而用户脑子里是名字，两个都给最稳。
 fn describe_cel(doc: &Document, layer: &str, frame: &str) -> String {
+    // 帧没有 name 字段（只有 id + 时长），所以「用户脑子里的名字」在帧上
+    // 只有序号这一份。
     let layer_name = doc
         .layers
         .iter()
         .find(|l| l.id == layer)
         .map(|l| l.name.clone())
         .unwrap_or_else(|| layer.to_string());
-    let (frame_no, frame_name) = doc
+    let frame_no = doc
         .frames
         .iter()
-        .enumerate()
-        .find(|(_, f)| f.id == frame)
-        .map(|(i, f)| (i + 1, f.id.clone()))
-        .unwrap_or((0, frame.to_string()));
-    let _ = frame_name;
+        .position(|f| f.id == frame)
+        .map(|i| i + 1)
+        .unwrap_or(0);
     format!("layer {layer} \"{layer_name}\", frame {frame} (#{frame_no})")
 }
 
@@ -282,6 +330,8 @@ fn ops_note(ops: &[PixelOperation]) -> String {
     format!("structure edits applied: {}", parts.join("; "))
 }
 
+/// 一条结构 op 的英文回执。这是给模型看的簿记：下一轮要靠它判断
+/// 「上一轮已经把哪些结构动过了」，所以只数事实，不描述像素内容。
 fn op_summary(op: &PixelOperation) -> String {
     match op {
         PixelOperation::CreateFrame { after, .. } => {
@@ -353,16 +403,28 @@ fn op_summary(op: &PixelOperation) -> String {
         PixelOperation::CreatePalette { name, .. } => {
             format!("created color range \"{name}\"")
         }
-        PixelOperation::DeletePalette { id } => format!("deleted color range {id}"),
+        PixelOperation::DeletePalette { id, fallback } => match fallback {
+            Some(fallback) => {
+                format!("deleted color range {id}; its layers moved to {fallback}")
+            }
+            None => format!("deleted color range {id}"),
+        },
         PixelOperation::RenamePalette { id, name } => {
             format!("renamed color range {id} to \"{name}\"")
         }
         PixelOperation::AddPaletteColor { id, color } => {
             format!("added {color} to color range {id}")
         }
-        PixelOperation::RemovePaletteColor { id, index } => {
-            format!("removed color #{index} from color range {id}")
-        }
+        PixelOperation::RemovePaletteColor {
+            id,
+            index,
+            replacement,
+        } => match replacement {
+            Some(replacement) => format!(
+                "removed color #{index} from color range {id}; its pixels became {replacement}"
+            ),
+            None => format!("removed color #{index} from color range {id}"),
+        },
         PixelOperation::SetLayerPalette { layer, palette_id } => {
             format!("layer {layer} now uses color range {palette_id}")
         }
@@ -474,6 +536,29 @@ mod tests {
         assert!(apply_stroke(&mut d, &stroke).is_err());
         // 出界即整笔作废，不能落下一半。
         assert_eq!(d.cels["L0"]["F0"].indices[0], 0);
+    }
+
+    /// 一笔失败了，文档必须跟动手前一模一样：格子一个没写、版本号没动。
+    /// 编辑器的路子是「先写后查」，少了回滚就会前端弹错、后端文档已经变了。
+    #[test]
+    fn a_failed_edit_leaves_no_trace_on_the_document() {
+        let mut d = doc();
+        // 调色板直接顶满：这一笔带着的新颜色无论如何都登记不进去。
+        while d.palette.len() < pixel_core::document::MAX_PALETTE {
+            d.palette
+                .push(Rgba::parse_hex("#123456").expect("hex parses"));
+        }
+        let before = d.clone();
+        let stroke = StrokeRequest {
+            layer: "L0".into(),
+            frame: "F0".into(),
+            cells: vec![cell(0, 0)],
+            color: Some("#ABCDEF".into()),
+        };
+        assert!(apply_stroke(&mut d, &stroke).is_err());
+        assert_eq!(d.palette.len(), before.palette.len(), "调色板不许变长");
+        assert_eq!(d.cels["L0"]["F0"].indices[0], 0, "一个格子都不许写进去");
+        assert_eq!(d.revision, before.revision, "失败不许推版本号");
     }
 
     #[test]

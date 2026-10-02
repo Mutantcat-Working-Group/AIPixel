@@ -16,6 +16,7 @@ pub mod artstyle;
 pub mod colornames;
 pub mod craft;
 pub mod glossary;
+pub mod http;
 pub mod imagegen;
 pub mod intent;
 pub mod knowledge;
@@ -23,13 +24,16 @@ pub mod limits;
 pub mod mcp;
 pub mod models;
 pub mod one_shot;
+pub mod pins;
 pub mod plan;
+pub mod presets;
 pub mod prompt;
 pub mod providers;
 pub mod references;
 pub mod refine;
 pub mod roles;
 pub mod runner;
+pub mod terms;
 pub mod tools;
 pub mod video;
 pub mod video_brief;
@@ -51,6 +55,7 @@ pub use models::{
     PermissionMode, Protocol, ReferenceMode, Role, RunnerConfig, ToolSpec, UiText,
 };
 pub use plan::{parse_updates as parse_plan_updates, spec as plan_spec, TurnPlan, PLAN_TOOL};
+pub use presets::{parse as parse_prompt_preset, Preset};
 pub use providers::{build_provider, EventStream, LlmProvider, ProviderError};
 pub use references::{
     classify_text as classify_reference_mode, parse_updates as parse_reference_updates, rules,
@@ -59,7 +64,10 @@ pub use references::{
 pub use refine::{refine, RefineRequest, RefineTarget, RefinedPrompt};
 pub use roles::{ModelRole, RoleBinding};
 pub use runner::AgentSession;
-pub use video::{extract_frames, probe, ProbeSource, VideoProbe};
+pub use video::{
+    discard_staging, extract_frames, probe, staging_dir_for, ExtractedFrames, ProbeSource,
+    VideoProbe,
+};
 pub use video_brief::{
     brief_frame_indices, brief_video, source_note, VideoBrief, BRIEF_THUMB_MAX_DIM,
     MAX_BRIEF_FRAMES,

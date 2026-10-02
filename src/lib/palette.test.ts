@@ -9,6 +9,7 @@ import {
   paletteWithCustom,
   parseHex,
   rgbaToHex,
+  swatchCommitOnClose,
 } from "./palette";
 import type { Rgba } from "./types";
 
@@ -98,5 +99,28 @@ describe("paletteWithCustom", () => {
   it("leaves the range alone when no custom color is set", () => {
     const base = ["#000000", "#ffffff"];
     expect(paletteWithCustom(base, null)).toEqual(base);
+  });
+});
+
+describe("取色盘关弹层收尾", () => {
+  it("没挑过就什么都不落", () => {
+    expect(swatchCommitOnClose(null, null)).toBeNull();
+    expect(swatchCommitOnClose("", "#ff004d")).toBeNull();
+  });
+
+  it("点预设、手输 hex 挑出来的色在关窗时落库", () => {
+    expect(swatchCommitOnClose("#ff004d", null)).toBe("#ff004d");
+  });
+
+  it("拖完滑块那一轮已经落过，关窗不再落第二次", () => {
+    expect(swatchCommitOnClose("#ff004d", "#ff004d")).toBeNull();
+  });
+
+  it("同一个色大小写写法和本轮落过的那个不同，也不重复落", () => {
+    expect(swatchCommitOnClose("#FF004D", "#ff004d")).toBeNull();
+  });
+
+  it("拖完一色再拖另一色，落的是新色", () => {
+    expect(swatchCommitOnClose("#00e436", "#ff004d")).toBe("#00e436");
   });
 });

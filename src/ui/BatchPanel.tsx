@@ -59,7 +59,13 @@ function DirField({
           <span className="grow" title={value}>
             {baseName(value)}
           </span>
-          <Button size="small" type="text" icon={<X size={12} />} onClick={onClear} />
+          <Button
+            size="small"
+            type="text"
+            aria-label={t("batch.clear")}
+            icon={<X size={12} />}
+            onClick={onClear}
+          />
         </div>
       </Field>
     );
@@ -405,6 +411,8 @@ export default function BatchPanel() {
           </Button>
         </div>
 
+        {/* 跑起来才亮进度条：indeterminate 是不是比 fake 百分比好看，
+            所以 total 还没数出来时它自己会转圈。 */}
         {run.running ? (
           <div className="dock-panel">
             <Progress percent={batchPercent(run)} size="small" status="active" />
@@ -414,6 +422,8 @@ export default function BatchPanel() {
           </div>
         ) : null}
 
+        {/* 逐文件回执留着不自动清：跑完用户要的就是「谁成了谁败了」，
+            清掉这张表等于让他再跑一遍才看得见。 */}
         {run.rows.length > 0 ? (
           <div className="batch-rows">
             {run.rows.map((row, index) => (
@@ -430,6 +440,8 @@ export default function BatchPanel() {
           </div>
         ) : null}
 
+        {/* 计数说三种结局：成、跳、败。跳过单列是因为跳不算失败——
+            不匹配的文件本来就不该搅进成败统计里。 */}
         {run.summary ? (
           <div className="dock-result">
             <div className="dock-result-summary">

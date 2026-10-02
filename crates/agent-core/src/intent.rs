@@ -96,6 +96,28 @@ const TABLES: &[(Intent, &[&str])] = &[
     (
         Intent::Sprite,
         &[
+            // 逐帧动画那一类说法必须在这里：用户最高频的原话就是
+            // 「画一个五帧的橘猫行走图」，它既没有「角色」也没有「精灵」，
+            // 只有「行走图」。缺了这批词，成品分流整段空转——模型收不到
+            // 「剪影先行、逐帧保持辨识度」的约束，画出来的每帧各画各的。
+            // 中文按子串命中，所以「行走图」里自然带上「行走」。
+            "行走图",
+            "行走循环",
+            "行走",
+            "奔跑图",
+            "奔跑循环",
+            "奔跑",
+            "跑步",
+            "跑动",
+            "逐帧",
+            "帧动画",
+            "动画图",
+            "动作图",
+            "待机图",
+            "待机",
+            "攻击图",
+            "走路",
+            "走路线",
             "角色",
             "精灵",
             "人物",
@@ -105,9 +127,13 @@ const TABLES: &[(Intent, &[&str])] = &[
             "怪物",
             "npc",
             "sprite",
+            "spritesheet",
             "character",
             "walk",
             "run cycle",
+            "idle",
+            "attack",
+            "animation",
         ],
     ),
     (
@@ -155,7 +181,8 @@ pub fn classify_text(text: &str) -> Option<(Intent, String)> {
     let mut best: Option<(usize, Intent, &str)> = None;
     for (intent, signals) in TABLES {
         for signal in *signals {
-            if let Some(at) = find(&needle, signal) {
+            let lowered = signal.to_lowercase();
+            if let Some(at) = super::terms::find_lower(&needle, &lowered) {
                 if best.is_none_or(|(where_, _, _)| at < where_) {
                     best = Some((at, *intent, signal));
                 }
@@ -163,22 +190,6 @@ pub fn classify_text(text: &str) -> Option<(Intent, String)> {
         }
     }
     best.map(|(_, intent, word)| (intent, word.to_string()))
-}
-
-/// 短英文词必须整词命中。「nos」里藏着「os」、「happiness」里藏着「nes」，
-/// 不拦这一下，一句毫不相干的话就能把配色风格整个带偏。
-fn find(haystack: &str, signal: &str) -> Option<usize> {
-    let whole = signal.len() <= 4 && signal.is_ascii();
-    let mut from = 0usize;
-    while let Some(off) = haystack[from..].find(signal) {
-        let at = from + off;
-        let end = at + signal.len();
-        if !whole || boundary(haystack, at, end) {
-            return Some(at);
-        }
-        from = end;
-    }
-    None
 }
 
 /// 修改类触发词。与成品类型不是一回事：成品说「要画个什么东西」，
@@ -204,7 +215,9 @@ const EDIT_WORDS: &[&str] = &[
     "更改",
     "改改",
     "改成",
+    "改得",
     "改色",
+    "改一下",
     "换色",
     "换个颜色",
     "调整",
@@ -241,13 +254,90 @@ pub fn classify_edit(text: &str) -> Option<String> {
     let needle = text.to_lowercase();
     EDIT_WORDS
         .iter()
-        .filter_map(|word| find(&needle, word).map(|at| (at, *word)))
+        .filter_map(|word| {
+            let lowered = word.to_lowercase();
+            super::terms::find_lower(&needle, &lowered).map(|at| (at, *word))
+        })
         .min_by_key(|(at, _)| *at)
         .map(|(_, word)| word.to_string())
 }
 
+/// 用户这句话是不是在要图。
+///
+/// 只在「用户要画、模型却光说不练」时才催它动手。纯聊天（问配色怎么配、
+/// 问这个工具怎么使）用文字收尾是天经地义，一催就凭空多出一段废话，
+/// 反而更吵。判漏了顶多退回老行为——直接收尾；判错了才真闹心，
+/// 所以宁可保守，也不要把每次问答都当成画画。
+///
+/// 从主循环搬来并公开，是因为成品分流也要它：用户说「画只猫」时没命中任何
+/// 触发词（没有「瓦片」也没有「行走图」），可这句话确实在要一张成品。
+/// 少了这个前提，分流段对这种话只能整段留空，模型拿不到任何成品约束——
+/// 它照样画得出图，只是画成一锅粥。
+pub fn asks_for_artwork(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // 问句是在等解释，不是在等一个工具调用。
+    if trimmed.contains('?') || trimmed.contains('？') {
+        return false;
+    }
+    // 「画」字在中文里太常见（计划、蓝图、画布、策划），只在它不属于这些词时才认。
+    for (i, _) in trimmed.match_indices('画') {
+        let prev: Option<char> = trimmed[..i].chars().next_back();
+        let next: Option<char> = trimmed[i + '画'.len_utf8()..].chars().next();
+        let borrowed = matches!(
+            prev,
+            Some('计') | Some('谋') | Some('策') | Some('蓝') | Some('构') | Some('规')
+        ) || next == Some('布');
+        if !borrowed {
+            return true;
+        }
+    }
+    const ZH: [&str; 14] = [
+        "绘制",
+        "涂",
+        "描一",
+        "做个",
+        "做一张",
+        "来一张",
+        "来一幅",
+        "生成",
+        "改成",
+        "换个",
+        "加一",
+        "去掉",
+        "删掉",
+        "重画",
+    ];
+    for word in ZH {
+        if trimmed.contains(word) {
+            return true;
+        }
+    }
+    const EN: [&str; 11] = [
+        "draw", "paint", "sketch", "render", "generate", "colour", "color", "make", "create",
+        "add", "replace",
+    ];
+    let lower = trimmed.to_lowercase();
+    let bytes = lower.as_bytes();
+    for word in EN {
+        let mut from = 0usize;
+        while let Some(at) = lower[from..].find(word) {
+            let start = from + at;
+            let end = start + word.len();
+            let before_ok = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
+            let after_ok = end >= bytes.len() || !bytes[end].is_ascii_alphanumeric();
+            if before_ok && after_ok {
+                return true;
+            }
+            from = start + 1;
+        }
+    }
+    false
+}
+
 /// 工具入参里的「这一轮改不改已有画面」。布尔、字符串、`{"mode": ...}` 都认，
-/// 认不出的值报错——猜反了就是「该改的时候重画、该重画的时候改」。
 pub fn parse_edit(value: &serde_json::Value) -> Result<bool, String> {
     use serde_json::Value;
     let raw = match value {
@@ -270,13 +360,6 @@ pub fn parse_edit(value: &serde_json::Value) -> Result<bool, String> {
             "pixel_plan: '{other}' does not say whether to edit; use true or false"
         )),
     }
-}
-
-fn boundary(haystack: &str, at: usize, end: usize) -> bool {
-    let before = haystack[..at].chars().next_back();
-    let after = haystack[end..].chars().next();
-    let loose = |c: char| !c.is_alphanumeric();
-    before.is_none_or(loose) && after.is_none_or(loose)
 }
 
 /// 工具入参里的意图字段。`{ "intent": "scene" }` 和
@@ -366,5 +449,58 @@ mod tests {
                 .0,
             Intent::Prop
         );
+    }
+
+    #[test]
+    fn the_editing_axis_catches_spoken_phrasing() {
+        // 口语说法过去整句漏判：「改得…一点」既不含「优化」也不含「修改」，
+        // 整轮被当成从零画，已有像素的存留规矩一句都没带出去。
+        for yes in ["把这只猫改得写实一点", "改一下尾巴的角度", "把腿改得长一点"]
+        {
+            let hit = classify_edit(yes);
+            assert!(hit.is_some(), "{yes} 该判成改画");
+            assert!(yes.contains(&hit.clone().unwrap()), "{hit:?} 应当来自原话");
+        }
+        // 「重画」要的是覆盖，这一轴刻意不收它。
+        assert!(classify_edit("重新画这个头盔").is_none());
+    }
+
+    #[test]
+    fn only_real_art_requests_count_as_art_requests() {
+        for yes in [
+            "画一只猫",
+            "给我画5帧橘猫奔跑",
+            "重新画这个头盔",
+            "绘制一个宝箱",
+            "涂个背景",
+            "做个五帧的行走循环",
+            "来一张西瓜",
+            "生成一把剑",
+            "draw a 32x32 knight",
+            "DRAW 4 walking frames",
+            "make me a run cycle",
+            "add a shadow under it",
+            "把配色改成冷色",
+        ] {
+            assert!(asks_for_artwork(yes), "这句在要图：{yes}");
+        }
+        // 不要图的：纯聊天、提问、以及「画」字被另用的词。
+        for no in [
+            "",
+            "   ",
+            "解释一下这个面板怎么用",
+            "这段配色什么意思",
+            "怎么导出 aseprite",
+            "画布上现在有什么",
+            "下一版准备怎么规划",
+            "这是不是一个蓝图",
+            "你觉得用什么颜色好？",
+            "现在几点了？",
+            "withdraw that change",
+            "what does this drawer do",
+            "帮我看看这个文件",
+        ] {
+            assert!(!asks_for_artwork(no), "这句不在要图：{no}");
+        }
     }
 }

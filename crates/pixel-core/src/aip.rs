@@ -8,7 +8,9 @@
 //! - 预留 @anim 元信息（fps/loop），命名带引号可含空格，支持 # 注释
 //! - 符号分配与文档 RLE 上下文完全一致（同一套 rle::SYMBOLS）
 
-use super::document::{Cel, Document, Frame, Layer, NamedPalette, Rgba};
+use super::document::{
+    Cel, Document, Frame, Layer, NamedPalette, Rgba, MAX_DIMENSION, MAX_TOTAL_CELLS,
+};
 use super::rle::{encode_row, SYMBOLS};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -30,7 +32,23 @@ fn err<T>(msg: impl Into<String>) -> AipResult<T> {
     Err(AipError(msg.into()))
 }
 
-/// 探测文件格式版本。
+/// cel 头的宽高必须落在文档限额之内。Vec 分配是这里唯一的花钱动作，
+/// 所以必须在 `Cel::new` 之前把账算清。
+fn check_cel_dims(width: u32, height: u32) -> AipResult<()> {
+    if width < 1 || height < 1 || width > MAX_DIMENSION || height > MAX_DIMENSION {
+        return err(format!("cel dims out of range: {width}x{height}"));
+    }
+    let cells = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or_else(|| AipError(format!("cel dims overflow: {width}x{height}")))?;
+    if cells > MAX_TOTAL_CELLS {
+        return err(format!("cel too large: {cells} cells"));
+    }
+    Ok(())
+}
+
+/// 探测文件格式版本。只看开头几个字节：每个被打开的文件都要过一次，
+/// 成本必须低到可以忽略；老格式没有这行前缀，只能走 legacy 分支读。
 pub fn sniff(text: &str) -> Format {
     let head = text.trim_start();
     if head.starts_with("AIP 2") {
@@ -57,18 +75,23 @@ pub fn import_any(text: &str) -> AipResult<Document> {
 // ---------------- v2 ----------------
 
 pub fn dump_v2(doc: &Document) -> AipResult<String> {
-    if doc.palette.len() > SYMBOLS.len() + 1 {
+    // 符号表就 62 个字符：cel 索引 63 起已经没有符号可发。以前这里写的是
+    // `> SYMBOLS.len() + 1`，63 色刚好从护栏底下溜过去，紧接着 `SYMBOLS[62]`
+    // 就越界——用户点一次「导出 .aip」，整个进程连着画布一起消失。
+    if doc.palette.len() > SYMBOLS.len() {
         return err(format!(
             "palette too large for single-char symbols: {} > {}",
             doc.palette.len(),
-            SYMBOLS.len() + 1
+            SYMBOLS.len()
         ));
     }
     let symbol_of = |index: usize| -> char {
         if index == 0 {
             '.'
         } else {
-            SYMBOLS[index - 1] as char
+            // 护栏是语义约束，这里是「再怎么样都不许 panic」：真 get 不到就当
+            // 这格没符号，行编码那侧会给 '?'，也比让进程炸掉好。
+            SYMBOLS.get(index - 1).map(|s| *s as char).unwrap_or('?')
         }
     };
     let mut out = String::new();
@@ -164,7 +187,7 @@ pub fn dump_v2(doc: &Document) -> AipResult<String> {
                 let row: Vec<u16> = (0..doc.width)
                     .map(|x| cel.get(doc.width, x, y).unwrap_or(0))
                     .collect();
-                out.push_str(&encode_row(&row, &doc.palette, &legend));
+                out.push_str(&encode_row(&row, &legend));
                 out.push('\n');
             }
         }
@@ -265,6 +288,10 @@ pub fn parse_v2(text: &str) -> AipResult<Document> {
                     .split_once('x')
                     .and_then(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?)))
                     .ok_or_else(|| AipError(format!("bad dims in {line}")))?;
+                // 先验尺寸再建 cel：Cel::new 是按 w*h 一次性分配的，等行数校验
+                // 跑过来时内存早就吃光了。坏文件里写个 100000x100000，整进程直接
+                // 被打死，报错都递不到前端。checked_mul 防 32 位乘法溢出成小尺寸。
+                check_cel_dims(w, h)?;
                 cel_key = Some((parts[0].to_string(), parts[1].to_string()));
                 cel_size = (w, h);
                 cel_read = 0;
@@ -288,19 +315,20 @@ pub fn parse_v2(text: &str) -> AipResult<Document> {
                 if cel_read >= h as usize {
                     return err(format!("cel {layer}/{frame} has more than {h} rows"));
                 }
-                let cols = decode_row(line, &symbol_to_index)?;
+                // 同一个 cel 头写两遍，第二次的尺寸必须和第一次一致：否则
+                // Cel::new 已经按旧尺寸分配过，后面 copy_from_slice 会切出越界片。
+                if declared.is_some_and(|d| d != (w, h)) {
+                    let (dw, dh) = declared.unwrap_or((w, h));
+                    return err(format!("inconsistent cel size {w}x{h} vs {dw}x{dh}"));
+                }
+                declared = Some((w, h));
+                let cols = decode_row(line, &symbol_to_index, w as usize)?;
                 if cols.len() != w as usize {
                     return err(format!(
                         "cel {layer}/{frame} row {} has {} cols, expected {w}",
                         cel_read + 1,
                         cols.len()
                     ));
-                }
-                match declared {
-                    Some(d) if d != (w, h) => {
-                        return err(format!("inconsistent cel size {w}x{h} vs {}x{}", d.0, d.1));
-                    }
-                    _ => declared = Some((w, h)),
                 }
                 let cel = cels
                     .entry(layer.clone())
@@ -320,6 +348,14 @@ pub fn parse_v2(text: &str) -> AipResult<Document> {
 
     if layers.is_empty() || frames.is_empty() {
         return err("missing @layers or @frames");
+    }
+    // id 重名会让 cels 的 BTreeMap 把两个图层合成一格：改一个、另一个跟着变，
+    // 前端侧栏还会撞出重复的 React key。手工编辑过的文件特别容易出这个。
+    if let Some(dup) = first_duplicate(layers.iter().map(|l| l.id.as_str())) {
+        return err(format!("duplicate layer id: {dup}"));
+    }
+    if let Some(dup) = first_duplicate(frames.iter().map(|f| f.id.as_str())) {
+        return err(format!("duplicate frame id: {dup}"));
     }
     let (width, height) = declared.ok_or(AipError("no @cel data".into()))?;
     for frames in cels.values() {
@@ -343,18 +379,43 @@ pub fn parse_v2(text: &str) -> AipResult<Document> {
     doc.revision = revision.unwrap_or(0);
     // 老文件没有配色范围这一段；把内置库补回来、悬空引用重指默认，都在这里收尾。
     doc.ensure_palette_scope();
+    // 前面只逐项看了 cel，图层/帧/调色板的条数和总格子数还没过限额——
+    // v2 是自己拼文档的，绕过了 Document::new/validated，这里补上同一把尺子。
+    doc.check_limits()
+        .map_err(|e| AipError(format!("document over limits: {e}")))?;
     Ok(doc)
 }
 
+/// 第一个重复出现的值，没有就 None。用于导入时拒掉重名 id。
+fn first_duplicate<'a>(ids: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    let mut seen: Vec<&str> = Vec::new();
+    for id in ids {
+        if seen.contains(&id) {
+            return Some(id);
+        }
+        seen.push(id);
+    }
+    None
+}
+
 /// `id "name" builtin|custom #rrggbb ...`。名字可省，颜色一个都不许少。
+/// 取出引号内的内容与引号后的剩余部分。缺收尾引号时把整段当内容、剩余为空，
+/// 这样残缺文件只会退化解析，不会在多字节边界上切出越界切片。
+fn split_quoted(inner: &str) -> (&str, &str) {
+    match inner.find('"') {
+        Some(end) => (&inner[..end], &inner[end + 1..]),
+        None => (inner, ""),
+    }
+}
+
 fn parse_named_palette_line(line: &str, palettes: &mut Vec<NamedPalette>) -> AipResult<()> {
     let (id, rest) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
     let mut rest = rest;
     let mut name = id.to_string();
     if let Some(inner) = rest.trim_start().strip_prefix('"') {
-        let end = inner.find('"').unwrap_or(inner.len());
-        name = inner[..end].to_string();
-        rest = &inner[end + 1..];
+        let (quoted, tail) = split_quoted(inner);
+        name = quoted.to_string();
+        rest = tail;
     }
     let mut tokens = rest.split_whitespace();
     let builtin = match tokens.next() {
@@ -383,6 +444,8 @@ fn parse_named_palette_line(line: &str, palettes: &mut Vec<NamedPalette>) -> Aip
     Ok(())
 }
 
+/// `key=value` 段：值可以是裸词，也可以是带引号的整串。图层名、
+/// 调色板名都允许含空格，所以引号分支不是锦上添花，是名字能存下来的前提。
 fn kv_pairs(text: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut rest = text;
@@ -390,10 +453,10 @@ fn kv_pairs(text: &str) -> Vec<(String, String)> {
         let key = rest[..pos].trim().to_string();
         rest = &rest[pos + 1..];
         let value = if rest.starts_with('"') {
-            let end = rest[1..].find('"').map(|i| i + 1).unwrap_or(rest.len());
-            let value = rest[..end + 1].to_string();
-            rest = &rest[end + 1..];
-            value.trim_matches('"').to_string()
+            // 引号没闭合就取到行尾：缺的是收尾那半个引号，不是半个键值对。
+            let (quoted, tail) = split_quoted(&rest[1..]);
+            rest = tail;
+            quoted.to_string()
         } else {
             let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
             let value = rest[..end].to_string();
@@ -442,10 +505,10 @@ fn parse_layer_line(line: &str, layers: &mut Vec<Layer>) -> AipResult<()> {
     let mut rest = rest;
     let mut name = format!("Layer {}", layers.len() + 1);
     if let Some(inner) = rest.trim_start().strip_prefix('"') {
-        // 引号名字取到闭合引号为止；没闭合就整段当名字，别让解析崩在半个 layer 行上
-        let end = inner.find('"').unwrap_or(inner.len());
-        name = inner[..end].to_string();
-        rest = &inner[end + 1..];
+        // 引号名字取到闭合引号为止；没闭合就整段当名字。降级路径见 split_quoted。
+        let (quoted, tail) = split_quoted(inner);
+        name = quoted.to_string();
+        rest = tail;
     }
     let mut visible = true;
     let mut opacity = 255u8;
@@ -494,8 +557,10 @@ fn parse_frame_line(line: &str, frames: &mut Vec<Frame>) -> AipResult<()> {
 }
 
 /// RLE 行解码：`12a` = 12 个 'a'，`.` = 透明。
-fn decode_row(row: &str, symbols: &HashMap<char, u16>) -> Result<Vec<u16>, AipError> {
-    let mut out = Vec::new();
+/// 解一行 RLE。`limit` 是这一行的宽度上限：坏文件里一个巨大的 run 计数
+/// 会先按 count 把内存吃干，而这一行只可能有 limit 个格子，超了就是坏数据。
+fn decode_row(row: &str, symbols: &HashMap<char, u16>, limit: usize) -> Result<Vec<u16>, AipError> {
+    let mut out: Vec<u16> = Vec::new();
     let mut chars = row.chars().peekable();
     while let Some(&c) = chars.peek() {
         if c.is_ascii_digit() {
@@ -511,6 +576,9 @@ fn decode_row(row: &str, symbols: &HashMap<char, u16>) -> Result<Vec<u16>, AipEr
             let count: usize = num
                 .parse()
                 .map_err(|_| AipError(format!("bad run count {num}")))?;
+            if count > limit || out.len().saturating_add(count) > limit {
+                return err(format!("run count {count} exceeds row width {limit}"));
+            }
             let sym = chars
                 .next()
                 .ok_or(AipError("run count without symbol".into()))?;
@@ -520,6 +588,9 @@ fn decode_row(row: &str, symbols: &HashMap<char, u16>) -> Result<Vec<u16>, AipEr
             out.extend(std::iter::repeat_n(idx, count));
         } else {
             chars.next();
+            if out.len() >= limit {
+                return err(format!("row wider than {limit}"));
+            }
             let idx = *symbols
                 .get(&c)
                 .ok_or_else(|| AipError(format!("unknown palette symbol {c}")))?;
@@ -610,6 +681,9 @@ pub fn import_legacy(text: &str) -> AipResult<Document> {
         Document::new("aip-import", width, height).map_err(|e| AipError(e.to_string()))?;
     // colors[0] 是占位透明，真实调色板从第二项开始
     doc.palette = colors.into_iter().skip(1).collect();
+    // 遗留格式不限 color 段条数，顺手按文档限额收一次口。
+    doc.check_limits()
+        .map_err(|e| AipError(format!("document over limits: {e}")))?;
     let mut frames = BTreeMap::new();
     frames.insert(
         "F0".into(),

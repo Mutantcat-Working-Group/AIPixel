@@ -64,7 +64,7 @@ async fn live_turn() {
     let text =
         env("AIPIXEL_LIVE_REQ").unwrap_or_else(|| "帮我画一个16x16的红苹果像素图标".to_string());
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    s.run_turn(text, Vec::new(), tx).await;
+    s.run_turn(text, Vec::new(), tx, None).await;
     while let Ok(ev) = rx.try_recv() {
         match ev {
             AgentEvent::ToolCall { name, input, .. } => {

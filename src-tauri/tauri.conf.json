@@ -32,6 +32,7 @@
     "active": true,
     "targets": ["dmg", "app", "nsis", "appimage", "deb"],
     "category": "DeveloperTool",
+    "publisher": "Mutantcat Working Group (mutantcat.org)",
     "copyright": "© 2026 异猫工作群 (mutantcat.org)",
     "license": "GPL-3.0",
     "licenseFile": "../LICENSE",

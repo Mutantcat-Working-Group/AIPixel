@@ -70,7 +70,7 @@ async fn main() {
         }
     };
     let runner = Arc::clone(&session);
-    let handle = tokio::spawn(async move { runner.run_turn(prompt, Vec::new(), tx).await });
+    let handle = tokio::spawn(async move { runner.run_turn(prompt, Vec::new(), tx, None).await });
 
     let mut tools: Vec<String> = Vec::new();
     let mut text_chars = 0usize;

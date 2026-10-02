@@ -190,3 +190,17 @@ export function paletteWithCustom(base: string[], custom: string | null): string
   if (!custom) return [...base];
   return [...base.filter((hex) => hex.toLowerCase() !== custom.toLowerCase()), custom];
 }
+
+/**
+ * 取色盘关上时该落库的那个色，没有就返回 null。
+ *
+ * antd 的 `onChange` 覆盖点预设、面板里手输、拖滑块全程，而 `onChangeComplete`
+ * 只由滑块松手触发。所以关弹层是唯一能兜住「点和输」这两条路的时机，但同一
+ * 个色不能落第二次：拖完滑块那一轮已经落过了，再落一次就是重复色警告。
+ * 大小写不敏感——面板吐出来的 hex 和范围里存的 hex 格式未必一致。
+ */
+export function swatchCommitOnClose(draft: string | null, done: string | null): string | null {
+  if (!draft) return null;
+  if (done && draft.toLowerCase() === done.toLowerCase()) return null;
+  return draft;
+}

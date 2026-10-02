@@ -111,12 +111,20 @@ pub fn required_section() -> String {
          - positive: everything the drawing MUST contain - subject and silhouette, proportions and \
          pose, palette ramps and light direction, the signature details, and for animation the \
          motion, timing and loop seam - distilled from the user's own words plus the routing \
-         above, as one compact list.\n\
-         - negative: everything the drawing MUST NOT contain - the failure modes you would \
-         otherwise produce on this canvas (smudged shapes, stray pixels, wrong proportions, \
-         palette clashes, extra ramp colors, a redraw of approved pixels), as one compact list.\n\
-         Then draw from those two lists: every pixel decision serves the positive list and avoids \
-         the negative list. Do not restate the lists back to the user."
+        above, as one compact list.\n\
+        Write SIZE and PLACEMENT relative to the canvas - fills most of the canvas width, \
+        centred on canvas.cx / canvas.cy, one third up from the bottom - and never as an \
+        absolute pixel box such as 16x16 or sits-at-x-20: a literal box becomes literal \
+        coordinates and parks the subject in a corner of a larger canvas.\n\
+        - negative: everything the drawing MUST NOT contain - the failure modes you would \
+        otherwise produce on this canvas (smudged shapes, stray pixels, wrong proportions, \
+        palette clashes, extra ramp colors, a redraw of approved pixels), as one compact list.\n\
+        Then draw from those two lists: every pixel decision serves the positive list and avoids \
+        the negative list. Do not restate the lists back to the user.\
+        Quality tier: a named art style binds this turn, and when the user named none the \
+        default quality tier binds. Fold its levers into the positive list you just wrote - how \
+        many ramp steps to build, where the terminator sits under ONE light direction, how deep \
+        occlusion darkens, and when to stop adding detail."
     )
 }
 
@@ -136,10 +144,13 @@ pub fn bound_section(crafted: &CraftedPrompt) -> String {
         "CRAFTED PROMPTS FOR THIS TURN - written by {PROMPT_TOOL} and BINDING for every drawing \
          tool you call now:\n\
          POSITIVE (what this drawing must contain):\n{positive}\n\
-         NEGATIVE (what this drawing must not contain):\n{negative}\n\
-         Draw strictly inside these two lists: they are the brief for this turn's artwork, and a \
-         drawing that ignores either side of it is wrong. If the user's words clearly contradict \
-         a list, rewrite it with {PROMPT_TOOL} once before drawing again."
+        NEGATIVE (what this drawing must not contain):\n{negative}\n\
+        Draw strictly inside these two lists: they are the brief for this turn's artwork, and a \
+        drawing that ignores either side of it is wrong. If the user's words clearly contradict \
+         a list, rewrite it with {PROMPT_TOOL} once before drawing again.\
+        Any size or spot the positive list names is relative to the whole canvas: scale it off \
+        canvas.cx / canvas.cy / canvas.scale so the subject lands centred and large on this \
+        canvas, not at literal coordinates inside a corner."
     )
 }
 
@@ -274,5 +285,46 @@ mod tests {
         assert!(section.contains("a side-view fox"), "{section}");
         assert!(section.contains("no stray pixels"), "{section}");
         assert!(section.contains(PROMPT_TOOL), "{section}");
+    }
+
+    /// 尺寸和落位必须写成画布相对量。实测里模型把「16x16」当成字面坐标，
+    /// 在 32x32 的画布上画出了一个缩在左上角的 16px 图标——正是这条规则要堵的。
+    #[test]
+    fn the_prompt_step_demands_canvas_relative_size_not_a_pixel_box() {
+        let ask = required_section();
+        assert!(
+            ask.contains("SIZE and PLACEMENT relative to the canvas"),
+            "{ask}"
+        );
+        assert!(ask.contains("never as an"), "{ask}");
+        assert!(
+            ask.contains("absolute pixel box such as 16x16"),
+            "没把实测翻车的那一种写法点出来，模型认不出是在说自己：{ask}"
+        );
+        // 写完之后那段同样得提醒：模型是写完清单立刻动笔的，眼前只有绑定段。
+        let bound = bound_section(&CraftedPrompt::default());
+        assert!(bound.contains("relative to the whole canvas"), "{bound}");
+        assert!(bound.contains("canvas.scale"), "没给出折算手段：{bound}");
+    }
+
+    /// 正向清单要把质量档吸收进去。
+    ///
+    /// 过去渲染规矩只挂在「风格预设」名下，用户没点名风格的那一轮（恰恰是最常见
+    /// 的一轮）拿到的清单就只剩主体和落位，生图模型照自己的训练分布交差——
+    /// 用户嘴里「生成得一点不写实」，十个里有八个是这么来的。
+    #[test]
+    fn the_prompt_step_absorbs_the_quality_tier() {
+        let ask = required_section();
+        assert!(ask.contains("Quality tier"), "{ask}");
+        assert!(
+            ask.contains("default quality tier"),
+            "没点名风格那一轮也得有档可依：{ask}"
+        );
+        assert!(ask.contains("ramp steps"), "色阶级数要写进清单：{ask}");
+        assert!(ask.contains("ONE light direction"), "光向要写进清单：{ask}");
+        assert!(
+            ask.contains("stop adding detail"),
+            "停手条件要写进清单：{ask}"
+        );
     }
 }

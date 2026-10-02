@@ -68,6 +68,30 @@ struct LandedImage {
     report: PixelizeReport,
 }
 
+/// 抽帧临时目录的收尾。帧一旦读进内存，磁盘上那几百张 png 就没用了，
+/// 而留着它们有两个后果：临时目录越用越大；下一次抽帧若沿用旧目录名，
+/// 还会把残留帧当成这一回的成果收回来。用 Drop 兜住所有出口——报错、
+/// 提前 return、panic 都由它收。
+struct StagingGuard {
+    dir: Option<PathBuf>,
+}
+
+impl StagingGuard {
+    /// 只接「这一回自己抽出来的」临时目录。帧摆用户自己的静帧文件夹里时
+    /// staging 是 None，收尾时一个字节都不能碰。
+    fn new(staging: Option<PathBuf>) -> Self {
+        Self { dir: staging }
+    }
+}
+
+impl Drop for StagingGuard {
+    fn drop(&mut self) {
+        if let Some(dir) = &self.dir {
+            agent_core::discard_staging(dir);
+        }
+    }
+}
+
 // ---------- 入参 ----------
 
 #[derive(Debug, Clone, Deserialize)]
@@ -126,6 +150,15 @@ pub struct ImageGenParams {
     pub spot: LandSpot,
     #[serde(default = "default_frame_duration")]
     pub duration_ms: u32,
+    /// 输入区那个画风下拉点的一项。与主循环同一条让位规则：解析只走
+    /// `agent_core::pins`，认不出的 id 当场报错，不静默退回「不限」——
+    /// 那会让用户以为规矩上了路，其实这一张什么都没多带。
+    #[serde(default)]
+    pub style: Option<String>,
+    /// 同时生效的收尾预设 id，可以叠几条。工作流坞手动生图和主循环问的是
+    /// 同一个问题（「这一句照什么规矩收尾」），mount 也只挂一份。
+    #[serde(default)]
+    pub presets: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -219,6 +252,9 @@ pub async fn video_probe(path: String) -> Result<VideoProbeResult, String> {
 // ---------- 生图与读图（要等模型） ----------
 
 /// 提示词微调。只产文本，不碰文档：这条工作流的结果是要给用户逐行改的。
+// 签名即 IPC 契约：每个参数都从桥那边按名字递进来。收成结构体就要改前端调用
+// 形状和 mock，收益只是一处 lint 安静，不值当。
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn prompt_refine(
     state: State<'_, AppState>,
@@ -227,6 +263,12 @@ pub async fn prompt_refine(
     width: u32,
     height: u32,
     target: Option<RefineTarget>,
+    // 输入区那个画风下拉点的一项。原样交给 agent-core：认不出的 id 在
+    // `refine_system_prompt` 里报错。解析只留 `agent_core::pins` 那一份，
+    // 三处各写一遍就意味着补了一处、另外两处还站在原地。
+    style: Option<String>,
+    // 同时生效的收尾预设 id，可以叠几条。同上，原样透传。
+    presets: Option<Vec<String>>,
 ) -> Result<agent_core::RefinedPrompt, String> {
     let session = state.session(&id)?;
     let config = session.model_for_role(ModelRole::Chat);
@@ -239,6 +281,8 @@ pub async fn prompt_refine(
         width: if width == 0 { w } else { width },
         height: if height == 0 { h } else { height },
         target: target.unwrap_or_default(),
+        style,
+        presets: presets.unwrap_or_default(),
     };
     refine_flow::refine(&config, &req)
         .await
@@ -290,6 +334,12 @@ pub async fn workflow_image_gen(
     if params.prompt.trim().is_empty() {
         return Err("image generation needs a prompt".into());
     }
+    // 界面钉上来的画风与收尾预设，走 plan 那一份挂载规矩（与画风 id 重合的预设
+    // 顶替不发、啥都没点就整段不上、解析只认 pins 那一份）。工作流坞手动生图和
+    // 主循环共用同一套收尾要求，不然同一条规矩在主循环里上车、在这里悄悄丢了。
+    let pinned_style = agent_core::pins::pinned_style(params.style.as_deref())?;
+    let pinned_presets = agent_core::pins::pinned_presets(&params.presets)?;
+    let prompt = agent_core::plan::image_prompt(&params.prompt, pinned_style, &pinned_presets);
     // 垫图二选一。画布上的帧优先于磁盘文件：用户要改的是眼前这一帧，
     // 而磁盘上那张可能是好几轮之前的导出。两个都填是调用方的歧义，
     // 报错让它说清楚，不替它猜一个。
@@ -302,7 +352,7 @@ pub async fn workflow_image_gen(
     })?;
     let generator = imagegen::build_image_generator(&config);
     let request = imagegen::ImageGenParams {
-        prompt: params.prompt,
+        prompt,
         size: params.size,
         reference,
     };
@@ -379,7 +429,9 @@ pub async fn workflow_video_frames(
     let source = PathBuf::from(&params.path);
     let (probe, origin) = video_flow::probe(&source).await?;
     let staging = std::env::temp_dir().join(FRAME_STAGING_DIR);
-    let frames = video_flow::extract_frames(&source, &staging, params.count).await?;
+    let pulled = video_flow::extract_frames(&source, &staging, params.count).await?;
+    let _staging = StagingGuard::new(pulled.staging.clone());
+    let frames = pulled.frames;
     if frames.is_empty() {
         return Err("no frames came out of that source".into());
     }
@@ -528,7 +580,9 @@ pub async fn video_brief(
     } else {
         params.count
     };
-    let frames = video_flow::extract_frames(&source, &staging, pull).await?;
+    let pulled = video_flow::extract_frames(&source, &staging, pull).await?;
+    let _staging = StagingGuard::new(pulled.staging.clone());
+    let frames = pulled.frames;
     if frames.is_empty() {
         return Err("no frames came out of that source".into());
     }
@@ -698,18 +752,21 @@ pub fn workflow_pixelize(
 /// 文档被工作流改过之后，把新文档推回前端。和主循环的 DocumentUpdated 同一个通道，
 /// 前端因此只有一条刷新路径，不需要区分「这次是谁改的」。
 pub(crate) fn emit_document(app: &AppHandle, session: &AgentSession) -> u64 {
-    let revision = session.revision();
-    let document = session.document_json();
+    // 走增量：整份文档序列化一次够把 47MB JSON 灌进 IPC，webview 直接卡死。
+    let patch = session.document_patch();
+    let revision = patch.revision;
     let _ = app.emit(
         "agent-event",
         AgentEventEnvelope {
             session_id: session.id().to_string(),
-            event: AgentEvent::DocumentUpdated { revision, document },
+            event: AgentEvent::DocumentUpdated { revision, patch },
         },
     );
     revision
 }
 
+/// 发一条状态行。发送失败直接忽略：状态只是旁证，webview 不在场时
+/// 这一轮该跑完还是要跑完，不该为了没人看的一行字中断 agent。
 fn emit_status(app: &AppHandle, session: &AgentSession, message: UiText) {
     let _ = app.emit(
         "agent-event",
@@ -720,6 +777,9 @@ fn emit_status(app: &AppHandle, session: &AgentSession, message: UiText) {
     );
 }
 
+/// 落地回执 -> 工具结果。数字全部取 report 的原值，不二次加工：
+/// 模型要拿「实际用了几色、新增几色」决定下一笔怎么收敛调色板，
+/// 而前端显示的是同一份数字，两边才对得上。
 fn landed_detail(landed: &LandedImage) -> Value {
     json!({
         "layer": landed.layer,
@@ -732,6 +792,8 @@ fn landed_detail(landed: &LandedImage) -> Value {
     })
 }
 
+/// 视频信息的来源 -> i18n key。给键名不给中文：文案由前端按当前语种取，
+/// Rust 侧多一种语言就得多维护一份词表。
 fn origin_label(origin: agent_core::ProbeSource) -> &'static str {
     match origin {
         agent_core::ProbeSource::Ffprobe => "origin.ffprobe",

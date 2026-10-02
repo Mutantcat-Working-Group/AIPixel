@@ -145,6 +145,12 @@ pub trait McpTransport: Send + Sync {
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
 
+/// 全进程自增的请求 id，从 1 起。
+///
+/// 走进程级计数而不是每条连接各数各的：stdio / http 两条连接的响应可能
+/// 同时到达，按连接分别编号会让两条连接的第 3 号响应长得一模一样，
+/// 早到的那条就可能被晚到的等待方捡走，工具调用的参数于是错配到另一次调用上。
+/// 从 1 开始是把 0 留给通知——通知没有响应，不该占一个 id。
 fn next_request_id() -> u64 {
     NEXT_REQUEST_ID.fetch_add(1, Ordering::SeqCst) + 1
 }
@@ -437,8 +443,7 @@ impl McpTransport for HttpTransport {
             return Ok(json!({}));
         }
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            let head: String = body.chars().take(400).collect();
+            let head: String = capped_body(response).await.chars().take(400).collect();
             return Err(McpError::Http(format!("HTTP {}: {head}", status.as_u16())));
         }
         let is_sse = response
@@ -447,10 +452,7 @@ impl McpTransport for HttpTransport {
             .and_then(|v| v.to_str().ok())
             .map(|v| v.contains("text/event-stream"))
             .unwrap_or(false);
-        let text = response
-            .text()
-            .await
-            .map_err(|e| McpError::Http(e.to_string()))?;
+        let text = capped_body(response).await;
         if is_sse {
             return sse_response(&text, id);
         }
@@ -472,9 +474,7 @@ impl McpTransport for HttpTransport {
         if let Some(session) = self.session_id.lock().await.clone() {
             request = request.header("mcp-session-id", session);
         }
-        let response = request
-            .json(&payload)
-            .send()
+        let response = super::http::send(request.json(&payload), super::http::MCP_TIMEOUT)
             .await
             .map_err(|e| McpError::Http(e.to_string()))?;
         if response.status().is_success() {
@@ -503,7 +503,39 @@ impl McpTransport for HttpTransport {
         if let Some(session) = self.session_id.lock().await.clone() {
             request = request.header("mcp-session-id", session);
         }
-        let _ = request.send().await;
+        let _ = super::http::send(request, super::http::MCP_SHUTDOWN_TIMEOUT).await;
+    }
+}
+
+/// 读 MCP 响应体，带大小上限。
+///
+/// client 上那把 `INIT_TIMEOUT_MS` 的总时限罩得住「永远不回」，罩不住
+/// 「永远不停地回」：一台行为不端的工具服务器慢慢吐几个 G，裸的 `text()`
+/// 就整段落进内存，进程直接被吃穿。这里按上限流式读，读满即停。
+///
+/// 非法 UTF-8 按替换字符放过：错误页和 SSE 帧都不算严格报文，为它整条失败
+/// 不值得。读不动时返回一段占位文字，让上层按「没有匹配 id 的响应」报错，
+/// 看得见原因，而不是一个静默的空流。
+async fn capped_body(response: reqwest::Response) -> String {
+    match super::http::read_capped(
+        response,
+        super::http::MCP_BODY_CAP + 1,
+        super::http::MCP_TIMEOUT,
+    )
+    .await
+    {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(e) => {
+            let why = if e.too_large() {
+                format!(
+                    "tool reply is above the {} byte limit",
+                    super::http::MCP_BODY_CAP
+                )
+            } else {
+                e.into_error().to_string()
+            };
+            format!("<response body unreadable: {why}>")
+        }
     }
 }
 
@@ -541,27 +573,38 @@ impl McpRegistry {
     /// 登记配置（开机时从 mcp.json 恢复，或用户在 UI 里新增/编辑）。已连接的先断开。
     pub async fn register(&self, config: McpServerConfig) -> Result<(), String> {
         config.validate()?;
-        let stale = self.servers.write().unwrap().remove(&config.name);
+        let stale = self
+            .servers
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&config.name);
         if let Some(entry) = stale {
             if let Some(client) = entry.client {
                 client.shutdown().await;
             }
         }
-        self.servers.write().unwrap().insert(
-            config.name.clone(),
-            ServerEntry {
-                config,
-                client: None,
-                last_error: None,
-            },
-        );
+        self.servers
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                config.name.clone(),
+                ServerEntry {
+                    config,
+                    client: None,
+                    last_error: None,
+                },
+            );
         self.rebuild_routes();
         Ok(())
     }
 
     /// 移除服务器并断开连接。
     pub async fn unregister(&self, name: &str) -> Result<(), String> {
-        let stale = self.servers.write().unwrap().remove(name);
+        let stale = self
+            .servers
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(name);
         if let Some(entry) = stale {
             if let Some(client) = entry.client {
                 client.shutdown().await;
@@ -574,7 +617,10 @@ impl McpRegistry {
     /// 连接一个已登记的服务器：initialize + tools/list。失败只记录错误并返回 Err。
     pub async fn connect(&self, name: &str) -> Result<Vec<McpTool>, String> {
         let config = {
-            let servers = self.servers.read().unwrap();
+            let servers = self
+                .servers
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             match servers.get(name) {
                 Some(entry) => entry.config.clone(),
                 None => return Err(format!("unknown MCP server: {name}")),
@@ -583,7 +629,12 @@ impl McpRegistry {
         match McpClient::connect(&config).await {
             Ok(client) => {
                 let tools = client.tools();
-                if let Some(entry) = self.servers.write().unwrap().get_mut(name) {
+                if let Some(entry) = self
+                    .servers
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get_mut(name)
+                {
                     entry.client = Some(client);
                     entry.last_error = None;
                 }
@@ -592,7 +643,12 @@ impl McpRegistry {
             }
             Err(e) => {
                 let message = format!("{e} (transport: {})", config.transport.describe_short());
-                if let Some(entry) = self.servers.write().unwrap().get_mut(name) {
+                if let Some(entry) = self
+                    .servers
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get_mut(name)
+                {
                     entry.client = None;
                     entry.last_error = Some(message.clone());
                 }
@@ -604,7 +660,10 @@ impl McpRegistry {
     /// 断开但保留配置。
     pub async fn disconnect(&self, name: &str) {
         let stale = {
-            let mut servers = self.servers.write().unwrap();
+            let mut servers = self
+                .servers
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             servers
                 .get_mut(name)
                 .map(|entry| (entry.client.take(), entry.last_error.take()))
@@ -616,10 +675,15 @@ impl McpRegistry {
         self.rebuild_routes();
     }
 
+    /// 配置 / 连接态 / 最近错误三条只读口子。
+    ///
+    /// 意义在于让 Tauri 那层不必自己碰这把锁：拿锁要处理中毒、要知道
+    /// entry 里 client 是 Option，视图代码不该懂这些。返回的是克隆，
+    /// 调用方拿着改也影响不到注册表。
     pub fn configs(&self) -> Vec<McpServerConfig> {
         self.servers
             .read()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .values()
             .map(|entry| entry.config.clone())
             .collect()
@@ -628,7 +692,7 @@ impl McpRegistry {
     pub fn is_connected(&self, name: &str) -> bool {
         self.servers
             .read()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(name)
             .map(|entry| entry.client.is_some())
             .unwrap_or(false)
@@ -637,7 +701,7 @@ impl McpRegistry {
     pub fn last_error(&self, name: &str) -> Option<String> {
         self.servers
             .read()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(name)
             .and_then(|entry| entry.last_error.clone())
     }
@@ -646,7 +710,7 @@ impl McpRegistry {
     pub fn tools_of(&self, name: &str) -> Vec<McpTool> {
         self.servers
             .read()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(name)
             .and_then(|entry| entry.client.clone())
             .map(|client| client.tools())
@@ -656,7 +720,12 @@ impl McpRegistry {
     /// 合并后的工具规格：内建 pixel_* 由调用方追加，这里只出 MCP 部分。
     pub fn specs(&self) -> Vec<ToolSpec> {
         let mut specs = Vec::new();
-        for (name, entry) in self.servers.read().unwrap().iter() {
+        for (name, entry) in self
+            .servers
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+        {
             let Some(client) = entry.client.clone() else {
                 continue;
             };
@@ -682,7 +751,12 @@ impl McpRegistry {
 
     /// 把一个 MCP 工具调用送到对应服务器。
     pub async fn dispatch(&self, tool_name: &str, input: &Value) -> Result<ToolOutcome, String> {
-        let route = self.routes.read().unwrap().get(tool_name).cloned();
+        let route = self
+            .routes
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(tool_name)
+            .cloned();
         let Some(route) = route else {
             return Err(match self.owner_of(tool_name) {
                 Some(server) => format!("MCP server '{server}' is not connected"),
@@ -690,7 +764,10 @@ impl McpRegistry {
             });
         };
         let client = {
-            let servers = self.servers.read().unwrap();
+            let servers = self
+                .servers
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             servers.get(&route.0).and_then(|entry| entry.client.clone())
         };
         let Some(client) = client else {
@@ -707,7 +784,10 @@ impl McpRegistry {
 
     /// 配置名 -> (server, tool) 路由表整体重建：工具集只在连接时变化，重建足够。
     fn rebuild_routes(&self) {
-        let servers = self.servers.read().unwrap();
+        let servers = self
+            .servers
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut routes = Routes::new();
         for (server, entry) in servers.iter() {
             let Some(client) = entry.client.clone() else {
@@ -720,14 +800,20 @@ impl McpRegistry {
                 );
             }
         }
-        *self.routes.write().unwrap() = routes;
+        *self
+            .routes
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = routes;
     }
 
     /// 路由没命中时反查归属：拿注册过的服务器名（长的优先，防 "a" 抢走 "a_b"）
     /// 和 `mcp__` 后的尾巴对前缀。查到了说明「配了但没连」，查不到才是「没配过」。
     fn owner_of(&self, tool_name: &str) -> Option<String> {
         let rest = tool_name.strip_prefix(MCP_TOOL_PREFIX)?;
-        let servers = self.servers.read().unwrap();
+        let servers = self
+            .servers
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut names: Vec<&String> = servers.keys().collect();
         names.sort_by_key(|name| std::cmp::Reverse(name.len()));
         names
@@ -741,6 +827,8 @@ impl McpRegistry {
 }
 
 impl McpTransportConfig {
+    /// 一行摘要给日志和界面用。只含命令和 **环境变量名**、不含值：
+    /// 这行字会出现在错误提示里，用户会截图求助，密钥不能跟着走。
     fn describe_short(&self) -> String {
         match self {
             McpTransportConfig::Stdio { command, args, .. } => {
@@ -795,11 +883,17 @@ impl McpClient {
     }
 
     pub fn protocol_version(&self) -> String {
-        self.protocol_version.read().unwrap().clone()
+        self.protocol_version
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub fn tools(&self) -> Vec<McpTool> {
-        self.tools.read().unwrap().clone()
+        self.tools
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     async fn initialize(&self) -> Result<(), McpError> {
@@ -818,7 +912,10 @@ impl McpClient {
                         .and_then(|v| v.as_str())
                         .unwrap_or(version)
                         .to_string();
-                    *self.protocol_version.write().unwrap() = negotiated;
+                    *self
+                        .protocol_version
+                        .write()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = negotiated;
                     self.transport
                         .notify("notifications/initialized", json!({}))
                         .await?;
@@ -856,10 +953,15 @@ impl McpClient {
                 _ => break,
             }
         }
-        *self.tools.write().unwrap() = all.clone();
+        *self
+            .tools
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = all.clone();
         Ok(all)
     }
 
+    /// 调远端工具。刻意不做重试：外部工具的副作用不幂等，
+    /// 超时后重发可能把同一个动作执行两遍，而调用方看不出区别。
     pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<McpToolOutput, McpError> {
         let result = self
             .transport
@@ -868,6 +970,8 @@ impl McpClient {
         Ok(tool_output_from(&result))
     }
 
+    /// 收尾。尽力而为：stdio 子进程可能已经被用户手杀，http 那头可能早就断了，
+    /// 这里抛错会让应用退出卡在清理上，而彼时连接反正已经不存在了。
     pub async fn shutdown(&self) {
         self.transport.shutdown().await;
     }
@@ -1210,7 +1314,10 @@ mod tests {
         )
         .await;
         {
-            let mut servers = registry.servers.write().unwrap();
+            let mut servers = registry
+                .servers
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             servers.get_mut("pixels").unwrap().client = Some(client);
         }
         registry.rebuild_routes();
@@ -1259,7 +1366,10 @@ mod tests {
                 ],
             )
             .await;
-            let mut guard = registry.servers.write().unwrap();
+            let mut guard = registry
+                .servers
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.get_mut(server).unwrap().client = Some(client);
         }
         registry.rebuild_routes();
@@ -1320,7 +1430,11 @@ mod tests {
         assert_eq!(registry.configs().len(), 1);
         registry.unregister("tmp").await.expect("unregister");
         assert!(registry.configs().is_empty());
-        assert!(registry.routes.read().unwrap().is_empty());
+        assert!(registry
+            .routes
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty());
     }
 
     #[test]
@@ -1411,5 +1525,49 @@ mod tests {
         assert!(reply.contains("sampling/createMessage"), "{reply}");
         // 纯通知不回话。
         assert!(unsupported_request(r#"{"jsonrpc":"2.0","method":"note"}"#).is_none());
+    }
+
+    /// 用一份内存响应体造 `reqwest::Response`，省得真起一个服务器。
+    fn http_response(payload: Vec<u8>) -> reqwest::Response {
+        reqwest::Response::from(
+            http::Response::builder()
+                .status(200)
+                .header("content-type", "application/json")
+                .body(reqwest::Body::from(payload))
+                .unwrap(),
+        )
+    }
+
+    /// 正常的工具回执要原样到手：加了上限不能把正常响应也拦了。
+    #[tokio::test]
+    async fn a_tool_reply_still_reaches_the_client_intact() {
+        // 原始字节串不许带中文，先按字符再转字节。
+        let body =
+            r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"画好了"}]}}"#
+                .as_bytes()
+                .to_vec();
+        let text = capped_body(http_response(body)).await;
+        assert_eq!(
+            response_for(&text, 1).expect("answered").expect("ok"),
+            json!({"content":[{"type":"text","text":"画好了"}]})
+        );
+    }
+
+    /// 撞上限时不能把内存吃穿，也不能静默交回空流：空流会被上层解成
+    /// 「没有匹配 id 的响应」，看着像协议出错，其实是体量超限。
+    #[tokio::test]
+    async fn an_oversized_reply_is_refused_and_says_why() {
+        let blob = vec![b'x'; crate::http::MCP_BODY_CAP + 2];
+        let text = capped_body(http_response(blob)).await;
+        assert!(
+            text.contains("unreadable") && text.contains("byte limit"),
+            "读不动要说清原因，实际是 {text}"
+        );
+        assert!(
+            text.contains("byte limit") && text.contains(&crate::http::MCP_BODY_CAP.to_string()),
+            "撞上限要说清是哪个上限，实际是 {text}"
+        );
+        // 空流一样要报错，不能当成功。
+        assert!(response_for(&text, 1).is_none());
     }
 }

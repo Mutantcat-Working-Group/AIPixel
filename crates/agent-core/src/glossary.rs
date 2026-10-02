@@ -62,6 +62,18 @@ pub const GLOSSARY: &[GlossaryEntry] = &[
         note: "单个像素读不出形状，2x2 以上的簇才有存在感；细节按簇摆，别撒孤点。",
     },
     GlossaryEntry {
+        en: "bezier curve",
+        zh: "贝塞尔曲线",
+        aliases: &["平滑曲线", "曲线", "弧线", "圆滑", "二次曲线", "三次曲线", "bezier", "spline"],
+        note: "用控制点描述的平滑曲线；落到整数格上会变台阶，细节级的曲线改用 aacurve / aacubic 按真实覆盖率画。",
+    },
+    GlossaryEntry {
+        en: "feathering",
+        zh: "羽化",
+        aliases: &["软化边缘", "收边", "柔化", "feather", "soften"],
+        note: "边缘按覆盖率逐步过渡到背景色，一两个像素就够；曲线细节用 aaline / blend，轮廓线上别用。",
+    },
+    GlossaryEntry {
         en: "banding",
         zh: "色带",
         aliases: &["色带断层", "条纹"],
@@ -72,6 +84,12 @@ pub const GLOSSARY: &[GlossaryEntry] = &[
         zh: "色块着色",
         aliases: &["赛璐璐上色", "平涂"],
         note: "只用色块表现明暗、不加过渡的卡通上色；像素画的基本盘。",
+    },
+    GlossaryEntry {
+        en: "realism",
+        zh: "写实",
+        aliases: &["逼真", "照片级", "拟真", "真实感", "realistic", "photoreal"],
+        note: "在像素格内靠色阶、形体光影和柔边增加信息量，不是把边缘画糊、也不是挪出格外。",
     },
     GlossaryEntry {
         en: "ramp",
@@ -108,6 +126,12 @@ pub const GLOSSARY: &[GlossaryEntry] = &[
         zh: "明暗交界",
         aliases: &["受光边界", "阴阳界"],
         note: "受光面和背光面的分界；一条线，不是一个过渡区。",
+    },
+    GlossaryEntry {
+        en: "form normal",
+        zh: "法线",
+        aliases: &["法向量", "表面朝向", "normal", "normals"],
+        note: "表面上一点的朝向；椭圆上就是 ((x-cx)/rx, (y-cy)/ry)，跟光照向量点乘就能切色阶。",
     },
     GlossaryEntry {
         en: "cast shadow",
@@ -359,10 +383,76 @@ pub const GLOSSARY: &[GlossaryEntry] = &[
 
 /// 给提示词的术语表：一行一条，模型扫一遍就能把用户的叫法对上自己的概念。
 pub fn prompt_table() -> String {
-    let mut out = String::from(
+    render(
         "ART VOCABULARY - user wording to craft terms; use the technique when it fits:\n",
-    );
-    for entry in GLOSSARY {
+        GLOSSARY.iter().collect(),
+    )
+}
+
+/// 术语表的按需裁剪。和颜色表的区别是这里不做「泛泛而谈就全给」的例外：
+/// 这张表的作用是把用户嘴里的说法翻成模型认得的技法名，用户没提技法时
+/// 核心条目就是全部所需；而颜色表裁得太狠会让模型以为「只准用这几个色」。
+pub fn prompt_table_for(query: &str) -> String {
+    let head = "ART VOCABULARY - user wording to craft terms; use the technique when it fits:\n";
+    render(head, select(query))
+}
+
+/// 核心术语：每张像素画都要用上的那些。同类只留代表（`dithering` 留下，
+/// `ordered dithering` / `noise dithering` 等点名再现身），理由同颜色表：
+/// 同义词堆一排只会让模型在近邻之间犹豫。
+const CORE_EN: &[&str] = &[
+    "dithering",
+    "anti-aliasing",
+    "pixel cluster",
+    "cel shading",
+    "ramp",
+    "hue shift",
+    "core shadow",
+    "cast shadow",
+    "highlight",
+    "outline",
+    "selective outline",
+    "limited palette",
+    "palette lock",
+    "silhouette",
+    "sub-pixel",
+    "keyframe",
+    "frame duration",
+    "smear frame",
+    "walk cycle",
+    "run cycle",
+    "loop wrap",
+    "squash and stretch",
+    "tile",
+    "tileable",
+    "isometric",
+];
+
+/// 这一轮该带哪些术语。核心打底，命中的追加，顺序沿用原表（按上色->造型->运动
+/// 分过组，乱序会让模型丢掉分组带来的语义）。
+fn select(query: &str) -> Vec<&'static GlossaryEntry> {
+    let lower = query.to_lowercase();
+    let mut out: Vec<&GlossaryEntry> = GLOSSARY
+        .iter()
+        .filter(|entry| CORE_EN.contains(&entry.en))
+        .collect();
+    for entry in GLOSSARY.iter().filter(|entry| {
+        std::iter::once(entry.en)
+            .chain(std::iter::once(entry.zh))
+            .chain(entry.aliases.iter().copied())
+            .any(|name| super::terms::find_lower(&lower, &name.to_lowercase()).is_some())
+    }) {
+        if !out.iter().any(|kept| kept.en == entry.en) {
+            out.push(entry);
+        }
+    }
+    out
+}
+
+/// 表体。`entries` 的顺序即输出顺序，排的事调用方负责。
+fn render(head: &str, entries: Vec<&GlossaryEntry>) -> String {
+    let mut out = String::from(head);
+    for entry in entries {
         out.push_str(&format!(
             "{} / {}{} - {}\n",
             entry.zh,
@@ -413,5 +503,43 @@ mod tests {
         ] {
             assert!(table.contains(must), "missing {must} in the glossary");
         }
+    }
+
+    #[test]
+    fn every_core_term_really_is_in_the_glossary() {
+        for en in CORE_EN {
+            assert!(
+                GLOSSARY.iter().any(|entry| entry.en == *en),
+                "{en} 不在术语表里"
+            );
+        }
+    }
+
+    #[test]
+    fn a_craft_word_pulls_its_entry_in() {
+        // 用户嘴里的「过渡帧」要翻成模型认得的 breakdown。
+        assert!(prompt_table_for("过渡帧要顺一点").contains("breakdown"));
+        assert!(prompt_table_for("add some ambient occlusion").contains("ambient occlusion"));
+    }
+
+    #[test]
+    fn the_core_terms_survive_a_quiet_query() {
+        let full = prompt_table().chars().count();
+        let quiet = prompt_table_for("画一只猫").chars().count();
+        println!("glossary: full={full} trimmed={quiet}");
+        assert!(quiet * 2 < full, "缩表没省下多少：{quiet} vs {full}");
+        let table = prompt_table_for("画一只猫");
+        assert!(table.contains("dithering"));
+        assert!(table.contains("silhouette"));
+        assert!(!table.contains("onion skin"), "没提洋葱皮就不该带上");
+        assert!(table.lines().count() < prompt_table().lines().count());
+    }
+
+    #[test]
+    fn a_latin_term_is_matched_whole() {
+        // 整词才算：cancel 里的 cel 不该把赛璐珞层拖进这一轮。
+        let table = prompt_table_for("cancel that");
+        assert!(!table.contains("赛璐珞层"), "cel 被 cancel 误命中");
+        assert!(!table.contains("cel -"), "cel 条目整行都不该出现");
     }
 }

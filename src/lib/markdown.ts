@@ -63,8 +63,37 @@ function pushText(out: InlineNode[], buffer: { value: string }) {
   }
 }
 
+/**
+ * 把「成对出现的转义强调界定符」还原成真正的界定符。
+ *
+ * 只认 `\*` `_` `~` `` ` `` 这几种能构成强调的字符，且前后必须同一串、中间
+ * 还得有内容——`\*\*加粗\*\*` 这一类才有还原的资格。单个 `\*`（想显示一颗
+ * 星号）和 `C:\path` 这种跟强调无关的反斜杠一律原样留下。
+ *
+ * 中间段落允许再出现转义符（`(?:[^\\]|\\.)*?`）：模型给行内代码里写正则时，
+ * 两头转义、中间也转义是常事，非贪婪匹配会把最近的那一对先配走。
+ */
+const ESCAPED_EMPHASIS = /\\([*_~`]{1,3})((?:[^\\]|\\.)*?)\\\1/g;
+
+function unwrapEscapedEmphasis(src: string): string {
+  // 连续替换到不再变化：\*\*\*粗斜\*\*\* 还原成 ***粗斜*** 之后，
+  // 里面的界定符还要再交给常规流程，多跑一轮才稳。
+  let out = src;
+  for (let guard = 0; guard < 4; guard += 1) {
+    const next = out.replace(ESCAPED_EMPHASIS, "$1$2$1");
+    if (next === out) return out;
+    out = next;
+  }
+  return out;
+}
+
 /** 行内语法：**、*、~~、`code`，以及反斜杠转义。 */
 export function parseInline(src: string): InlineNode[] {
+  // 模型爱写「保险式转义」：怕星号被当成强调，就把 **加粗** 写成 \*\*加粗\*\*，
+  // 把 `pset()` 写成 \`pset()\`。按 CommonMark 这些该原样显示成字面星号，于是
+  // 用户看到满屏反斜杠，而模型明明想给的是加粗和高亮。先把「成对出现」的那种
+  // 还原回去；单个 \* 还是字面星号，真要显示星号的人不受影响。
+  src = unwrapEscapedEmphasis(src);
   const out: InlineNode[] = [];
   const buffer = { value: "" };
   let i = 0;
@@ -127,7 +156,27 @@ function tableCells(line: string): string[] | null {
   let body = line.trim();
   if (body.startsWith("|")) body = body.slice(1);
   if (body.endsWith("|") && !body.endsWith("\\|")) body = body.slice(0, -1);
-  return body.split("|").map((cell) => cell.trim());
+  // 只有没被反斜杠转义的竖线才是格缝：模型在格子里写正则、写字面量时，
+  // 竖线本身是内容。按裸 split 拆会把 \| 后半截挤进下一格，一列格子从此错位、
+  // 而且看不出是哪一行歪的。
+  const cells: string[] = [];
+  let cell = "";
+  for (let i = 0; i < body.length; i += 1) {
+    if (body[i] === "\\" && i + 1 < body.length) {
+      // 转义序列整个交给行内解析那层，这里不提前吃掉反斜杠。
+      cell += body[i] + body[i + 1];
+      i += 1;
+      continue;
+    }
+    if (body[i] === "|") {
+      cells.push(cell.trim());
+      cell = "";
+      continue;
+    }
+    cell += body[i];
+  }
+  cells.push(cell.trim());
+  return cells;
 }
 
 function isDividerRow(cells: string[]): boolean {
@@ -146,9 +195,40 @@ function isBlockStart(line: string): boolean {
   );
 }
 
+/**
+ * 中转模型最爱把一串 bullet 挤进一行，用两个空格连排：
+ * 「5 帧完成。  - 侧视橘猫：……  - 配色：……」。行内解析把这种段整个吞成一个
+ * 段落，本该是清单的东西在界面上糊成一面墙——用户看到的就是「markdown 没排」。
+ * 这里在分块之前先把它拆回真列表，下游那堆块级解析一行都不用改。
+ *
+ * 三条护栏，少一条就把好文本拆坏：界定符前面必须贴着一个非空格，行首的 `- `
+ * 本来就是合法条目，不碰；代码围栏里一律不碰，Lua 脚本里「两个空格加一个减号」
+ * 是要原样交给 run_shader 的；表格行不拆，`|` 缝被挪位置整张表就塌。
+ */
+const INLINE_BULLET = /(\S) {2,}[-*+] (?=\S)/g;
+function splitCrampedBullets(src: string): string {
+  const lines = src.replace(/\r\n?/g, "\n").split("\n");
+  let fenced = false;
+  const out: string[] = [];
+  for (const line of lines) {
+    const trimmed = line.trimStart();
+    if (trimmed.startsWith("```")) fenced = !fenced;
+    // 加 g 的正则带 lastIndex：先问一句能不能拆，这一问就把游标推到串尾了，
+    // 紧接着的 replace 会从那儿起跳、一次都匹配不上。所以问完必须归零。
+    const breakable = !fenced && !trimmed.startsWith("|") && INLINE_BULLET.test(line);
+    if (!breakable) {
+      out.push(line);
+      continue;
+    }
+    INLINE_BULLET.lastIndex = 0;
+    out.push(...line.replace(INLINE_BULLET, "$1\n- ").split("\n"));
+  }
+  return out.join("\n");
+}
+
 /** 解析整篇文本。未闭合的代码围栏按「一直写到尾」处理，流式中途也要能看。 */
 export function parseMarkdown(src: string): BlockNode[] {
-  const lines = src.replace(/\r\n?/g, "\n").split("\n");
+  const lines = splitCrampedBullets(src).split("\n");
   const blocks: BlockNode[] = [];
   let i = 0;
 
@@ -207,7 +287,12 @@ export function parseMarkdown(src: string): BlockNode[] {
         const cells = tableCells(lines[i]);
         if (!cells) break;
         // 模型常常少写一根竖线，缺的格子补空，绝不让整张表塌掉。
-        const padded = cells.slice(0, head.length);
+        // 多写的格子也不许悄悄丢：整段截掉的话，那一列内容从界面上无声消失，
+        // 用户只会以为模型没写。溢出部分并进最后一格，排版让步，内容留下。
+        const padded =
+          cells.length > head.length
+            ? [...cells.slice(0, head.length - 1), cells.slice(head.length - 1).join(" ")]
+            : [...cells];
         while (padded.length < head.length) padded.push("");
         rows.push(padded.map(parseInline));
         i += 1;

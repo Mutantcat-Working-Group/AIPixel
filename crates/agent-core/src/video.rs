@@ -14,6 +14,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +23,31 @@ pub const MAX_EXTRACT_FRAMES: usize = 256;
 
 /// 抽帧不出来的兜底帧率：只有时长未知时才用得上。
 pub const FALLBACK_FPS: f64 = 2.0;
+
+/// 本进程内的抽帧计数。和时间戳一起保证同一台机器上两次抽帧不落在
+/// 同一个目录里：光靠时间戳的话，同一纳秒发起的两回还是会撞。
+static RUN_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// 每次抽帧一个自己的子目录。ffmpeg 按固定名 `frame_0001.png` 写盘，收回时
+/// 把目录里的 png 一锅端——共用一个目录的话，两次抽帧会互相覆盖，也会把
+/// 上一次留下的残留帧收进来，用户拿到的就不是自己那段视频的帧了。
+/// 目录来源（用户自己整理的静帧文件夹）不能这么包，它本来就不是抽出来的。
+pub fn staging_dir_for(out_dir: &Path) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = RUN_SEQ.fetch_add(1, Ordering::SeqCst);
+    out_dir.join(format!("run-{nanos}-{seq}"))
+}
+
+/// 抽完就把这个子目录删掉：临时目录里堆着几百张几十 MB 的 png 没人管，
+/// 下一次抽帧看着目录存在还会以为有残留可收。删失败不当事——帧已经读进内存了。
+pub fn discard_staging(staging: &Path) {
+    if staging.is_dir() {
+        let _ = std::fs::remove_dir_all(staging);
+    }
+}
 
 /// 探到的视频信息。任何一项都可能是 None——流媒体容器的元数据经常缺。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -65,14 +91,26 @@ pub async fn probe(path: &Path) -> Result<(VideoProbe, ProbeSource), String> {
         .map_err(|e| format!("ffprobe task failed: {e}"))?
 }
 
+/// 抽帧的结果。`staging` 是本次抽帧自己开出来的临时目录：Some 表示用完该删；
+/// None 表示帧就摆在用户自己的目录里，一个字节都不许动。少了这个区分，
+/// 收尾时会把用户整理好的静帧文件夹整个删掉。
+#[derive(Debug, Clone)]
+pub struct ExtractedFrames {
+    pub frames: Vec<PathBuf>,
+    pub staging: Option<PathBuf>,
+}
+
 /// 抽帧。count <= 0 表示「全都要」，此时仍受 `MAX_EXTRACT_FRAMES` 限制。
 pub async fn extract_frames(
     path: &Path,
     out_dir: &Path,
     count: usize,
-) -> Result<Vec<PathBuf>, String> {
+) -> Result<ExtractedFrames, String> {
     if path.is_dir() {
-        return enumerate_image_dir(path);
+        return Ok(ExtractedFrames {
+            frames: enumerate_image_dir(path)?,
+            staging: None,
+        });
     }
     if !path.exists() {
         return Err(format!("no such path: {}", path.display()));
@@ -84,7 +122,11 @@ pub async fn extract_frames(
     if wanted == 0 {
         return Err("extract_frames needs at least 1 frame".into());
     }
-    std::fs::create_dir_all(out_dir)
+    // 每次抽帧换一个属于自己的目录。ffmpeg 按固定名写盘、收回时又把目录里的
+    // png 一锅端，共用一个目录会让两次抽帧互相覆盖，也会把上一次的残留帧
+    // 当成这一回的成果收回来——用户拿到的就不是自己那段视频的帧了。
+    let out_dir = staging_dir_for(out_dir);
+    std::fs::create_dir_all(&out_dir)
         .map_err(|e| format!("cannot create {}: {e}", out_dir.display()))?;
     if which("ffmpeg").is_none() {
         return Err(
@@ -93,10 +135,15 @@ pub async fn extract_frames(
     }
     let path = path.to_path_buf();
     let out_dir = out_dir.to_path_buf();
+    let staging = out_dir.clone();
     let probe = probe(&path).await?.0;
     tokio::task::spawn_blocking(move || ffmpeg_extract(&path, &out_dir, wanted, &probe))
         .await
         .map_err(|e| format!("ffmpeg task failed: {e}"))?
+        .map(|frames| ExtractedFrames {
+            frames,
+            staging: Some(staging),
+        })
 }
 
 /// ffprobe 的参数。`-of json` 让输出可解析，`-v error` 压掉 banner。

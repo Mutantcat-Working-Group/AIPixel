@@ -36,6 +36,26 @@ describe("parseInline", () => {
     expect(textOf(parseInline("字面量 \\* 星号"))).toBe("字面量 * 星号");
   });
 
+  it("模型写保险式转义时照样按强调排版，不把反斜杠摆在用户脸上", () => {
+    // 模型怕星号被吃掉，就把 **粗** 写成 \*\*粗\*\*。CommonMark 说这是字面星号，
+    // 可用户看到满屏反斜杠。成对出现的还原成粗体，语义才对得上模型的意图。
+    const nodes = parseInline("\\*\\*光照分层\\*\\*");
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0].kind).toBe("strong");
+    expect(textOf(nodes)).toBe("光照分层");
+  });
+
+  it("转义的行内代码也能亮起来", () => {
+    // 开头还有「用 」两个普通字符，代码节点不在下标 0：按顺序断言，别写死位置。
+    const nodes = parseInline("用 \\`furShade()\\` 算法线");
+    expect(nodes.map((node) => node.kind)).toEqual(["text", "code", "text"]);
+    expect(textOf(nodes)).toBe("用 furShade() 算法线");
+  });
+
+  it("不成对的转义还是字面星号，想显示星号的人不受影响", () => {
+    expect(textOf(parseInline("路由写成 C:\\path\\to 结尾"))).toBe("路由写成 C:\\path\\to 结尾");
+  });
+
   it("treats a lone star as a plain character", () => {
     expect(parseInline("2 * 3 = 6")).toEqual([{ kind: "text", value: "2 * 3 = 6" }]);
   });
@@ -97,6 +117,25 @@ describe("parseMarkdown", () => {
     expect(blocks[0].rows[1]).toHaveLength(2);
   });
 
+  it("keeps overflow cells instead of dropping them", () => {
+    // 模型多写了一根竖线。整段截掉的话那一列内容从界面上无声消失，
+    // 用户只会以为模型没写。
+    const blocks = parseMarkdown("| 帧 | 时长 |\n| --- | --- |\n| F0 | 120ms | 备注 |");
+    expect(blocks[0].kind).toBe("table");
+    if (blocks[0].kind !== "table") return;
+    expect(blocks[0].rows[0]).toHaveLength(2);
+    expect(markdownToText("| 帧 | 时长 |\n| --- | --- |\n| F0 | 120ms | 备注 |")).toContain("备注");
+  });
+
+  it("treats an escaped pipe as cell content, not a column break", () => {
+    const blocks = parseMarkdown("| 写法 | 含义 |\n| --- | --- |\n| a\\|b | 或 |");
+    expect(blocks[0].kind).toBe("table");
+    if (blocks[0].kind !== "table") return;
+    expect(blocks[0].rows[0]).toHaveLength(2);
+    // 整根竖线还在第一格里：没被当成格缝砍成两截。
+    expect(JSON.stringify(blocks[0].rows[0][0])).toContain("|");
+  });
+
   it("does not turn a bare pipe pair into a table", () => {
     const blocks = parseMarkdown("a | b 这一行没有分隔行");
     expect(blocks[0].kind).toBe("paragraph");
@@ -117,6 +156,42 @@ describe("parseMarkdown", () => {
 
   it("strips markers back out for plain-text consumers", () => {
     expect(markdownToText("- **粗** 和 `code`")).toBe("粗 和 code");
+  });
+
+  // 中转平台交回来的正文 bullet 常常被压进一行，用两个空格连排。这种文本走到
+  // 行内解析就是个整段落，界面上糊成一面墙。拆回真列表之后 markdownToText
+  // 应该给出逐行的样子，块级断言也该看到 paragraph + list 两块。
+  it("un-cramps bullets that a relay model strung onto one line", () => {
+    const cramp = "5 帧橘猫奔跑已完成（64x64）。  - 侧视橘猫，四足奔跑循环。  - 配色沿用调色板橘色系。";
+    const blocks = parseMarkdown(cramp);
+    expect(blocks.map((b) => b.kind)).toEqual(["paragraph", "list"]);
+    const text = markdownToText(cramp);
+    expect(text.split("\n")).toHaveLength(3);
+    expect(text.split("\n")[1]).toBe("侧视橘猫，四足奔跑循环。");
+  });
+
+  it("leaves a dash that is only joined by one space alone", () => {
+    // 「a - b」是个连字符，不是条目；拆了就等于改用户写的话。
+    expect(parseMarkdown("变量 a - b 相减")).toHaveLength(1);
+    expect(parseMarkdown("变量 a - b 相减")[0].kind).toBe("paragraph");
+  });
+
+  it("never splits inside a code fence", () => {
+    const code = "```lua\nlocal a = 1  - 2\nlocal b = 3  - 4\n```";
+    const blocks = parseMarkdown(code);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].kind).toBe("code");
+    if (blocks[0].kind !== "code") throw new Error("expected code");
+    expect(blocks[0].value).toBe("local a = 1  - 2\nlocal b = 3  - 4");
+  });
+
+  it("never splits inside a table row", () => {
+    const table = "| 项 | 说明 |\n| --- | --- |\n| 腿 | 前腿  - 深色 |";
+    const blocks = parseMarkdown(table);
+    expect(blocks[0].kind).toBe("table");
+    if (blocks[0].kind !== "table") throw new Error("expected table");
+    expect(blocks[0].rows[0]?.[1]).toBeDefined();
+    expect(markdownToText(table)).toContain("前腿  - 深色");
   });
 
   it("never throws on a pile of half-formed syntax", () => {
