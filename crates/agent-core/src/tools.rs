@@ -643,7 +643,7 @@ fn tool_pixelize_image(doc: &mut Document, active: &ActiveContext, input: &Value
         opts.expand_palette = v;
     }
     if let Some(v) = input.get("alpha_threshold").and_then(|v| v.as_u64()) {
-        opts.alpha_threshold = v as u8;
+        opts.alpha_threshold = v.clamp(0, 255) as u8;
     }
     if input.get("fit").and_then(|s| s.as_str()) == Some("stretch") {
         opts.fit = FitMode::Stretch;
@@ -715,7 +715,7 @@ impl ImageGenToolParams {
             opts.expand_palette = v;
         }
         if let Some(v) = input.get("alpha_threshold").and_then(|v| v.as_u64()) {
-            opts.alpha_threshold = v as u8;
+            opts.alpha_threshold = v.clamp(0, 255) as u8;
         }
         if input.get("fit").and_then(|s| s.as_str()) == Some("stretch") {
             opts.fit = FitMode::Stretch;
@@ -1335,6 +1335,7 @@ mod tests {
             "max_colors": 16,
             "dither": true,
             "duration_ms": 120,
+            "alpha_threshold": 300,
         }))
         .expect("parses");
         assert_eq!(p.prompt, "a green slime");
@@ -1343,6 +1344,8 @@ mod tests {
         assert_eq!(p.opts.max_colors, 16);
         assert!(p.opts.dither);
         assert_eq!(p.duration_ms, 120);
+        // 越界 alpha_threshold 必须夹回 0..255，不能走 u8 回绕变成 44。
+        assert_eq!(p.opts.alpha_threshold, 255);
         // 空串一律当成没给，不让模型用 "" 占位。
         let blank = ImageGenToolParams::parse(
             &json!({"prompt": "x", "reference_frame": "", "layer": "  "}),
@@ -1350,6 +1353,63 @@ mod tests {
         .expect("parses");
         assert!(blank.reference_frame.is_none());
         assert!(blank.layer.is_none());
+    }
+
+    /// 一张半透明混色的 PNG：alpha=100 的像素夹在阈值 44 和 255 之间，
+    /// 回绕成 44 会把它们算成不透明，夹回 255 才会正确地算成透明。
+    fn translucent_png_base64() -> String {
+        let mut src = Document::new("src", 16, 16).expect("16x16");
+        let colors = vec!["#c8502864".to_string(), "#29adff".to_string()];
+        let ops = vec![
+            PixelOperation::AddPaletteColors {
+                colors: colors.clone(),
+            },
+            PixelOperation::SetPixels {
+                layer: "L0".into(),
+                frame: "F0".into(),
+                cells: (0..16)
+                    .flat_map(|y| (0..16).map(move |x| (x, y)))
+                    .map(|(x, y)| PixelCell {
+                        x,
+                        y,
+                        color: colors[((x + y) % 2) as usize].clone(),
+                    })
+                    .collect(),
+            },
+        ];
+        ops::apply_batch(&mut src, &ops).expect("setup applies");
+        png::base64_encode(&png::document_to_png(&src).expect("encodes"))
+    }
+
+    #[test]
+    fn pixelize_tool_clamps_alpha_threshold_instead_of_wrapping() {
+        let image = translucent_png_base64();
+        let run = |threshold: u64| {
+            let mut doc = Document::new("test", 16, 16).expect("16x16");
+            execute(
+                &mut doc,
+                &active(),
+                "pixel_pixelize_image",
+                &json!({
+                    "image_base64": image,
+                    "media_type": "image/png",
+                    "alpha_threshold": threshold,
+                }),
+            )
+        };
+        let clamped = run(300);
+        let sane = run(255);
+        assert!(!clamped.is_error, "{}", clamped.content);
+        assert!(!sane.is_error, "{}", sane.content);
+        assert_eq!(
+            clamped.content, sane.content,
+            "alpha=100 must be treated as transparent at threshold 300, not wrapped to 44"
+        );
+        assert!(
+            clamped.content.contains("128 opaque"),
+            "{}",
+            clamped.content
+        );
     }
 
     /// 一张 2x2 四色 RGBA，直接喂 land_generated（绕开 base64）。

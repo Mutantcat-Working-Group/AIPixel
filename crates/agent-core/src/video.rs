@@ -7,22 +7,29 @@
 //!    更实际的一条路——模型不一定吃视频，但 ffmpeg 一定在了。
 //! 2. 一个装帧图的目录，直接被当作已有序列读，完全不碰外部进程。
 //!
-//! 进程调用全部收在 `spawn_blocking` 里：本 crate 的 tokio 没有开 process 特性，
-//! 用 `std::process::Command` 阻塞一会儿比为一个特性拉一整套依赖合理。
+//! 进程调用走 tokio process + 显式超时：ffprobe/ffmpeg 挂在坏文件或坏节点上时，
+//! `kill_on_drop` 会在超时后把子进程杀掉，而不是让阻塞任务永远占着线程。
 //! 解析与参数构造是纯函数，所以「采样点怎么算」「ffprobe 的 JSON 怎么读」
 //! 都能在没有 ffmpeg 的机器上测。
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tokio::time::timeout;
 
 /// 单次最多抽取的帧数。再多对像素画没意义，只是让用户等。
 pub const MAX_EXTRACT_FRAMES: usize = 256;
 
 /// 抽帧不出来的兜底帧率：只有时长未知时才用得上。
 pub const FALLBACK_FPS: f64 = 2.0;
+
+/// ffprobe 的总时限。坏文件会让 ffprobe 在流上反复重试，不能等它自然结束。
+pub const FFPROBE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// ffmpeg 抽帧的总时限。抽 256 张已经够大，再慢就该报错而不是让界面转圈。
+pub const FFMPEG_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// 本进程内的抽帧计数。和时间戳一起保证同一台机器上两次抽帧不落在
 /// 同一个目录里：光靠时间戳的话，同一纳秒发起的两回还是会撞。
@@ -86,9 +93,7 @@ pub async fn probe(path: &Path) -> Result<(VideoProbe, ProbeSource), String> {
         );
     }
     let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || ffprobe(&path))
-        .await
-        .map_err(|e| format!("ffprobe task failed: {e}"))?
+    ffprobe_async(&path).await
 }
 
 /// 抽帧的结果。`staging` 是本次抽帧自己开出来的临时目录：Some 表示用完该删；
@@ -137,9 +142,8 @@ pub async fn extract_frames(
     let out_dir = out_dir.to_path_buf();
     let staging = out_dir.clone();
     let probe = probe(&path).await?.0;
-    tokio::task::spawn_blocking(move || ffmpeg_extract(&path, &out_dir, wanted, &probe))
+    ffmpeg_extract(&path, &out_dir, wanted, &probe)
         .await
-        .map_err(|e| format!("ffmpeg task failed: {e}"))?
         .map(|frames| ExtractedFrames {
             frames,
             staging: Some(staging),
@@ -159,13 +163,21 @@ pub fn ffprobe_args(path: &Path) -> Vec<String> {
     ]
 }
 
-/// 跑 ffprobe 并解析。单独拆出来是为了让 `parse_probe_json` 可测。
-fn ffprobe(path: &Path) -> Result<(VideoProbe, ProbeSource), String> {
+/// 跑 ffprobe 并解析。超时后 `kill_on_drop` 会把子进程杀掉，避免坏流卡死。
+async fn ffprobe_async(path: &Path) -> Result<(VideoProbe, ProbeSource), String> {
     let binary = which("ffprobe").ok_or_else(|| "ffprobe not found".to_string())?;
     let args = ffprobe_args(path);
-    let out = Command::new(&binary)
-        .args(&args)
-        .output()
+    let mut cmd = tokio::process::Command::new(&binary);
+    cmd.args(&args).kill_on_drop(true);
+    let out = timeout(FFPROBE_TIMEOUT, cmd.output())
+        .await
+        .map_err(|_| {
+            format!(
+                "ffprobe at {} timed out after {}s",
+                binary.display(),
+                FFPROBE_TIMEOUT.as_secs()
+            )
+        })?
         .map_err(|e| format!("cannot run ffprobe at {}: {e}", binary.display()))?;
     if !out.status.success() {
         let text = String::from_utf8_lossy(&out.stderr).trim().to_string();
@@ -280,7 +292,7 @@ pub fn frames_fps(count: usize, duration_s: Option<f64>) -> Option<f64> {
     Some((count as f64) / d)
 }
 
-fn ffmpeg_extract(
+async fn ffmpeg_extract(
     path: &Path,
     out_dir: &Path,
     wanted: usize,
@@ -309,9 +321,17 @@ fn ffmpeg_extract(
     args.push("-frames:v".into());
     args.push(wanted.to_string());
     args.push(pattern.display().to_string());
-    let out = Command::new(&binary)
-        .args(&args)
-        .output()
+    let mut cmd = tokio::process::Command::new(&binary);
+    cmd.args(&args).kill_on_drop(true);
+    let out = timeout(FFMPEG_TIMEOUT, cmd.output())
+        .await
+        .map_err(|_| {
+            format!(
+                "ffmpeg at {} timed out after {}s",
+                binary.display(),
+                FFMPEG_TIMEOUT.as_secs()
+            )
+        })?
         .map_err(|e| format!("cannot run ffmpeg at {}: {e}", binary.display()))?;
     if !out.status.success() {
         let text = String::from_utf8_lossy(&out.stderr).trim().to_string();
