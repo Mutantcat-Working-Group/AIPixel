@@ -1498,7 +1498,12 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         // 拖进来的 id 可能已经不在了（删过会话），少一个不补位，剩下照原次序。
         if (hit) ordered.push(hit);
       }
-      setState({ sessions: ordered });
+      // ids 只该来自侧栏那一次拖拽。万一调用方给了残缺列表（别的流程、
+      // 或者两份列表错开了），没被点名的会话不能凭空从界面上消失，按原序附在尾部，
+      // 等 refreshSessions 拿回后端次序再收敛。
+      const kept = new Set(ordered.map((session) => session.id));
+      const stragglers = getState().sessions.filter((session) => !kept.has(session.id));
+      setState({ sessions: [...ordered, ...stragglers] });
       try {
         await bridge.reorderSessions(ids);
       } catch (error) {

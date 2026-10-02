@@ -41,7 +41,7 @@ use super::plan::{self, TurnPlan, PLAN_TOOL};
 use super::presets;
 use super::prompt;
 use super::providers::{self, LlmProvider, ProviderError};
-use super::roles::{ModelRole, RoleBinding};
+use super::roles::{self, ModelRole, RoleBinding};
 use super::tools::{self, ToolOutcome, IMAGE_GEN_TOOL};
 use pixel_core::decode;
 use pixel_core::document::Document;
@@ -2410,6 +2410,10 @@ impl AgentSession {
                 }
             }
         };
+        // 分工段也要在 document/active/engine 三把锁之前取：role_bindings()
+        // 内部要拿 engine 锁，在锁里再取就是自己锁自己。锁顺序维持
+        // document -> active -> engine -> plan 不变。
+        let roles_section = roles::prompt_section(&self.role_bindings());
         let doc = self
             .document
             .lock()
@@ -2449,6 +2453,7 @@ impl AgentSession {
                 cfg.canvas_context_chars,
                 prompt::PromptExtras {
                     routing: &routing,
+                    roles: &roles_section,
                     craft: &craft_section,
                     craft_notes: &craft_notes,
                     query: &query,
@@ -5823,6 +5828,39 @@ mod tests {
     fn effective_capabilities_unions_every_role() {
         let s = session();
         assert!(!s.effective_capabilities().any());
+
+        // 顺手钉住分工段的落点：光有绑定还不够，它得真出现在每一发请求的
+        // 系统提示词里，不然模型压根不知道生图另有其人，会自己脑补位图。
+        let cfg = s.runner_config();
+        let req = s.chat_request(&cfg, None, false, false);
+        assert!(
+            req.system.contains("MODEL ROLES"),
+            "系统提示词里没有模型分工段"
+        );
+        assert!(
+            req.system.contains("Every stage above is you"),
+            "还没绑专职模型，必须明说各阶段都由主模型完成"
+        );
+        s.rebind_role(
+            ModelRole::ImageGen,
+            model_with(
+                "img",
+                Capabilities {
+                    image_gen: true,
+                    ..Default::default()
+                },
+            ),
+        );
+        let cfg = s.runner_config();
+        let req = s.chat_request(&cfg, None, false, false);
+        assert!(
+            req.system.contains("image_gen (img label)"),
+            "专职生图模型没在分工段里被点名"
+        );
+        assert!(
+            req.system.contains("Do not hand-write an approximation"),
+            "没警告别自己编专职阶段的输出"
+        );
 
         s.rebind_role(
             ModelRole::ImageGen,

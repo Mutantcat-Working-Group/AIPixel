@@ -1656,6 +1656,27 @@ describe("会话改名与排序", () => {
     expect(reorder?.args).toMatchObject({ ids: ["b", "a", "c"] });
   });
 
+  it("排序名单漏了谁都不许把谁从界面上吞掉", async () => {
+    const a = { id: "doc-a", title: "甲", order: 1 } as SessionInfo;
+    const b = { id: "doc-b", title: "乙", order: 2 } as SessionInfo;
+    const c = { id: "doc-c", title: "丙", order: 3 } as SessionInfo;
+    useStore.setState({ sessions: [a, b, c], activeId: "doc-a" });
+    // 收尾那次刷新也撂挑子：这时候界面上留的是本地视图，漏点名的那行必须还在，
+    // 不然用户眼睁睁看着侧栏少一条，下一回刷新它又冒出来。
+    invokeErrors["session_list"] = "boom";
+    invokeCalls.length = 0;
+
+    await useStore.getState().reorderSessions(["doc-c", "doc-a"]);
+
+    const shown = useStore.getState().sessions.map((session) => session.id);
+    expect(shown).toEqual(["doc-c", "doc-a", "doc-b"]);
+
+    // 发给 Rust 的名单仍是调用方点名的那几个，不把兜底补的 id 偷偷塞回去。
+    const reorder = invokeCalls.find((call) => call.cmd === "session_reorder");
+    expect(reorder?.args).toMatchObject({ ids: ["doc-c", "doc-a"] });
+    delete invokeErrors["session_list"];
+  });
+
   it("改名失败只嘟囔一声，不动会话列表", async () => {
     invokeErrors["session_rename"] = "nope";
     invokeResults["session_list"] = [{ ...{ id: "doc-02" } } as SessionInfo];

@@ -91,6 +91,9 @@ MARKDOWN YOU SEND BACK: the reply area already labels every one of your bubbles 
 pub struct PromptExtras<'a> {
     /// 意图分流段：讲这一轮要什么（新建 / 修改 / 瓦片地图 / 风格参照等）。
     pub routing: &'a str,
+    /// 模型分工段：讲这一轮的生图 / 读图 / 读视频各由哪个模型跑。
+    /// 单模型会话里这段会说「都是你自己」，多模型会话里会点名谁另绑了专职引擎。
+    pub roles: &'a str,
     /// 提示词清单段：正向 / 逆向提示词等生图前的固定步骤。
     pub craft: &'a str,
     /// 命中的知识条目：本轮检索到的美术术语解释。
@@ -121,6 +124,12 @@ pub fn build_system_prompt(
     if !extras.routing.is_empty() {
         out.push('\n');
         out.push_str(extras.routing);
+    }
+    // 分工段紧跟分流：分流讲「这一轮要什么」，分工讲「这一轮谁来做哪一段」。
+    // 放在清单前面，模型才会先认清哪些阶段该自己动手、哪些该交给专职引擎。
+    if !extras.roles.is_empty() {
+        out.push('\n');
+        out.push_str(extras.roles);
     }
     // 提示词清单段紧跟分流：分流讲「这一轮要什么」，清单讲「照着什么画」，
     // 两段都必须在模型下笔之前出现，顺序不能颠倒。
@@ -192,6 +201,7 @@ mod tests {
             4000,
             PromptExtras {
                 routing: "TURN ROUTING: the user asked for a tile map, style 16-bit platformer",
+                roles: "MODEL ROLES - who runs which stage: image_gen is a separate model",
                 craft_notes: "CRAFT NOTES - color ramp: build 3-5 steps per material",
                 craft: "PROMPT CRAFT - mandatory before any drawing tool this turn",
                 query: "画一张草地瓦片地图，草要绿色的",
@@ -216,6 +226,15 @@ mod tests {
         // 本轮分流与知识条目。
         assert!(prompt.contains("TURN ROUTING"));
         assert!(prompt.contains("CRAFT NOTES"));
+        // 模型分工段：紧跟分流、压在清单之前，模型才先认清谁干哪一段。
+        assert!(prompt.contains("MODEL ROLES"), "缺模型分工段");
+        let role_at = prompt.find("MODEL ROLES").expect("分工段没进组装结果");
+        let routing_at = prompt.find("TURN ROUTING").expect("分流段没进组装结果");
+        let craft_at = prompt.find("PROMPT CRAFT").expect("清单段没进组装结果");
+        assert!(
+            routing_at < role_at && role_at < craft_at,
+            "分工段必须夹在分流与清单之间"
+        );
         // 两张对照表：颜色名（中英 + hex）和美术术语。
         assert!(prompt.contains("COLOR NAMES"));
         assert!(prompt.contains("ART VOCABULARY"));
@@ -235,6 +254,10 @@ mod tests {
     fn the_draw_two_body_rules_are_both_stated() {
         let doc = pixel_core::Document::new("t", 16, 16).unwrap();
         let prompt = build_system_prompt(&doc, "L0", "F0", None, 4000, PromptExtras::default());
+        assert!(
+            !prompt.contains("MODEL ROLES"),
+            "空 extras 不该凭空造一段分工"
+        );
         // 两条腿都必须在场：一条都不许被删成「一律」。
         assert!(prompt.contains("PATHS AND MATH"), "缺路径/数学路径规则");
         assert!(prompt.contains("HAND-WRITTEN ROWS"), "缺手写行路径规则");
