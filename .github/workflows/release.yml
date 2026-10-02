@@ -48,20 +48,16 @@ jobs:
             --exclude='./release' \
             -C . .
           mv "/tmp/aipixel-${VERSION}-source.tar.gz" "release/"
-          cd release
-          sha256sum -- * > ../checksums.txt
-          md5sum -- * > ../checksums-md5.txt
-          sha1sum -- * > ../checksums-sha1.txt
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: python
+          # 只传包本身：校验值放到 publish 阶段算。在 python job 里算的话，
+          # 那时候桌面安装包还没编出来，checksums 里只会躺着 python 那两三个文件，
+          # 用户下载的 dmg/exe/deb 反而没有校验值可对。
           path: |
             release/*
-            checksums.txt
-            checksums-md5.txt
-            checksums-sha1.txt
 
   # 桌面安装包全部由 CI 出：mac 出 x64/arm64 dmg，win 出 x64/arm64 NSIS，
   # linux 出 x64/arm64 AppImage + deb。签名、语言、管理员权限都写在 tauri.conf.json
@@ -395,6 +391,16 @@ jobs:
         with:
           path: release-assets
           merge-multiple: true
+
+      # 全部资产都到齐了才算校验值：六个桌面安装包、两个 python 包、源码包，
+      # 一个都不少地写进 checksums*.txt，再跟资产一起上传。
+      - name: Compute release checksums
+        run: |
+          cd release-assets
+          sha256sum -- * > ../checksums.txt
+          md5sum -- * > ../checksums-md5.txt
+          sha1sum -- * > ../checksums-sha1.txt
+          mv ../checksums*.txt .
 
       - name: Create or update release
         env:
