@@ -14,6 +14,11 @@ import WorkflowDock from "./ui/WorkflowDock";
 import ContextMenuHost from "./ui/ContextMenu";
 import useEditShortcuts from "./ui/useEditShortcuts";
 import { useStore } from "./lib/store";
+import {
+  modelChangeTarget,
+  needsModelBanner,
+  resolveBoundModelId,
+} from "./lib/model-binding";
 import { useT } from "./lib/t";
 import type { PermissionMode } from "./lib/types";
 import type { ExportFormat } from "./lib/bridge";
@@ -69,15 +74,18 @@ export default function App() {
   }
 
   const activeSession = store.sessions.find((s) => s.id === store.activeId) ?? null;
-  // 一条模型都没配，或者会话还挂在已删掉的模型上：两种情况下顶栏都得显示「未设置模型」。
+  // 顶栏显示会话绑的模型；没有会话（允许的空态）或那个模型被删了，就落到全局激活模型。
+  // 谁都不剩才是真的「未设置模型」——不能把「还没建会话」也算成没配模型。
   const boundModelId =
-    activeSession && store.models.entries.some((m) => m.id === activeSession.model_id)
-      ? activeSession.model_id
-      : UNSET_MODEL;
+    resolveBoundModelId(
+      activeSession?.model_id,
+      store.models.active_id,
+      store.models.entries.map((m) => m.id),
+    ) ?? UNSET_MODEL;
   const documentName = store.document?.name ?? "untitled";
-  // 没配模型不该把整个界面关掉：会话能建、画布能画，只是发消息没人接。
-  // 给一条指向设置的横幅，比把用户挡在一页说明书前面强。
-  const unbound = boundModelId === UNSET_MODEL;
+  // 「没有可用模型」只在真的一个都没配时出现。空会话下配好了模型却挂这条横幅，
+  // 是以前最误导人的一桩：用户照它点进设置，只会发现模型早就在那儿。
+  const unbound = needsModelBanner(store.models.entries.length);
 
   async function pickAndOpenAip() {
     const picked = await open({ multiple: false, filters: aipFilter });
@@ -163,8 +171,14 @@ export default function App() {
     <div className="app">
       <header className="topbar">
         <div className="brand">
-          <img className="brand-mark" src={brandIcon} alt="" width={20} height={20} />
-         AIPixel
+          <img
+            className="brand-mark"
+            src={brandIcon}
+            alt=""
+            width={20}
+            height={20}
+          />
+          AIPixel
           <span className="brand-tag">{t("app.brand_tag")}</span>
         </div>
 
@@ -178,14 +192,27 @@ export default function App() {
               value={boundModelId}
               options={[
                 ...(unbound
-                  ? [{ label: t("topbar.model_unset"), value: UNSET_MODEL, disabled: true }]
+                  ? [
+                      {
+                        label: t("topbar.model_unset"),
+                        value: UNSET_MODEL,
+                        disabled: true,
+                      },
+                    ]
                   : []),
                 ...store.models.entries.map((m) => ({
                   label: `${m.label} · ${m.model}`,
                   value: m.id,
                 })),
               ]}
-              onChange={(value: string) => void store.bindSessionModel(value)}
+              onChange={(value: string) => {
+                // 有会话只改这个会话的绑定；空会话时这句话无处可绑，改全局激活模型。
+                if (modelChangeTarget(activeSession !== null) === "session") {
+                  void store.bindSessionModel(value);
+                } else {
+                  void store.activateModel(value);
+                }
+              }}
               placeholder={t("topbar.select_model")}
             />
           </Tooltip>
@@ -236,7 +263,9 @@ export default function App() {
                   label: entry.label,
                 })),
                 onClick: ({ key }) => {
-                  const entry = exportEntries.find((item) => item.format === key);
+                  const entry = exportEntries.find(
+                    (item) => item.format === key,
+                  );
                   if (entry) void exportAs(entry);
                 },
               }}
@@ -271,27 +300,31 @@ export default function App() {
         </div>
       </header>
 
-      {unbound ? (
-        <div className="notice-bar">
-          <span className="grow">{t("store.no_model")}</span>
-          <Button size="small" type="link" onClick={store.openSettings}>
-            {t("gate.add_first")}
-          </Button>
-        </div>
-      ) : null}
+      {/* 两条横幅共用一个 wrapper：.app 只留两行网格时，多余的直接子节点会掉进隐式行、
+          把正文整块往下顶；包起来后没有横幅时这里高度为 0，只见顶栏一条栏。 */}
+      <div className="app-notices">
+        {unbound ? (
+          <div className="notice-bar">
+            <span className="grow">{t("store.no_model")}</span>
+            <Button size="small" type="link" onClick={store.openSettings}>
+              {t("gate.add_first")}
+            </Button>
+          </div>
+        ) : null}
 
-      {store.notice ? (
-        <div className={`notice-bar ${store.notice.isError ? "error" : ""}`}>
-          <span className="grow">{store.notice.text}</span>
-          <Button
-            size="small"
-            type="text"
-            aria-label={t("notice.dismiss")}
-            icon={<X size={13} />}
-            onClick={store.clearNotice}
-          />
-        </div>
-      ) : null}
+        {store.notice ? (
+          <div className={`notice-bar ${store.notice.isError ? "error" : ""}`}>
+            <span className="grow">{store.notice.text}</span>
+            <Button
+              size="small"
+              type="text"
+              aria-label={t("notice.dismiss")}
+              icon={<X size={13} />}
+              onClick={store.clearNotice}
+            />
+          </div>
+        ) : null}
+      </div>
 
       <div className="app-body">
         <SessionSidebar />

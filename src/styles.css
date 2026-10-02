@@ -135,8 +135,17 @@ body {
 
 .app {
   display: grid;
-  grid-template-rows: 46px minmax(0, 1fr);
+  /* 三行：顶栏 / 横幅（可为 0）/ 正文。横幅以前是自由的直接子节点，
+     会悄悄落进隐式行把正文挤下去；现在它是画好位置的第二行，空时不占高。 */
+  grid-template-rows: 46px auto minmax(0, 1fr);
   height: 100%;
+}
+
+/* 两条通知横幅的家。没有横幅时 flex 容器高度为 0，视觉上只有顶栏一条栏。 */
+.app-notices {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .topbar {
@@ -2253,7 +2262,9 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 5px 12px;
+  /* 压得比正文矮一截：它是顶栏的延伸，不该被看成新的一条栏。 */
+  padding: 2px 12px;
+  min-height: 24px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-panel-2);
   color: var(--text-dim);
