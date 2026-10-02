@@ -556,7 +556,8 @@ fn tool_tween_frames(doc: &mut Document, active: &ActiveContext, input: &Value) 
         duration_ms: input
             .get("duration_ms")
             .and_then(|v| v.as_u64())
-            .unwrap_or(83) as u32,
+            .map(|v| v.clamp(1, 60_000) as u32)
+            .unwrap_or(83),
     };
     match tween::insert_tween_frames(doc, layer, from, to, count, &opts) {
         Ok(report) => {
@@ -733,7 +734,8 @@ impl ImageGenToolParams {
             duration_ms: input
                 .get("duration_ms")
                 .and_then(|v| v.as_u64())
-                .unwrap_or(83) as u32,
+                .map(|v| v.clamp(1, 60_000) as u32)
+                .unwrap_or(83),
             opts,
         })
     }
@@ -994,6 +996,25 @@ mod tests {
         // 中间帧必须插在 F0 之后、F1 之前，F1 仍是最后一帧。
         assert_eq!(doc.frames[0].id, "F0");
         assert_eq!(doc.frames[4].id, "F1");
+    }
+
+    #[test]
+    fn tween_tool_clamps_runaway_frame_durations() {
+        let mut doc = two_pose_doc();
+        let out = execute(
+            &mut doc,
+            &active(),
+            "pixel_tween_frames",
+            &json!({
+                "from_frame": "F0",
+                "to_frame": "F1",
+                "count": 1,
+                "duration_ms": 9_999_999_999_u64,
+            }),
+        );
+        assert!(!out.is_error, "{}", out.content);
+        // 超大 u64 若直接 as u32 会回绕成小值，必须夹回 60000。
+        assert_eq!(doc.frames[1].duration_ms, 60_000);
     }
 
     #[test]
@@ -1346,6 +1367,19 @@ mod tests {
         assert_eq!(p.duration_ms, 120);
         // 越界 alpha_threshold 必须夹回 0..255，不能走 u8 回绕变成 44。
         assert_eq!(p.opts.alpha_threshold, 255);
+        // 帧时长同理：u64 夹到 1..60000 后再转 u32，不能回绕。
+        let big = ImageGenToolParams::parse(&json!({
+            "prompt": "x",
+            "duration_ms": 9_999_999_999_u64,
+        }))
+        .expect("parses");
+        assert_eq!(big.duration_ms, 60_000);
+        let tiny = ImageGenToolParams::parse(&json!({
+            "prompt": "x",
+            "duration_ms": 0,
+        }))
+        .expect("parses");
+        assert_eq!(tiny.duration_ms, 1);
         // 空串一律当成没给，不让模型用 "" 占位。
         let blank = ImageGenToolParams::parse(
             &json!({"prompt": "x", "reference_frame": "", "layer": "  "}),
