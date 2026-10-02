@@ -154,6 +154,10 @@ pub const IMAGE_GEN_TOOL: &str = "pixel_generate_image";
 /// 要认得这个名字，字面量散在各处迟早对不上。
 pub const SHADER_TOOL: &str = "pixel_run_shader";
 
+/// 事务绘制工具名。往画布上落 pixels 的主路径：建帧、建图层、调色板增删这些
+/// 搭台动作和真正的画像素全走这一个工具，所以抽出来给提示词硬闸认名字。
+pub const APPLY_TOOL: &str = "pixel_apply_operations";
+
 #[derive(Debug, Clone)]
 pub struct ToolOutcome {
     pub content: String,

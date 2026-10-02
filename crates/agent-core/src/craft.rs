@@ -11,7 +11,7 @@
 
 use super::intent::Intent;
 use super::models::ToolSpec;
-use super::tools::{IMAGE_GEN_TOOL, SHADER_TOOL};
+use super::tools::{APPLY_TOOL, IMAGE_GEN_TOOL, SHADER_TOOL};
 use serde_json::{json, Value};
 
 /// 工具名。语义归本模块，规格由 `spec()` 发出去。
@@ -35,12 +35,16 @@ impl CraftedPrompt {
     }
 }
 
-/// 哪些调用算「生图」。结构操作（建帧、建图层、调色板增删）不算——那是搭台，
-/// 不是画画；真正往画布上落 pixels 的几条才算，它们都必须先有清单。
+/// 哪些调用算「生图」。往画布上落 pixels 的一条不漏，它们都必须先有清单。
+///
+/// `pixel_apply_operations` 是其中最要紧的一条：它既搭台（建帧、建图层、调色板
+/// 增删）又落笔，早期把它整条排除在外的理由是「结构操作不算画画」——可这么一挡，
+/// 模型最常用的那条绘制路径反而绕过了硬闸，直接跳过了正向/逆向提示词流程。
+/// 拦下来之后模型先写清单再动笔，正是用户要的那一步。
 pub fn is_drawing_tool(name: &str) -> bool {
     matches!(
         name,
-        SHADER_TOOL | IMAGE_GEN_TOOL | "pixel_pixelize_image" | "pixel_tween_frames"
+        APPLY_TOOL | SHADER_TOOL | IMAGE_GEN_TOOL | "pixel_pixelize_image" | "pixel_tween_frames"
     )
 }
 
@@ -266,13 +270,18 @@ mod tests {
 
     #[test]
     fn drawing_tools_need_the_step_structure_does_not() {
+        // 五条往画布上落东西的工具都得有清单，一条都不能漏。
+        // `pixel_apply_operations` 曾在这条断言里被写成「不算生图」，结果是模型
+        // 最常用的绘制路径整条绕过硬闸：没说先写正向/逆向清单就直接落笔。
+        assert!(is_drawing_tool(APPLY_TOOL));
         assert!(is_drawing_tool(SHADER_TOOL));
         assert!(is_drawing_tool(IMAGE_GEN_TOOL));
         assert!(is_drawing_tool("pixel_pixelize_image"));
         assert!(is_drawing_tool("pixel_tween_frames"));
-        assert!(!is_drawing_tool("pixel_apply_operations"));
+        // 只读、分流、写清单这三条不拦：拦了就把正常流程也堵死。
         assert!(!is_drawing_tool("pixel_read_canvas"));
         assert!(!is_drawing_tool(PLAN_TOOL));
+        assert!(!is_drawing_tool(PROMPT_TOOL));
     }
 
     #[test]

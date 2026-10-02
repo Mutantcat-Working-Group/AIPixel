@@ -4783,9 +4783,13 @@ mod tests {
     async fn the_same_script_aimed_at_another_layer_is_not_a_replay() {
         let s = session();
         let script = marker_walker();
+        // 先写清单：建层和落笔都算生图，绕不过提示词那一步。少了它第一发就被
+        // 挡下去补写，L9 根本建不出来，后两发 shader 全落在缺名的图层上，
+        // 这条测试想守的「换个图层就不算重放」也就无从验证。
         rewire(
             &s,
             vec![
+                craft_call("c0"),
                 tool_call(
                     "c1",
                     "pixel_apply_operations",
@@ -4806,7 +4810,13 @@ mod tests {
         let flow = drain(rx);
 
         assert_eq!(
-            flow.tools,
+            // pixel_plan 是分流给界面看的节点，pixel_prompt 是提示词清单，
+            // 两个都不动画布，剔掉再比剩下真正落在画布上的调用。
+            flow.tools
+                .iter()
+                .filter(|n| **n != "pixel_plan" && n.as_str() != craft::PROMPT_TOOL)
+                .cloned()
+                .collect::<Vec<_>>(),
             vec![
                 "pixel_apply_operations",
                 "pixel_run_shader",
@@ -4819,11 +4829,17 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let frame = doc.frames[0].id.clone();
-        assert_ne!(
-            doc.cel("L9", &frame).unwrap().indices[0],
-            0,
-            "同一份 script 画到另一个图层得真跑"
+        assert!(
+            doc.layers.iter().any(|l| l.id == "L9"),
+            "create_layer 指了 id 就得叫这个名字：{:?}",
+            doc.layers.iter().map(|l| &l.id).collect::<Vec<_>>()
         );
+        // 先确认 cel 真的存在再读像素： unwrap 到 None 只会甩一句 panicked，
+        // 看不出到底是层没建成还是 shader 没跑。
+        let cel = doc
+            .cel("L9", &frame)
+            .expect("同一份 script 画到另一个图层得真跑，cel 必须在");
+        assert_ne!(cel.indices[0], 0, "同一份 script 画到另一个图层得真跑");
     }
 
     #[tokio::test]
