@@ -204,8 +204,11 @@ pub fn parse_probe_json(text: &str) -> Result<VideoProbe, String> {
                 .map(|c| c == "video")
                 .unwrap_or(false);
             if is_video {
-                out.width = s.get("width").and_then(|v| v.as_u64()).map(|v| v as u32);
-                out.height = s.get("height").and_then(|v| v.as_u64()).map(|v| v as u32);
+                // 元数据被写坏时可能出现天文数字，直接 as u32 会回绕成小尺寸。
+                // 饱和到 u32 上限，至少不让简报里的分辨率变成错的。
+                let sat = |v: u64| v.min(u32::MAX as u64) as u32;
+                out.width = s.get("width").and_then(|v| v.as_u64()).map(sat);
+                out.height = s.get("height").and_then(|v| v.as_u64()).map(sat);
                 out.codec = s
                     .get("codec_name")
                     .and_then(|v| v.as_str())
@@ -481,6 +484,15 @@ mod tests {
         assert_eq!(p.fps, None);
         assert_eq!(p.frame_count, None);
         assert_eq!(p.codec, None);
+    }
+
+    #[test]
+    fn absurd_ffprobe_dimensions_are_saturated_not_wrapped() {
+        // 4294967297 = u32::MAX + 2。直接截断会回绕成 2，简报里的分辨率就错了。
+        let text = r#"{"streams":[{"codec_type":"video","width":4294967297,"height":4294967297}]}"#;
+        let p = parse_probe_json(text).expect("parses");
+        assert_eq!(p.width, Some(u32::MAX));
+        assert_eq!(p.height, Some(u32::MAX));
     }
 
     #[test]

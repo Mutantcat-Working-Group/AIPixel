@@ -1203,6 +1203,7 @@ body {
 
 .frame-duration {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   margin-top: 7px;
@@ -1215,8 +1216,8 @@ body {
 }
 
 .frame-duration-input {
-  flex: 1;
-  min-width: 0;
+  flex: 1 1 120px;
+  min-width: 96px;
 }
 
 .frame-duration-input .ant-input-number-input {

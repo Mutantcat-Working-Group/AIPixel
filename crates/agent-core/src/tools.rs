@@ -455,16 +455,29 @@ fn tool_read_canvas(doc: &Document, active: &ActiveContext, input: &Value) -> To
         };
     }
     if let Some(region) = input.get("region") {
-        let x = region.get("x").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-        let y = region.get("y").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        // 模型手滑给个大数会从 u64 截断回绕成小坐标，画出来的窗口就错位了。
+        // 先饱和到 u32，越界部分交给 render_window 去夹回画布。
+        let sat = |v: u64| v.min(u32::MAX as u64) as u32;
+        let x = region
+            .get("x")
+            .and_then(|v| v.as_u64())
+            .map(sat)
+            .unwrap_or(0);
+        let y = region
+            .get("y")
+            .and_then(|v| v.as_u64())
+            .map(sat)
+            .unwrap_or(0);
         let w = region
             .get("width")
             .and_then(|v| v.as_u64())
-            .unwrap_or(doc.width as u64) as u32;
+            .map(sat)
+            .unwrap_or(doc.width);
         let h = region
             .get("height")
             .and_then(|v| v.as_u64())
-            .unwrap_or(doc.height as u64) as u32;
+            .map(sat)
+            .unwrap_or(doc.height);
         return match rle::render_window(
             doc,
             &active.layer,
@@ -1309,6 +1322,45 @@ mod tests {
         assert!(out.is_error);
         assert!(out.content.contains("unknown tool"), "{}", out.content);
         assert!(out.content.contains("pixel_teleport"), "{}", out.content);
+    }
+
+    #[test]
+    fn read_canvas_region_clamps_huge_numbers_without_wrapping() {
+        let mut doc = Document::new("test", 8, 8).expect("8x8");
+        // 4294967297 = u32::MAX + 2。直接截断会变成 2，模型就会去画布左上角
+        // 读一个错的窗口；饱和成 u32::MAX 后由 render_window 夹到右下角最后一格。
+        let out = execute(
+            &mut doc,
+            &active(),
+            "pixel_read_canvas",
+            &json!({
+                "region": {
+                    "x": 4_294_967_297_u64,
+                    "y": 4_294_967_297_u64,
+                    "width": 4_294_967_297_u64,
+                    "height": 4_294_967_297_u64,
+                }
+            }),
+        );
+        assert!(!out.is_error, "{}", out.content);
+        assert!(
+            out.content.contains("window 1x1 at (7,7)"),
+            "{}",
+            out.content
+        );
+        // 正常范围内的窗口照旧按请求返回，不受饱和逻辑影响。
+        let sane = execute(
+            &mut doc,
+            &active(),
+            "pixel_read_canvas",
+            &json!({"region": {"x": 6, "y": 6, "width": 5, "height": 5}}),
+        );
+        assert!(!sane.is_error, "{}", sane.content);
+        assert!(
+            sane.content.contains("window 2x2 at (6,6)"),
+            "{}",
+            sane.content
+        );
     }
 
     #[test]

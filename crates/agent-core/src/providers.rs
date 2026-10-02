@@ -637,6 +637,31 @@ mod tests {
         assert_eq!(args, "{\"shape\":\"ellipse\"}");
     }
 
+    /// token 数超出 u32 时按上限计，不能截断回绕成一个小数把用量显示错。
+    #[test]
+    fn token_usage_is_saturated_when_it_cannot_fit_u32() {
+        let mut acc = ToolAcc::default();
+        let events = anthropic_parse(
+            r#"{"type":"message_start","message":{"usage":{"input_tokens":4294967297}}}"#,
+            &mut acc,
+        )
+        .expect("parses");
+        assert!(events.is_empty(), "{events:?}");
+        assert_eq!(acc.input_tokens, Some(u32::MAX));
+
+        let ev = openai_stream(&[
+            r#"{"usage":{"prompt_tokens":4294967297,"completion_tokens":4294967297}}"#,
+        ]);
+        let usage = ev.iter().find_map(|e| match e {
+            LlmEvent::Usage {
+                input_tokens,
+                output_tokens,
+            } => Some((*input_tokens, *output_tokens)),
+            _ => None,
+        });
+        assert_eq!(usage, Some((Some(u32::MAX), Some(u32::MAX))));
+    }
+
     #[test]
     fn a_provider_that_names_its_ceiling_gets_clamped_to_it() {
         // 中转站嫌我们给的 max_tokens 太大，顺手告诉我们它允许多少。
@@ -1167,7 +1192,7 @@ fn anthropic_parse(payload: &str, acc: &mut ToolAcc) -> Result<Vec<LlmEvent>, Pr
     let events = match ty {
         "message_start" => {
             if let Some(u) = v["message"]["usage"]["input_tokens"].as_u64() {
-                acc.input_tokens = Some(u as u32);
+                acc.input_tokens = Some(u.min(u32::MAX as u64) as u32);
             }
             vec![]
         }
@@ -1231,7 +1256,7 @@ fn anthropic_parse(payload: &str, acc: &mut ToolAcc) -> Result<Vec<LlmEvent>, Pr
                 acc.stop = stop.to_string();
             }
             if let Some(o) = v["usage"]["output_tokens"].as_u64() {
-                acc.output_tokens = Some(o as u32);
+                acc.output_tokens = Some(o.min(u32::MAX as u64) as u32);
             }
             if acc.input_tokens.is_some() || acc.output_tokens.is_some() {
                 out.push(LlmEvent::Usage {
@@ -1271,11 +1296,11 @@ fn openai_parse(payload: &str, acc: &mut ToolAcc) -> Result<Vec<LlmEvent>, Provi
         let input = u
             .get("prompt_tokens")
             .and_then(|t| t.as_u64())
-            .map(|t| t as u32);
+            .map(|t| t.min(u32::MAX as u64) as u32);
         let output = u
             .get("completion_tokens")
             .and_then(|t| t.as_u64())
-            .map(|t| t as u32);
+            .map(|t| t.min(u32::MAX as u64) as u32);
         acc.input_tokens = input;
         acc.output_tokens = output;
         if input.is_some() || output.is_some() {
