@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { briefToText, probeSummary, videoBriefToText } from "./dock-format";
 import { DEFAULT_BATCH_RECIPE, EMPTY_BATCH_RUN } from "./batch";
-import { AGENT_EVENT_CHANNEL } from "./bridge";
+import { AGENT_EVENT_CHANNEL, SESSION_EVENT_CHANNEL } from "./bridge";
 import { STALL_SECONDS, blankDocument, undoBudget, useStore, type WorkflowParams } from "./store";
 import { publishLocal } from "./local-bus";
 import type {
@@ -1720,6 +1720,117 @@ describe("删除会话要先问过，失败了还得留着", () => {
     expect(useStore.getState().sessions.map((s) => s.id)).toEqual(["doc-a"]);
     expect(useStore.getState().notice?.isError).toBe(true);
     delete invokeErrors["session_drop"];
+  });
+});
+
+// 这一组守着「外部改了，界面得跟着改」。前端以前只在自己动作之后重拉列表，
+// 外部进程通过 MCP 建/删/改名的账 Rust 都记完了，这边却一条消息都没收到——
+// 用户看着自己刚点过「创建」而屏幕纹丝不动，只会原样再发一次。
+describe("外部 MCP 改动会话簿（session-event）", () => {
+  /** 一条会话概览：侧栏摆的名字和画布尺寸都从它身上读。 */
+  function sessionOf(width: number, height: number, label = "一号模型"): SessionInfo {
+    return {
+      id: "s-2",
+      model_id: "m1",
+      model_label: label,
+      roles: [],
+      width,
+      height,
+      revision: 0,
+      title: null,
+      order: 2,
+    };
+  }
+
+  /** 往 session-event 通道上发一条载荷，和 Rust 的 SessionListChanged 同形。 */
+  function publishSessions(sessions: SessionInfo[], focus: string | null): void {
+    publishLocal(SESSION_EVENT_CHANNEL, { sessions, focus });
+  }
+
+  /** 起一次 boot 把各条通道的订阅挂上。boot 幂等，之后测试只改状态、发事件。 */
+  async function bootOnce(): Promise<void> {
+    invokeResults["session_list"] = [];
+    invokeResults["workflow_catalog"] = [];
+    await useStore.getState().boot();
+  }
+
+  /** 切会话会顺带走好几趟 invoke，这里一次备齐。 */
+  function stubLoadOf(sessions: SessionInfo[], id: string, doc: PixelDocument): void {
+    invokeResults["session_list"] = sessions;
+    invokeResults["agent_history"] = [];
+    invokeResults["agent_document"] = { id, revision: doc.revision, document: doc };
+    invokeResults["workflow_catalog"] = [];
+  }
+
+  it("外部建画布：侧栏多一条，并且真的切过去", async () => {
+    await bootOnce();
+    const a = { ...sessionOf(64, 64), id: "doc-a", order: 1 };
+    const b = { ...sessionOf(32, 32), id: "doc-b", order: 2 };
+    useStore.setState({ sessions: [a], activeId: "doc-a", entries: [] });
+    stubLoadOf([a, b], "doc-b", blankDocument(32, 32));
+
+    publishSessions([a, b], "doc-b");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(useStore.getState().sessions.map((s) => s.id)).toEqual(["doc-a", "doc-b"]);
+    expect(useStore.getState().activeId).toBe("doc-b");
+  });
+
+  it("外部改名：侧栏跟着变，当前会话与画面都不动", async () => {
+    await bootOnce();
+    const a = { ...sessionOf(64, 64), id: "doc-a", order: 1, title: null };
+    const renamed = { ...a, title: "橘猫项目" };
+    const doc = blankDocument(64, 64);
+    useStore.setState({ sessions: [a], activeId: "doc-a", document: doc, revision: doc.revision });
+    invokeCalls.length = 0;
+
+    publishSessions([renamed], null);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(useStore.getState().sessions[0].title).toBe("橘猫项目");
+    expect(useStore.getState().activeId).toBe("doc-a");
+    // 不该为了改个名字把整份文档重新读一遍。
+    expect(invokeCalls.some((call) => call.cmd === "agent_document")).toBe(false);
+  });
+
+  it("外部删掉当前会话：不继续挂在一个不存在的 id 上", async () => {
+    await bootOnce();
+    const a = { ...sessionOf(64, 64), id: "doc-a", order: 1 };
+    const b = { ...sessionOf(64, 64), id: "doc-b", order: 2 };
+    useStore.setState({ sessions: [a, b], activeId: "doc-a", document: blankDocument(64, 64) });
+    stubLoadOf([b], "doc-b", blankDocument(64, 64));
+
+    publishSessions([b], null);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(useStore.getState().sessions.map((s) => s.id)).toEqual(["doc-b"]);
+    expect(useStore.getState().activeId).toBe("doc-b");
+  });
+
+  it("外部删光会话：落到「当前没有会话」的空状态", async () => {
+    await bootOnce();
+    const a = { ...sessionOf(64, 64), id: "doc-a", order: 1 };
+    useStore.setState({ sessions: [a], activeId: "doc-a", document: blankDocument(64, 64) });
+    invokeResults["session_list"] = [];
+
+    publishSessions([], null);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(useStore.getState().sessions).toEqual([]);
+    expect(useStore.getState().activeId).toBeNull();
+    expect(useStore.getState().document).toBeNull();
+  });
+
+  it("载荷缺 sessions 就当没这条：不把侧栏清空，也不抛", async () => {
+    await bootOnce();
+    const a = { ...sessionOf(64, 64), id: "doc-a", order: 1 };
+    useStore.setState({ sessions: [a], activeId: "doc-a" });
+
+    publishLocal(SESSION_EVENT_CHANNEL, { focus: "doc-a" });
+    publishLocal(SESSION_EVENT_CHANNEL, null);
+
+    expect(useStore.getState().sessions.map((s) => s.id)).toEqual(["doc-a"]);
+    expect(useStore.getState().activeId).toBe("doc-a");
   });
 });
 

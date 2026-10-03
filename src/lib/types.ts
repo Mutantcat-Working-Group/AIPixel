@@ -217,6 +217,14 @@ export interface SessionInfo {
   order: number;
 }
 
+/** `session-event` 通道的载荷：会话簿变了。带着整份列表，前端不用再追问一次。
+ *  `focus` 只在外部新建/导入时给：请前端把活动会话切过去，否则用户在界面上
+ *  看不见自己刚通过 MCP 创建的那个画布。 */
+export interface SessionListChanged {
+  sessions: SessionInfo[];
+  focus: string | null;
+}
+
 /** 会话里的一种模型分工。chat 就是会话主模型，另外三个能另绑一个。 */
 export type ModelRole = "chat" | "image_gen" | "vision" | "video";
 

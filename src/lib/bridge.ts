@@ -35,6 +35,7 @@ import type {
   PixelDocument,
   RecipeImportReport,
   SessionInfo,
+  SessionListChanged,
   StrokeRequest,
   ImageGenParams,
   PixelizeParams,
@@ -53,6 +54,11 @@ import type {
 export const AGENT_EVENT_CHANNEL = "agent-event";
 
 export const BATCH_EVENT_CHANNEL = "batch-event";
+
+/** Rust 广播「会话簿变了」的通道：新建、删除、改名、外部导入、改尺寸。
+ *  和 agent-event 分开是因为后者带 session_id，前端会用它把「别人家会话」的事
+ *  滤掉；而会话簿变化没有单一归属，塞进去只会在那道过滤关口消失。 */
+export const SESSION_EVENT_CHANNEL = "session-event";
 
 /** Rust 在关窗前广播的通道：问前端「有没有没存的工程」。 */
 export const CLOSE_EVENT_CHANNEL = "app-close-requested";
@@ -514,6 +520,14 @@ export function importBatchRecipes(path: string): Promise<RecipeImportReport> {
 
 export function listenBatchEvents(handler: (event: BatchEvent) => void): Promise<UnlistenFn> {
   return listenSafe<BatchEvent>(BATCH_EVENT_CHANNEL, handler);
+}
+
+/** 订阅会话簿变化。载荷带着整份列表，不必再追问一次 listSessions。
+ *  `focus` 是 Rust 请前端切过去的会话 id，只在外部新建/导入时给。 */
+export function listenSessionList(
+  handler: (event: SessionListChanged) => void,
+): Promise<UnlistenFn> {
+  return listenSafe<SessionListChanged>(SESSION_EVENT_CHANNEL, handler);
 }
 
 // ---------- 工作台编辑器与审批 ----------

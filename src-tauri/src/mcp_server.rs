@@ -1004,9 +1004,9 @@ async fn dispatch(
 ) -> Result<ToolOutcome, String> {
     match name {
         "list_sessions" => tool_list_sessions(state),
-        "create_canvas" => tool_create_canvas(state, args),
-        "drop_canvas" => tool_drop_canvas(state, args),
-        "rename_canvas" => tool_rename_canvas(state, args),
+        "create_canvas" => tool_create_canvas(state, app, args),
+        "drop_canvas" => tool_drop_canvas(state, app, args),
+        "rename_canvas" => tool_rename_canvas(state, app, args),
         "get_canvas" => tool_get_canvas(state, args),
         "canvas_preview" => tool_canvas_preview(state, args),
         "paint_stroke" => tool_paint_stroke(state, app, args),
@@ -1017,7 +1017,7 @@ async fn dispatch(
         "list_export_formats" => tool_list_export_formats(),
         "export_canvas" => tool_export_canvas(state, args),
         "save_project" => tool_save_project(state, args),
-        "import_project" => tool_import_project(state, args),
+        "import_project" => tool_import_project(state, app, args),
         "import_image" => tool_import_image(state, app, args),
         "prompt_agent" => tool_prompt_agent(state, app, args).await,
         "interrupt_agent" => tool_interrupt_agent(state, args),
@@ -1143,13 +1143,20 @@ fn session_infos(state: &AppState) -> Vec<SessionInfo> {
     infos
 }
 
-fn tool_create_canvas(state: &AppState, args: &Value) -> Result<ToolOutcome, String> {
+fn tool_create_canvas(
+    state: &AppState,
+    app: Option<&AppHandle>,
+    args: &Value,
+) -> Result<ToolOutcome, String> {
     let width = arg_u32(args, "width")?;
     let height = arg_u32(args, "height")?;
     let name = arg_opt_str(args, "name");
     let doc = sized_document(width, height, name.clone())?;
     let session = state.create_session(doc, name);
     let info = session_info(&session);
+    // 外部建的新画布要让界面上看得见：侧栏多一条，并且焦点挪过去。
+    // 少了这一步，用户看着屏幕以为调用失败了，会原样再发一次。
+    emit_session_list(state, app, Some(info.id.clone()));
     let structured = json!(info);
     let text = format!(
         "created canvas \"{}\" ({}), {}x{}",
@@ -1161,10 +1168,17 @@ fn tool_create_canvas(state: &AppState, args: &Value) -> Result<ToolOutcome, Str
     Ok(ToolOutcome::text_only(text, structured))
 }
 
-fn tool_drop_canvas(state: &AppState, args: &Value) -> Result<ToolOutcome, String> {
+fn tool_drop_canvas(
+    state: &AppState,
+    app: Option<&AppHandle>,
+    args: &Value,
+) -> Result<ToolOutcome, String> {
     let id = arg_str(args, "id")?;
     state.session(&id)?;
     state.drop_session(&id);
+    // 不带 focus：删掉的会话不配再抢焦点。若它正是界面当前那个，
+    // 前端自己从剩下的里挑一个——界面不能继续挂在一个不存在的 id 上。
+    emit_session_list(state, app, None);
     let structured = json!({ "dropped": id });
     Ok(ToolOutcome::text_only(
         format!("dropped canvas session {id}"),
@@ -1172,11 +1186,18 @@ fn tool_drop_canvas(state: &AppState, args: &Value) -> Result<ToolOutcome, Strin
     ))
 }
 
-fn tool_rename_canvas(state: &AppState, args: &Value) -> Result<ToolOutcome, String> {
+fn tool_rename_canvas(
+    state: &AppState,
+    app: Option<&AppHandle>,
+    args: &Value,
+) -> Result<ToolOutcome, String> {
     let id = arg_str(args, "id")?;
     let title = arg_str(args, "title")?;
     let session = state.session(&id)?;
     session.set_title(Some(title.clone()));
+    // 侧栏显示的就是这个标题：不广播的话，改完名字界面还是旧名字，
+    // 下一次用户改回来会发现「咦它其实已经叫这个了」。
+    emit_session_list(state, app, None);
     let structured = json!({ "id": id, "title": title });
     Ok(ToolOutcome::text_only(
         format!("renamed {id} to \"{title}\""),
@@ -1419,6 +1440,9 @@ fn tool_resize_canvas(
         "canvas resized from {old_width}x{old_height} to {width}x{height}"
     ));
     emit_change(app, &session);
+    // 侧栏每条会话都挂着 WxH：画布那份广播只管画面，宽高得另说一句。
+    // 缩放不在高频路径上（一次改动一次 IPC），不心疼。
+    emit_session_list(state, app, None);
     // 外部进程改的画布也是用户的资产，一样要落盘。
     state.note_sessions_dirty();
     let structured = json!({ "id": id, "revision": revision, "width": width, "height": height });
@@ -1543,7 +1567,11 @@ fn tool_save_project(state: &AppState, args: &Value) -> Result<ToolOutcome, Stri
     ))
 }
 
-fn tool_import_project(state: &AppState, args: &Value) -> Result<ToolOutcome, String> {
+fn tool_import_project(
+    state: &AppState,
+    app: Option<&AppHandle>,
+    args: &Value,
+) -> Result<ToolOutcome, String> {
     let path = arg_str(args, "path")?;
     let name = arg_opt_str(args, "name");
     let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {path}: {e}"))?;
@@ -1557,6 +1585,8 @@ fn tool_import_project(state: &AppState, args: &Value) -> Result<ToolOutcome, St
     });
     let session = state.create_session(doc, title);
     let info = session_info(&session);
+    // 导入的就是一份新工程：和 create_canvas 一样要让用户看见并切过去。
+    emit_session_list(state, app, Some(info.id.clone()));
     let structured = json!(info);
     Ok(ToolOutcome::text_only(
         format!(
@@ -1787,6 +1817,17 @@ fn tool_interrupt_agent(state: &AppState, args: &Value) -> Result<ToolOutcome, S
 fn emit_change(app: Option<&AppHandle>, session: &AgentSession) {
     if let Some(app) = app {
         workflow::emit_document(app, session);
+    }
+}
+
+/// 会话簿变化 -> 前端侧栏。
+///
+/// 只给 create / drop / rename / import_project 用：这四个动的是「有哪些会话」
+/// 本身，画布一笔未动，前端要重画的是侧栏而不是画布。`focus` 只给新建类操作——
+/// 外部模型刚建好的那个画布，用户在界面上得能看见，否则这一趟白跑。
+fn emit_session_list(state: &AppState, app: Option<&AppHandle>, focus: Option<String>) {
+    if let Some(app) = app {
+        crate::commands::emit_session_list(app, session_infos(state), focus);
     }
 }
 

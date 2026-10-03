@@ -168,6 +168,44 @@ pub struct SessionInfo {
     pub order: u64,
 }
 
+/// 会话簿变化专用通道。
+///
+/// 为什么不搭 `agent-event` 的车：那条通道的载荷带 `session_id`，前端据此判断
+/// 「这件事是不是在说我当前这个会话」。而会话簿的变化（新建、删除、改名）没有
+/// 单一归属——一次 `create_canvas` 之后，侧栏整条都要重画。塞进 agent-event
+/// 只会在那道过滤关口被当成「别人家的事」丢掉。
+///
+/// 同理它是全局通道而不是每会话一条：侧栏本来就只有一份。
+pub const SESSION_EVENT_CHANNEL: &str = "session-event";
+
+/// 会话簿变了。带着整份列表，前端不必为了知道「多了哪一条」再追问一次
+/// `listSessions`——追问这一下和「改的时候」差着几毫秒，侧栏会先显示旧列表
+/// 再跳一下，用户看到的就是一次闪烁。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionListChanged {
+    pub sessions: Vec<SessionInfo>,
+    /// 非空 = 请前端把活动会话切到它身上。
+    ///
+    /// 只给「新建」类操作用：用户在界面上看不见自己刚通过外部模型创建的那个画布，
+    /// 这一趟就等于没发生。删除不带它——删掉的会话不配再抢一次焦点；
+    /// 前端自己会从剩下的里挑一个。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focus: Option<String>,
+}
+
+/// 把会话簿变化广播给 webview。发不出去就静默：用户可能已经关了窗口，
+/// 而 MCP 那一侧该记的账已经记完了，不该为了没人看而报错。
+pub(crate) fn emit_session_list(
+    app: &AppHandle,
+    sessions: Vec<SessionInfo>,
+    focus: Option<String>,
+) {
+    let _ = app.emit(
+        SESSION_EVENT_CHANNEL,
+        SessionListChanged { sessions, focus },
+    );
+}
+
 /// 会话 -> 前端视图。前后端契约的唯一出口：Arc、文档原文、api_key
 /// 都在这一层截断，后端形状再怎么变，前端拿到的一直是这份扁平结构。
 pub(crate) fn session_info(session: &AgentSession) -> SessionInfo {

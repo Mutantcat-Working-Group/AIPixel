@@ -600,6 +600,8 @@ let unlisten: (() => void) | null = null;
 let restoreChain: Promise<unknown> = Promise.resolve();
 // 批量跑在独立通道上，与 agent-event 各听一条，互不打扰。
 let batchUnlisten: (() => void) | null = null;
+// 会话簿变化（外部 MCP 建/删/改名、导入、改尺寸）常住一条通道。
+let sessionUnlisten: (() => void) | null = null;
 // 关窗问询也常住一条：Rust 按住窗口时只有它能应答，注销了就等于没人应答。
 let closeUnlisten: (() => void) | null = null;
 let booting: Promise<void> | null = null;
@@ -844,6 +846,53 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       unsub = useStore.subscribe((state) => {
         if (!state.running) finish(true);
       });
+    });
+  }
+
+  /**
+   * session-event 路由：会话簿变了。补的是「外部改了，界面不动」这一整类问题。
+   *
+   * 在这之前，前端只在**自己**动作之后才 refreshSessions。外部进程通过 MCP
+   * 建一个画布、删一个、改个名，Rust 那边账都记完了，可这边一条消息都没收到，
+   * 侧栏和画面纹丝不动——用户看着自己刚点过「创建」而什么都没发生，
+   * 只会原样再发一次，于是外部那边堆起一串重复画布。
+   */
+  async function ensureSessionListener() {
+    if (sessionUnlisten) return;
+    sessionUnlisten = await bridge.listenSessionList((raw) => {
+      // 形状不对就当没这条：旧版本 Runtime 没这个通道，或者载荷被截断了。
+      if (!raw || !Array.isArray(raw.sessions)) return;
+      const sessions = sortSessions(raw.sessions);
+      const state = getState();
+      const alive = new Set(sessions.map((session) => session.id));
+
+      // 活动会话被外部删掉了：不能继续挂在一个不存在的 id 上，
+      // 否则用户往画布上画的每一笔都落进空气，还以为是自己点错了地方。
+      let activeId = state.activeId;
+      let orphaned = false;
+      if (activeId !== null && !alive.has(activeId)) {
+        // 取剩下里 order 最大的那条（= 最新的），和开机时的取法一致。
+        activeId = sessions.length ? sessions[sessions.length - 1].id : null;
+        orphaned = true;
+      }
+      setState({ sessions, activeId });
+
+      // Rust 点名要我们看这个：外部新建/导入的画布。必须真的切过去，
+      // 只在侧栏加一条的话，用户根本不知道新画布在哪儿。
+      const focus = typeof raw.focus === "string" ? raw.focus : null;
+      if (focus && alive.has(focus) && focus !== state.activeId) {
+        void getState().selectSession(focus);
+        return;
+      }
+      // 没被点名但当前这条已经死了：得把它的画面撤掉。
+      // 一条都不剩就是空状态，「当前没有会话」本身是个正常状态。
+      if (orphaned) {
+        if (activeId === null) {
+          setState({ document: null, entries: emptyTranscript(), frameIndex: 0 });
+        } else {
+          void getState().selectSession(activeId);
+        }
+      }
     });
   }
 
@@ -1242,6 +1291,9 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         await ensureListener();
         // 批量通道与会话无关，开机听上就行：用户随时可能从工作台起一趟。
         await ensureBatchListener();
+        // 会话簿通道也在读簿子之前挂：早一步挂上，外部在开机这半秒里建的
+        // 会话才不会掉进「读完了但还没人听」的那道缝里。
+        await ensureSessionListener();
         // 关窗值守：开机就登记，之后每一下关闭都先问前端。
         await ensureCloseGuard();
         let models: ModelsView;
@@ -1272,18 +1324,22 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         sessions = sortSessions(sessions);
         const first = sessions[sessions.length - 1];
         if (first) {
-        setState({ sessions, activeId: first.id });
-        await loadDocument(first.id);
-      } else {
-        // 一条都没有就空着。「当前没有会话，您可以创建」是个正常状态，
-        // 开机悄悄补一个的话，侧栏里永远躺着个没打开过的 s1。
-        setState({ sessions: [], activeId: null, document: null });
-        // 但空状态下也别让用户自己发现「原来得点那个 +」：开机头一回
-        // 主动把新建弹窗递上去。关过一次就把这个标记关掉，之后再不打扰。
-        if (!readCreatePromptDismissed()) {
-          setState({ createPromptOpen: true });
+          // 可能已经有人把活动会话定下来了：外部 MCP 在这半秒里创建画布时
+          // 会带着 focus 广播过来，那一下正是最该跟着变的时候。此处再拿
+          // 开机默认值去盖，用户就又回到「界面没反应」的老问题上了。
+          const activeId = getState().activeId ?? first.id;
+          setState({ sessions, activeId });
+          await loadDocument(activeId);
+        } else {
+          // 一条都没有就空着。「当前没有会话，您可以创建」是个正常状态，
+          // 开机悄悄补一个的话，侧栏里永远躺着个没打开过的 s1。
+          setState({ sessions: [], activeId: null, document: null });
+          // 但空状态下也别让用户自己发现「原来得点那个 +」：开机头一回
+          // 主动把新建弹窗递上去。关过一次就把这个标记关掉，之后再不打扰。
+          if (!readCreatePromptDismissed()) {
+            setState({ createPromptOpen: true });
+         }
         }
-      }
         setState({ booted: true });
       })();
       booting = attempt;
