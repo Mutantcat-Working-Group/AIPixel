@@ -254,22 +254,42 @@ pub async fn list_models(config: &ModelConfig) -> Result<Vec<String>, ProviderEr
             }
         };
         let status = resp.status();
-        let body = super::http::read_text(
+        // 成功路径必须读完整 body：这份 JSON 是要解析的，不是给人看的。
+        // 曾经这里和错误分支共用 read_text(..., 400)——那个 400 是给错误报文
+        // 定的展示上限，砍到 400 字符之后一份正常的模型清单正好断在数组中间，
+        // serde 解析失败 → 空清单 → 用户只看到「没有返回可用模型」，
+        // 而 provider 那头好端端地活着。读失败也不能吞：吞了就是同一句空清单。
+        let body = match super::http::read_capped(
             resp,
             super::http::TEXT_BODY_CAP,
             super::http::ONESHOT_TIMEOUT,
-            400,
         )
         .await
-        .unwrap_or_default();
+        {
+            Ok(buf) => String::from_utf8_lossy(&buf).into_owned(),
+            Err(failure) => {
+                last_err = Some(failure.into_error());
+                continue;
+            }
+        };
         if !status.is_success() {
             last_err = Some(ProviderError::Http {
                 status: status.as_u16(),
-                body,
+                body: truncate_chars(&body, 400),
             });
             continue;
         }
-        return Ok(extract_model_ids(&body));
+        // 200 但内容不是模型清单（网关把管理面板的 HTML 吐回来、空 body、
+        // 或者一个不含 data 的对象）：这不是「provider 没有模型」，
+        // 回报空清单等于让用户以为软件坏了。换下一个候选端点试试，
+        // 全都不是才把 body 开头片段摆出来给人看。
+        if let Some(ids) = parse_model_ids(&body) {
+            return Ok(ids);
+        }
+        last_err = Some(ProviderError::Decode(format!(
+            "the endpoint answered 200 but not a model list (body starts with: {})",
+            truncate_chars(body.trim(), 120)
+        )));
     }
     Err(last_err.unwrap_or_else(|| ProviderError::Config("no model list endpoint".into())))
 }
@@ -297,23 +317,25 @@ fn origin_of(base: &str) -> Option<String> {
 
 /// 从 `GET /models` 的响应里抠出 id 列表，去重排序。
 /// Anthropic 和 OpenAI 两边的字段名都是 `data[].id`，所以一份解析吃两头。
-fn extract_model_ids(body: &str) -> Vec<String> {
+///
+/// `None` 表示这份 body 压根不是模型列表：JSON 都算不上，或者连 `data` 数组
+/// 都没有（网关把管理面板的 HTML 吐回来就是这一种）。调用方据此换下一个
+/// 候选端点，而不是回报一句「没有可用模型」——那会让用户以为软件坏了。
+fn parse_model_ids(body: &str) -> Option<Vec<String>> {
     let Ok(value) = serde_json::from_str::<Value>(body) else {
-        return Vec::new();
+        return None;
     };
-    let mut ids: Vec<String> = value
-        .get("data")
-        .and_then(|d| d.as_array())
-        .map(|rows| {
-            rows.iter()
-                .filter_map(|row| row.get("id").and_then(|id| id.as_str()))
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
+    // 空数组也是「是模型列表，只是没模型」：这个答案要原样交回去，
+    // 不能和「不是模型列表」混为一谈，否则空清单的 provider 会被误报成出错。
+    let rows = value.get("data")?.as_array()?;
+    let mut ids: Vec<String> = rows
+        .iter()
+        .filter_map(|row| row.get("id").and_then(|id| id.as_str()))
+        .map(str::to_string)
+        .collect();
     ids.sort();
     ids.dedup();
-    ids
+    Some(ids)
 }
 
 #[cfg(test)]
@@ -325,7 +347,7 @@ mod tests {
     fn reads_the_openai_list_shape() {
         let body = r#"{"object":"list","data":[{"id":"gpt-4o-mini"},{"id":"gpt-4o"}]}"#;
         assert_eq!(
-            extract_model_ids(body),
+            parse_model_ids(body).expect("这是一份模型清单"),
             vec!["gpt-4o".to_string(), "gpt-4o-mini".to_string()]
         );
     }
@@ -335,7 +357,7 @@ mod tests {
     fn reads_the_anthropic_list_shape() {
         let body = r#"{"data":[{"type":"model","id":"claude-sonnet-4-5","display_name":"Claude Sonnet 4.5"}],"has_more":false}"#;
         assert_eq!(
-            extract_model_ids(body),
+            parse_model_ids(body).expect("这是一份模型清单"),
             vec!["claude-sonnet-4-5".to_string()]
         );
     }
@@ -430,17 +452,134 @@ mod tests {
     fn dedups_and_sorts_ids() {
         let body = r#"{"data":[{"id":"qwen-plus"},{"id":"deepseek-chat"},{"id":"qwen-plus"}]}"#;
         assert_eq!(
-            extract_model_ids(body),
+            parse_model_ids(body).expect("这是一份模型清单"),
             vec!["deepseek-chat".to_string(), "qwen-plus".to_string()]
         );
     }
 
-    /// 端点通了但不是模型清单（比如返回了一页 HTML），就当没拉到，别把噪声当选项。
+    /// 「不是清单」和「清单是空的」必须分开：前者该换下一个候选端点，
+    /// 后者是 provider 真的没模型。混成一谈的症状就是用户明明配好了 provider，
+    /// 界面上只有一句「没有返回可用模型」——因为一份被砍断的正常 JSON
+    /// 也被算成了「不是清单」，而空清单的答案又被一句空话带过。
     #[test]
-    fn returns_nothing_when_the_payload_is_not_a_model_list() {
-        assert!(extract_model_ids("<html>login</html>").is_empty());
-        assert!(extract_model_ids(r#"{"object":"list"}"#).is_empty());
-        assert!(extract_model_ids(r#"{"data":[]}"#).is_empty());
+    fn separates_not_a_list_from_an_empty_list() {
+        // HTML 页面、空 body、没有 data 的对象：统统不是模型列表。
+        assert_eq!(parse_model_ids("<html>login</html>"), None);
+        assert_eq!(parse_model_ids(""), None);
+        assert_eq!(parse_model_ids(r#"{"object":"list"}"#), None);
+        assert_eq!(parse_model_ids(r#"{"data":"not-an-array"}"#), None);
+        // data 是数组但空着：是清单，只是没模型。这个答案要能回去。
+        assert_eq!(parse_model_ids(r#"{"data":[]}"#).as_deref(), Some(&[][..]));
+        // 砍断的 JSON 同样不是清单——这正是设置里点「获取」拿到空清单的那条路径。
+        let whole = r#"{"data":[{"id":"alpha"},{"id":"beta"},{"id":"gamma"}]}"#;
+        assert_eq!(
+            parse_model_ids(whole).as_deref(),
+            Some(&["alpha".to_string(), "beta".to_string(), "gamma".to_string()][..])
+        );
+        let cut = &whole[..40];
+        assert_eq!(parse_model_ids(cut), None, "{cut}");
+    }
+
+    /// 起一个只回一份固定报文的本地端点，返回它的地址。只服务一次：
+    /// 测试打一枪就走，多媒体 Serving 是别的测试的事。
+    async fn spawn_models_endpoint(body: String) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                // 请求头读到就行，内容是什么不影响这份死板的回复。
+                let mut sink = [0u8; 1024];
+                let _ = socket.read(&mut sink).await;
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(reply.as_bytes()).await;
+                let _ = socket.flush().await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// 真实回归：一份超过 400 字符的正常清单必须整份解析出来。
+    /// 曾经的 bug 是成功路径和错误分支共用 `read_text(..., 400)`——那个 400 是
+    /// 给错误报文定的展示上限，砍下去之后 JSON 正好断在数组中间，serde 解析
+    /// 失败 → 空清单 → 用户只看到「没有返回可用模型」，而 provider 好端端活着。
+    #[tokio::test]
+    async fn a_long_model_list_is_not_truncated_away() {
+        let ids: Vec<String> = (0..60).map(|i| format!("vendor/model-{i:02}")).collect();
+        let rows: Vec<String> = ids.iter().map(|id| format!(r#"{{"id":"{id}"}}"#)).collect();
+        let body = format!(r#"{{"object":"list","data":[{}]}}"#, rows.join(","));
+        // 前提：body 真得超过那个 400 字符的展示上限，不然测不到点上。
+        assert!(
+            body.len() > 400,
+            "测试 body 只有 {} 字符，先把它弄长",
+            body.len()
+        );
+        let config = ModelConfig {
+            id: "long".into(),
+            label: String::new(),
+            protocol: Protocol::OpenAiCompat,
+            base_url: spawn_models_endpoint(body).await,
+            api_key: "k".into(),
+            model: String::new(),
+            max_tokens: None,
+            temperature: None,
+            disable_thinking: None,
+            capabilities: Default::default(),
+        };
+        let got = list_models(&config).await.expect("长清单也该拉得到");
+        assert_eq!(got, ids);
+    }
+
+    /// 200 但body 不是模型清单（网关把管理面板 HTML 吐回来）时，要给一条
+    /// 看得出原因的报错，不能回报空清单让人以为软件坏了。
+    #[tokio::test]
+    async fn a_non_list_body_reports_why_instead_of_an_empty_list() {
+        let config = ModelConfig {
+            id: "html".into(),
+            label: String::new(),
+            protocol: Protocol::OpenAiCompat,
+            base_url: spawn_models_endpoint("<!doctype html><title>New API</title>".into()).await,
+            api_key: "k".into(),
+            model: String::new(),
+            max_tokens: None,
+            temperature: None,
+            disable_thinking: None,
+            capabilities: Default::default(),
+        };
+        let err = list_models(&config)
+            .await
+            .expect_err("HTML 不该被当成空清单");
+        let text = err.to_string();
+        assert!(text.contains("not a model list"), "{text}");
+        assert!(
+            text.contains("New API"),
+            "报错里要带上 body 片段，实际 {text}"
+        );
+    }
+
+    /// 端点真的一个模型都没有时，空清单是正确答案，不该报错。
+    #[tokio::test]
+    async fn a_genuinely_empty_list_is_reported_as_empty() {
+        let config = ModelConfig {
+            id: "empty".into(),
+            label: String::new(),
+            protocol: Protocol::OpenAiCompat,
+            base_url: spawn_models_endpoint(r#"{"object":"list","data":[]}"#.into()).await,
+            api_key: "k".into(),
+            model: String::new(),
+            max_tokens: None,
+            temperature: None,
+            disable_thinking: None,
+            capabilities: Default::default(),
+        };
+        assert_eq!(
+            list_models(&config).await.expect("空清单不是故障"),
+            Vec::<String>::new()
+        );
     }
 
     /// base_url 带路径时补一个裸域名候选，让只认域名的中转也能通。
