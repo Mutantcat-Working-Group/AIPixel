@@ -7,7 +7,6 @@
 [English](README.en.md) | 中文
 
 ### 一、产品概述
-<img width="64" height="64" alt="untitled" src="https://github.com/user-attachments/assets/dbb4620f-4560-4db6-b90c-9be20f3c629c" />
 
 - AI像素画（AIPixel）是一款跑在本机的像素画 Agent 桌面工具：左侧会话、中间对话、右侧画布，一次对话产出一份 `.aip`。
 - **BYOM（自带模型）**：没有内置服务器、没有登录、没有计费。模型只来自你在界面里自己填的 Provider（Anthropic / OpenAI 兼容），地址与密钥只存在本机。
@@ -20,6 +19,7 @@
 - 让模型画像素画，最怕它一口气「手写」一屏色号，改一个像素要重画整张图。这里把生图路径收窄成七条受预算约束的工具，模型的自由度留给结构、构图、脚本和垫图。
 - 画布不是给人看的截图，而是唯一权威状态：图层、帧、配色范围都是一等公民，改一处、撤销一处、导出一处，前后端是同一份东西。
 - 桌面版双击即用，模型配置、MCP 服务器、批量配方全部只在本机，不上传任何服务器。
+- <img width="64" height="64" alt="untitled" src="https://github.com/user-attachments/assets/dbb4620f-4560-4db6-b90c-9be20f3c629c" />
 
 ### 二、功能说明
 
