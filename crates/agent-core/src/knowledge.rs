@@ -40,6 +40,16 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         body: "Drive every limb from ONE phase variable. A 4-beat walk spreads the four legs over 0 / 0.25 / 0.5 / 0.75; a trot uses two diagonal pairs a half cycle apart. Lift a foot only while it swings forward - lift = max(0, sin(2pi*phase)) - and keep it planted while it travels back. The body bobs at twice the step frequency and the head counter-bobs a little. Close the loop: the last frame has to flow back into the first.",
     },
     KnowledgeEntry {
+        id: "anim-catalog",
+        title: "Action catalogue and animation specs",
+        keywords: &[
+            "动作表", "动作列表", "动作库", "技能", "攻击", "施法", "死亡", "受伤", "动作帧数", "循环吗",
+            "action list", "action catalogue", "action catalog", "animation set", "animation spec",
+            "attack", "cast", "hurt", "die", "interact", "crouch", "roll", "swim",
+        ],
+        body: "Take frame counts and rates from the action catalogue, not from feel: idle 2-4 frames at 6-8 fps, walk 4-6 at 8-12, run 4-6 at 12-16, jump 4-6, fall 2-4, attack 3-6 at 12-16, hurt 2-3, die 4-6 at 6-10, cast 4-8, interact 2-4, climb 4-6, crouch 2-3, roll 4-6, swim 4-6. Slow actions take fewer frames held longer; fast actions take more frames held briefly. One action per row in the strip, every frame the same canvas size, the subject anchored inside one shared box so only the moving parts shift. Name them <asset>_<action>_<number> and state for each action whether it loops or plays once.",
+    },
+    KnowledgeEntry {
         id: "locomotion",
         title: "Gaits: walk, trot, canter, gallop, flight",
         keywords: &[
@@ -77,10 +87,29 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         body: "A multi-frame deliverable inherits the rhythm of its motion: keep subject placement and palette byte-identical across the strip so only the moving limbs change, park the key and contact poses at the ends of the row and space the in-betweens evenly between them, then hold each key pose one duration longer than its briefs. Keep the ground line, the light direction and the body outline the same on every frame - a limb that drifts one pixel mid-loop reads as a glitch, not as motion. Read the frames back before finishing: a tool result shows the active frame only, so a limb that wanders out of the body on frame three is invisible unless you look at all of them.",
     },
     KnowledgeEntry {
+        id: "target-platform",
+        title: "Target platform and export constraints",
+        keywords: &[
+            "目标平台", "引擎", "游戏引擎", "平台限制", "导给",
+            "engine", "platform", "console", "retro console", "unity", "godot", "rpg maker",
+            "gamemaker", "game maker", "gdevelop", "nes", "snes",
+        ],
+        body: "Read the destination off the request and honour it. Unity: 32-128px, power-of-two sizes, clean alpha edges. Godot: 16-64px, the import filter set to Nearest. RPG Maker MV/MZ: 48x48 cells, characters as 1x4 strips per direction, tilesets A1-A5 by function. GameMaker: watch the sprite origin, usually bottom-centre for a character. Web: 8-64px, keep the file small and let the consumer slice the plain sheet. Retro console: three or four colours per sprite plus transparent, 16x16 or 32x32 cells, and attribute clashing decides the palette per 8 or 16 pixel row. When the user names no engine, deliver the plain sheet plus a manifest that records the size and palette, and let them slice it.",
+    },
+    KnowledgeEntry {
         id: "tilemap",
         title: "Tilesets and tilemaps",
-        keywords: &["瓦片", "地图", "地块", "瓷砖", "平铺", "tilemap", "tile map", "tileset", "tile set", "tiles", "无缝平铺"],
-        body: "Work on a cell grid (8/16/32px) and make every tile edge-welding so rows repeat without seams. Ship a small variant set - base plus two or three edge and corner transitions - instead of one big picture. Share ONE light direction and ONE ramp per material across the whole set, then draw at 1x and verify by repeating the tile twice in each axis.",
+        keywords: &["瓦片", "地图", "地块", "瓷砖", "平铺", "程序化", "值噪声", "配比", "tilemap", "tile map", "tileset", "tile set", "tiles", "无缝平铺"],
+        body: "Procedural beats hand-drawn: lay the base value with value noise, smooth it with cosine interpolation, then quantise hard into the ramp - anything freehand reads as decoration. Colour it by probability: about 70% of cells the base value, 15% one step lighter, 10% one step darker, and at most 5% sparse features (pebble, crack, tuft) with no single feature over 1% of the tile. Make every edge weld: fill two pixels in from each border with the wrap rule and hold edge contrast to within one ramp step so the seam disappears. Keep the tile strictly quantised - one stray value announces the grid. Never draw a black outline on a tile. Then verify: repeat the tile 2x2, 4x4 and 6x6 and read the result, and confirm the rotations and mirrors read as different tiles. Work on a cell grid of 8, 16 or 32, keep ONE light direction and ONE ramp per material across the whole set, and author it at exactly 1x.",
+    },
+    KnowledgeEntry {
+        id: "tile-edges",
+        title: "Tile edges and transition pieces",
+        keywords: &[
+            "瓦片边缘", "瓦片衔接", "接缝", "过渡瓦片", "地块过渡", "角块", "边缘块",
+            "tile edge", "edges", "corner", "corners", "transition", "bitmask", "autotile", "welding",
+        ],
+        body: "Ship the minimum nine-piece set - centre, four straight edges, four corners - welded so the centre band repeats and the corners close the loop, instead of one big picture. Drive grime and terrain transitions with a bitmask over the eight neighbours (four orthogonals plus four diagonals; byte 47, autotile 5x3) rather than a manual table of every combination. Cell size follows the engine: 16 for NES / SNES and RPG Maker 2000, 32 as the general middle, 48 for RPG Maker MV/MZ, 64 for HD sets. The whole set shares one light direction, one ramp per material and one outline rule, and is authored at exactly 1x - drawing big and downscaling smears the edges.",
     },
     KnowledgeEntry {
         id: "dithering",
@@ -99,6 +128,26 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         title: "Outline strategy",
         keywords: &["勾线", "描边", "轮廓线", "线稿", "outline", "outlines", "line art", "hard edge"],
         body: "Pick ONE strategy for the whole drawing and keep it consistent, and the default is a solid outline on every shape: users read an outlined sprite as finished and an un-outlined one as an unfinished fill. Hue-shift the outline toward the surface color instead of using pure black on a saturated body, or it eats the silhouette - take the local hue a few steps darker rather than inventing a black. Keep outlines 1px at 32px and above; below 16px skip them entirely, or drop them everywhere only when the user asked for no outline, fog or backlight.",
+    },
+    KnowledgeEntry {
+        id: "pixel-discipline",
+        title: "Pixel discipline and colour budget",
+        keywords: &[
+            "硬边", "硬像素", "色数", "色板限制", "配色预算", "统一光向", "严禁", "禁止出现",
+            "anti-aliasing", "antialiasing", "gradient fill", "colour budget", "color budget",
+            "palette limit", "budget", "restrictions",
+        ],
+        body: "What breaks a pixel drawing is mostly habit carried over from vector art: anti-aliasing on the silhouette, sub-pixel placement, gradient fills, local transparency, blur, bezier handles, and any colour outside the palette. Fix the light direction once for the whole project - default top-left - and never flip it halfway. The colour budget is per image, not per shape: 3 for minimalist, 4-6 under 32px, 3 per sprite plus transparent on NES, 15 for SNES-style, 31 for a modern look, 47 for a dense illustration. Sizes that stay clean: 8, 16, 24, 32, 48, 64, 96, 128, 256. Draw at exactly 1x - resampling afterwards turns clusters into mush.",
+    },
+    KnowledgeEntry {
+        id: "asset-classes",
+        title: "Asset classes and deliverables",
+        keywords: &[
+            "资产类型", "素材分类", "交付物", "素材清单", "分类一下", "这类素材",
+            "分类", "素材", "清单",
+            "asset class", "deliverable", "asset breakdown", "categories", "category",
+        ],
+        body: "Six deliverable classes, each with its own contract. CHARACTERS: 32-64px, side or three-quarter view, a pose readable in four frames. TILES: follow the tilemap and tile-edge rules. ITEMS: centred with a one or two pixel margin, silhouette readable at a glance, no cast shadow. UI: nine-slice the frame - corners keep their exact size, edges repeat, centre stretches - 1px hard borders and a 2px minimum hit area. EFFECTS: 4-8 frames, transparent background, no outline, brightest at the start and dissolved by the end. BACKGROUNDS: 96-160px, far planes take less contrast, no single focal subject. Decide the class from the user's words first: a well-drawn thing in the wrong class is unusable.",
     },
     KnowledgeEntry {
         id: "pixel-clusters",
@@ -127,6 +176,16 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         title: "Palette design",
         keywords: &["调色板", "配色", "色板", "配色方案", "palette", "color scheme", "swatch", "colors"],
         body: "Decide the palette before drawing, then spend only its steps: one dominant hue family, one accent, and a neutral ramp. Give each material its own ramp. Tiny canvases (under 32px) hold 4-6 colors; 64px and up can carry 12-20 without turning to noise.",
+    },
+    KnowledgeEntry {
+        id: "palette-library",
+        title: "Curated palette library",
+        keywords: &[
+            "调色板库", "经典配色", "配色库", "用现成的配色", "色板套用",
+            "pico-8", "pico8", "db32", "endesga", "resurrect", "sweetie", "nuclear blaze",
+            "mushi", "curated palette", "named palette", "open palette", "famous palette",
+        ],
+        body: "A curated palette often beats an invented one: PICO-8 (16), DB32 (32), Endesga 32, Sweetie 16, Nuclear Blaze 8, Mushi 8, Resurrect 64, Ink 5. Pick by feel: DB32 or Resurrect for general game art, Endesga for a colourful youthful look, PICO-8 for retro jams, Nuclear Blaze or Mushi for tight two-tone noir, Sweetie for cute palettes, Ink for a single-colour mono look. A locked palette is a constraint that buys discipline: no colour outside the set, and the light and dark steps come from neighbouring entries in the palette rather than from a hue shift. Recommend a named palette when the user asked for a house style but described no colours of their own, and record the palette name in the deliverable manifest.",
     },
     KnowledgeEntry {
         id: "lighting",
@@ -1145,5 +1204,45 @@ mod tests {
             .iter()
             .any(|e| e.id == "sheep-goat"));
         assert_eq!(retrieve("画一把长剑", 4)[0].id, "blade");
+    }
+
+    /// 规范层那几条新条目要真能被原话捞出来。用户嘴上说的都是
+    /// 「画个 UI 面板给 unity」「来个带攻击动作的角色」这种带契约的话，
+    /// 这几条检索不到就等于白说——而它们恰好是决定成败的那一半。
+    #[test]
+    fn the_spec_layer_entries_surface() {
+        for (query, id) in [
+            ("画一套可平铺的草地瓦片，要无缝", "tilemap"),
+            ("给我的 unity 项目导出这套序列帧", "target-platform"),
+            ("瓦片边缘怎么衔接才不露缝", "tile-edges"),
+            ("画一个 app 图标，注意色数", "pixel-discipline"),
+            ("帮我列一下这套素材的交付分类", "asset-classes"),
+            ("用 db32 的配色画一个角色", "palette-library"),
+            ("配上 idle 和 attack 的动作，各多少帧", "anim-catalog"),
+        ] {
+            let hits = retrieve(query, 4);
+            assert!(
+                hits.iter().any(|e| e.id == id),
+                "'{query}' 没捞出 {id}：{:?}",
+                hits.iter().map(|e| e.id).collect::<Vec<_>>()
+            );
+        }
+        // 「平滑曲线」是 smooth-curves 的主场，别因为 pixel-discipline 也收了
+        // 抗锯齿就被抢走——同分时靠库内顺序兜底，那太脆。
+        assert_eq!(
+            retrieve("尾巴画条平滑的抗锯齿曲线", 4)[0].id,
+            "smooth-curves"
+        );
+        // 长条目全命中也要压得住预算。
+        let text = prompt_section(
+            "瓦片 无缝 平铺 边缘 引擎 unity db32 色数 交付 分类 动作表",
+            8,
+            DEFAULT_BUDGET,
+        );
+        assert!(
+            text.chars().count() <= DEFAULT_BUDGET,
+            "{}",
+            text.chars().count()
+        );
     }
 }

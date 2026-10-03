@@ -17,6 +17,7 @@ pub mod context;
 pub mod decode;
 pub mod document;
 pub mod ops;
+pub mod palette_files;
 pub mod palettes;
 pub mod patch;
 pub mod pixelize;

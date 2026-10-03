@@ -12,17 +12,19 @@ mod commands;
 mod editor;
 mod mcp;
 mod mcp_server;
+mod sessions;
 mod state;
 mod workflow;
 
 mod batch;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tauri::Manager;
 
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         // 托管 Arc 而不是裸值：MCP 服务端是一条长命任务，它要在几十秒里
@@ -37,6 +39,14 @@ pub fn run() {
             // 设了「开着」就把 MCP 服务端拉起来。放在 bootstrap 之后：
             // 配置目录要先定位完，端口改动才落得了盘。
             mcp_server::start_if_enabled(&app_state, &handle);
+            let autosave = app_state.clone();
+            // 会话簿的自动落盘。刻意用一条普通线程而不是异步任务：
+            // 这里只有序列化和写盘，没有需要 await 的东西，普通线程连
+            // 「运行时什么时候来」都不必操心，天然不会和主线程的 IPC 抢节奏。
+            std::thread::spawn(move || loop {
+                std::thread::sleep(Duration::from_millis(sessions::AUTOSAVE_INTERVAL_MS));
+                autosave.flush_sessions();
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -113,7 +123,18 @@ pub fn run() {
             batch::batch_recipe_import,
             batch::batch_recipes_list,
             batch::batch_recipe_save,
-        ])
-        .run(tauri::generate_context!())
+        ]);
+    let app = builder
+        .build(tauri::generate_context!())
         .expect("error while running AIPixel");
+    // 退出前强写一次会话簿。异步循环有两秒间隔，用户改完名字紧接着关窗，
+    // 那一下不能等——也不该赌进程一定活得到下一个刻度。
+    app.run(|handle, event| {
+        if let tauri::RunEvent::Exit = event {
+            handle
+                .state::<Arc<state::AppState>>()
+                .inner()
+                .flush_sessions();
+        }
+    });
 }

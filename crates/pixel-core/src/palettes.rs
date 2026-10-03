@@ -133,11 +133,20 @@ pub fn unique_palette_id(existing: &[NamedPalette], base: &str) -> String {
 
 /// 把内置预设复制成一套可改的。改内置预设时界面与操作层都走这里，
 /// 保证「动了内置就落到副本上，原来的那套一个像素都不变」。
-pub fn fork_builtin(source: &NamedPalette, existing: &[NamedPalette]) -> NamedPalette {
+///
+/// `name` 是调用方拼好的名字（界面语言决定的「副本 / copy」后缀已经带上），
+/// 所以得由外面给：预设本身的名字是产品语言，抄出来的副本却是用户眼前的那一份，
+/// 界面是中文时不该在侧栏里冒出一句 "Sweetie 16 copy"。空串退回旧写法——
+/// 模型直接调 create_palette 时常常不带名字。
+pub fn fork_builtin(source: &NamedPalette, name: &str, existing: &[NamedPalette]) -> NamedPalette {
     let base = format!("{}-copy", slugify(&source.name));
     NamedPalette {
         id: unique_palette_id(existing, &base),
-        name: format!("{} copy", source.name),
+        name: if name.is_empty() {
+            format!("{} copy", source.name)
+        } else {
+            name.to_string()
+        },
         colors: source.colors.clone(),
         builtin: false,
     }
@@ -185,7 +194,9 @@ mod tests {
     fn fork_keeps_source_intact() {
         let existing = builtin_palettes();
         let source = existing.iter().find(|p| p.id == "pico8").unwrap();
-        let fork = fork_builtin(source, &existing);
+        // 名字由调用方给：界面是中文时副本不能叫 "PICO-8 copy"。
+        let fork = fork_builtin(source, "PICO-8 副本", &existing);
+        assert_eq!(fork.name, "PICO-8 副本");
         assert!(!fork.builtin);
         assert_ne!(fork.id, source.id);
         assert_eq!(fork.colors, source.colors);

@@ -189,6 +189,8 @@ pub fn editor_paint_stroke(
     let revision = session.with_document_mut(|doc| apply_stroke(doc, &stroke))?;
     session.note_edit(stroke_note(&stroke, &session.document()));
     emit_document(&app, &session);
+    // 一笔一画都要落盘：用户的笔触不能因为一次关机就没。
+    state.note_sessions_dirty();
     Ok(revision)
 }
 
@@ -213,6 +215,8 @@ pub fn editor_fill(
     })?;
     session.note_edit(fill_note(&fill));
     emit_document(&app, &session);
+    // 一笔一画都要落盘：用户的笔触不能因为一次关机就没。
+    state.note_sessions_dirty();
     Ok(revision)
 }
 
@@ -252,6 +256,8 @@ pub fn editor_resize_canvas(
         "canvas resized from {old_width}x{old_height} to {width}x{height}"
     ));
     emit_document(&app, &session);
+    // 一笔一画都要落盘：用户的笔触不能因为一次关机就没。
+    state.note_sessions_dirty();
     Ok(revision)
 }
 
@@ -269,6 +275,8 @@ pub fn editor_apply_ops(
         session.with_document_mut(|doc| ops::apply_batch(doc, &ops).map_err(|e| e.to_string()))?;
     session.note_edit(ops_note(&ops));
     emit_document(&app, &session);
+    // 一笔一画都要落盘：用户的笔触不能因为一次关机就没。
+    state.note_sessions_dirty();
     Ok(revision)
 }
 

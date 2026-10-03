@@ -5,8 +5,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_core::{
@@ -89,6 +89,14 @@ pub struct ModelsView {
 
 pub struct AppState {
     sessions: Mutex<HashMap<String, Arc<AgentSession>>>,
+    /// 会话簿脏标记。true = 有东西变了，异步循环该写盘了。
+    /// 异步循环每两秒看一眼，脏才序列化整份——一次改标题就写一遍全量画布，
+    /// 在一秒钟拖十次图层的用户手上就是十次磁盘。
+    sessions_dirty: AtomicBool,
+    /// 上一次写盘时各会话的廉价指纹（id、排序位、标题、模型、revision、历史条数）。
+    /// 用来判「什么都没变就不用再写」。刻意不含画布内容：那条太贵，
+    /// 而 revision 已经把每一次真正的落笔都覆盖到了。
+    sessions_fingerprint: Mutex<String>,
     models: Mutex<ModelsFile>,
     /// 运行护栏：续写、重试、纯思考的封顶值。所有会话共用一份。
     limits: Mutex<LoopLimits>,
@@ -115,6 +123,8 @@ impl Default for AppState {
     fn default() -> Self {
         AppState {
             sessions: Mutex::new(HashMap::new()),
+            sessions_dirty: AtomicBool::new(false),
+            sessions_fingerprint: Mutex::new(String::new()),
             models: Mutex::new(ModelsFile::default()),
             limits: Mutex::new(LoopLimits::DEFAULT),
             mcp_enabled: Mutex::new(true),
@@ -144,10 +154,126 @@ impl AppState {
             eprintln!("cannot save {label}: {e}");
         }
     }
+
+    /// 配置目录。测试里要能指到别处，所以不私有。
+    pub(crate) fn config_dir(&self) -> PathBuf {
+        self.config_dir
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// 会话簿落盘位置。和另三份配置待在同一个目录里。
+    pub(crate) fn sessions_path(&self) -> PathBuf {
+        self.config_dir().join("sessions.json")
+    }
+
+    /// 会话表的守卫。会话持久化要在锁内整批插入，所以不能只给只读接口。
+    pub(crate) fn sessions_guard(&self) -> MutexGuard<'_, HashMap<String, Arc<AgentSession>>> {
+        self.sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// 所有会话的 Arc 快照。刻意不把守卫交出去：序列化一份画布要花时间，
+    /// 这把锁不能陪着挂在那里，期间「列会话」「改标题」都得能进。
+    pub(crate) fn session_arcs(&self) -> Vec<Arc<AgentSession>> {
+        self.sessions_guard().values().cloned().collect()
+    }
+
+    /// 建号计数器的当前值，写盘用：恢复时要靠它把计数器顶回已用过的最大值之上。
+    pub(crate) fn counter_value(&self) -> u64 {
+        *self
+            .counter
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// 把建号计数器顶到至少 n。只向上，不向下：计数器倒退会让新会话抢到旧号。
+    pub(crate) fn bump_counter(&self, n: u64) {
+        let mut counter = self
+            .counter
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *counter < n {
+            *counter = n;
+        }
+    }
+
+    /// 标记会话簿该写盘了。各条改会话的命令都要调一次。
+    pub fn note_sessions_dirty(&self) {
+        self.sessions_dirty.store(true, Ordering::SeqCst);
+    }
+
+    /// 各会话的廉价指纹，用来判「什么都没变」。不含画布内容：
+    /// 序列化一份画布正是要省掉的那笔开销，而 revision 已覆盖每一次真正的落笔。
+    fn sessions_signature(&self) -> String {
+        use std::fmt::Write;
+        let mut out = String::new();
+        for session in self.session_arcs() {
+            let _ = write!(
+                out,
+                "{}|{}|{}|{}|{}|{}",
+                session.id(),
+                session.order(),
+                session.title().as_deref().unwrap_or(""),
+                session.model_config().id,
+                session.revision(),
+                session.history_len(),
+            );
+            out.push('\n');
+        }
+        out
+    }
+
+    /// 记下「现在这份就等于盘上那份」。开机恢复完立刻调一次：
+    /// 不记得的话，头两秒的轮询会把刚读回来的簿子原样再写一遍。
+    fn remember_sessions_signature(&self) {
+        let signature = self.sessions_signature();
+        *self
+            .sessions_fingerprint
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = signature;
+    }
+
+    /// 把会话簿写盘。什么都没变就什么都不做。
+    ///
+    /// 关机前也会被强叫一次（`RunEvent::Exit`）：异步循环有间隔，
+    /// 用户改完名字紧接着关窗，那一下不能等两秒。
+    pub fn flush_sessions(&self) {
+        // 先把脏标记取走：就算这次写失败，也不该下一轮又从头来一遍。
+        let forced = self.sessions_dirty.swap(false, Ordering::SeqCst);
+        let signature = self.sessions_signature();
+        if !forced
+            && signature
+                == *self
+                    .sessions_fingerprint
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            return;
+        }
+        let file = crate::sessions::build(self);
+        if let Ok(text) = serde_json::to_string_pretty(&file) {
+            let path = self.sessions_path();
+            self.write_config(&path, &text, "sessions.json");
+            *self
+                .sessions_fingerprint
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = signature;
+        }
+    }
+
+    /// 开机把会话簿读回来。返回恢复了几条。
+    pub fn restore_sessions(&self) -> usize {
+        let count = crate::sessions::restore(self);
+        self.remember_sessions_signature();
+        count
+    }
 }
 
 /// 给每个实例一个临时目录，免得并行单测互相盖同一份文件。
-fn scratch_config_dir() -> PathBuf {
+pub(crate) fn scratch_config_dir() -> PathBuf {
     static SEQ: AtomicU32 = AtomicU32::new(0);
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
     let nanos = SystemTime::now()
@@ -230,6 +356,12 @@ impl AppState {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = dir;
         self.load_models();
         self.load_limits();
+        // 会话簿要在模型配置之后读：恢复时要按 id 找回会话原本绑的那个模型定义，
+        // 读倒了只会让每个会话都落到「当前生效模型」上——画布还在，人却换了一批。
+        let restored = self.restore_sessions();
+        if restored > 0 {
+            eprintln!("restored {restored} session(s)");
+        }
         self.schedule_mcp_recovery();
         Ok(())
     }
@@ -446,6 +578,12 @@ impl AppState {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut entry = incoming;
         let changed_id = entry.id.clone();
+        // 「会思考」不再是用户勾的：按模型名自己推。勾选那一栏撤掉之后，
+        // 这一位仍然要有个准数——前端拿它决定占位气泡画成思考节点还是
+        // 「在处理」。判定走 `echoes_reasoning`：和 runner 判定「要不要
+        // 回传 reasoning_content」是同一张表，认得出 deepseek 简名与各家
+        // 变体，认不出的当非推理模型（最坏只是占位气泡的样式降级）。
+        entry.capabilities.reasoning = agent_core::providers::echoes_reasoning(&entry.model);
         if let Some(existing) = file.entries.iter_mut().find(|m| m.id == entry.id) {
             // 前端不一定是密钥的来源：留空表示沿用旧 key，避免密钥在 webview 里反复流转。
             if entry.api_key.trim().is_empty() {
@@ -637,6 +775,8 @@ impl AppState {
         {
             session.set_mcp_registry(None);
         }
+        // 新建的会话要落盘：不标记的话，用户建完会话就关窗，那一条是空的。
+        self.note_sessions_dirty();
         self.sessions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -694,6 +834,9 @@ impl AppState {
     }
 
     pub fn drop_session(&self, id: &str) {
+        // 删掉的那一笔也得落盘：光改内存的话，重启后这条会话又回来了，
+        // 用户以为自己删过，白白再删一遍。
+        self.note_sessions_dirty();
         let removed = self
             .sessions
             .lock()
@@ -715,6 +858,18 @@ pub fn default_document() -> Document {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 把配置目录指到一个指定位置。单测里「存一份再读回来」这条路要两个实例
+    /// 看同一个目录，默认那个每个实例都不相同的临时目录就无从写起。
+    impl AppState {
+        pub(crate) fn point_config_dir_at(&self, dir: PathBuf) {
+            std::fs::create_dir_all(&dir).expect("scratch dir");
+            *self
+                .config_dir
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = dir;
+        }
+    }
 
     #[test]
     fn the_mcp_switch_governs_both_new_and_living_sessions() {

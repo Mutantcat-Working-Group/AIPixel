@@ -575,7 +575,9 @@ pub fn apply_one(doc: &mut Document, op: &PixelOperation) -> Result<(), Operatio
                         .cloned()
                         .ok_or_else(|| OperationError::UnknownPalette(src_id.clone()))?;
                     if src.builtin {
-                        crate::palettes::fork_builtin(&src, &doc.palettes)
+                        // 名字由调用方给：副本挂在用户眼前，界面是中文就该叫
+                        // 「Sweetie 16 副本」，不是一句英文 copy。
+                        crate::palettes::fork_builtin(&src, name, &doc.palettes)
                     } else {
                         NamedPalette {
                             id: crate::palettes::unique_palette_id(

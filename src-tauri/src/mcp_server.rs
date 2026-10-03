@@ -1298,6 +1298,8 @@ fn tool_paint_stroke(
         color.clone().unwrap_or_else(|| "transparent".into())
     ));
     emit_change(app, &session);
+    // 外部进程改的画布也是用户的资产，一样要落盘。
+    state.note_sessions_dirty();
     let structured = json!({
         "id": id,
         "revision": revision,
@@ -1338,6 +1340,8 @@ fn tool_fill_region(
         color.clone().unwrap_or_else(|| "transparent".into())
     ));
     emit_change(app, &session);
+    // 外部进程改的画布也是用户的资产，一样要落盘。
+    state.note_sessions_dirty();
     let structured =
         json!({ "id": id, "revision": revision, "layer": layer, "frame": frame, "color": color });
     Ok(ToolOutcome::text_only(
@@ -1367,6 +1371,8 @@ fn tool_apply_ops(
         session.with_document_mut(|doc| ops::apply_batch(doc, &ops).map_err(|e| e.to_string()))?;
     session.note_edit(format!("apply_ops: {} operation(s)", ops.len()));
     emit_change(app, &session);
+    // 外部进程改的画布也是用户的资产，一样要落盘。
+    state.note_sessions_dirty();
     let structured = json!({ "id": id, "revision": revision, "applied": ops.len() });
     Ok(ToolOutcome::text_only(
         format!(
@@ -1401,6 +1407,8 @@ fn tool_resize_canvas(
         "canvas resized from {old_width}x{old_height} to {width}x{height}"
     ));
     emit_change(app, &session);
+    // 外部进程改的画布也是用户的资产，一样要落盘。
+    state.note_sessions_dirty();
     let structured = json!({ "id": id, "revision": revision, "width": width, "height": height });
     Ok(ToolOutcome::text_only(
         format!("resized {id} from {old_width}x{old_height} to {width}x{height}"),
@@ -1417,6 +1425,10 @@ fn tool_list_export_formats() -> Result<ToolOutcome, String> {
         { "id": "png", "extension": ".png", "description": "frame 的别名，等价于 frame 0" },
         { "id": "aseprite", "extension": ".ase", "description": "Aseprite 文件，图层与帧语义原样保留" },
         { "id": "ase", "extension": ".ase", "description": "aseprite 的别名" },
+        { "id": "gpl", "extension": ".gpl", "description": "GIMP Palette 调色板文件，跨工具最广" },
+        { "id": "pal", "extension": ".pal", "description": "JASC PAL 调色板文件，Aseprite / Photoshop 认" },
+        { "id": "act", "extension": ".act", "description": "Adobe Color Table，恒 256 槽，Autodesk / Maya / Substance 认" },
+        { "id": "manifest", "extension": ".json", "description": "交付清单：尺寸、色数、图层配色范围、帧时长" },
     ]);
     let structured = json!({
         "formats": formats,
@@ -1425,7 +1437,9 @@ fn tool_list_export_formats() -> Result<ToolOutcome, String> {
         ],
     });
     Ok(ToolOutcome::text_only(
-        "export formats: gif, sheet, strip, frame, png, aseprite, ase; project format: aip".into(),
+        "export formats: gif, sheet, strip, frame, png, aseprite, ase, gpl, pal, act, manifest; \
+         project format: aip"
+            .into(),
         structured,
     ))
 }
@@ -1591,6 +1605,8 @@ fn tool_import_image(
         "import_image: {src_w}x{src_h} bitmap onto {layer}/{frame}"
     ));
     emit_change(app, &session);
+    // 外部进程改的画布也是用户的资产，一样要落盘。
+    state.note_sessions_dirty();
     let structured = json!({
         "id": id,
         "revision": session.document().revision,
@@ -2492,10 +2508,49 @@ mod tests {
             .iter()
             .filter_map(|f| f["id"].as_str())
             .collect();
-        for want in ["gif", "sheet", "strip", "frame", "png", "aseprite", "ase"] {
+        for want in [
+            "gif", "sheet", "strip", "frame", "png", "aseprite", "ase", "gpl", "pal", "act",
+            "manifest",
+        ] {
             assert!(ids.contains(&want), "格式清单少了 {want}");
         }
         assert_eq!(out.structured["project_formats"][0]["id"], "aip");
+
+        // 调色板文件与交付清单也要真能导出来，不然清单上多一行就是空话。
+        for (format, magic) in [
+            ("gpl", b"GIMP Palette\n".to_vec()),
+            ("pal", b"RIFF\ndata\n".to_vec()),
+            ("manifest", b"{\n".to_vec()),
+        ] {
+            let path = root.join(format!("cat.{format}"));
+            dispatch(
+                &state,
+                None,
+                "export_canvas",
+                &json!({"id": id, "format": format, "path": path.to_str().unwrap()}),
+            )
+            .await
+            .unwrap();
+            let bytes = std::fs::read(&path).unwrap();
+            assert!(
+                bytes.starts_with(&magic),
+                "{format} 的文件头不对：{bytes:?}"
+            );
+        }
+        // ACT 是二进制魔数 8BCB，长度恒 778。
+        let act = root.join("cat.act");
+        dispatch(
+            &state,
+            None,
+            "export_canvas",
+            &json!({"id": id, "format": "act", "path": act.to_str().unwrap()}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            &std::fs::read(&act).unwrap()[..4],
+            &[0x38, 0x42, 0x43, 0x42]
+        );
 
         // 导出到还没建的深层目录：脚本常直接指 engine/assets/ 下不存在的子目录。
         let deep = root.join("engine/assets/sprites/cat.png");

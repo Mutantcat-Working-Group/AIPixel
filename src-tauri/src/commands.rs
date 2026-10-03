@@ -249,6 +249,9 @@ pub fn session_rename(
 ) -> Result<SessionInfo, String> {
     let session = state.session(&id)?;
     session.set_title(Some(title));
+    // 名字变了要落盘：光改内存的话，重启后侧栏又显示回编号，
+    // 用户以为自己起过名，白起一遍。
+    state.note_sessions_dirty();
     Ok(session_info(&session))
 }
 
@@ -262,6 +265,9 @@ pub fn session_reorder(state: State<'_, Arc<AppState>>, ids: Vec<String>) -> Res
         // 从 1 起排：0 留给还没落位的会话。
         session.set_order(index as u64 + 1);
     }
+    // 拖动后的新次序是用户的资产：指纹里虽然带着排序位，这里再显式标一次，
+    // 免得哪次「排序位恰好没变」就把一次白拖给吞了。
+    state.note_sessions_dirty();
     Ok(())
 }
 
@@ -282,6 +288,7 @@ pub fn session_bind_model(
     let session = state.session(&id)?;
     let config = state.model_config(&model_id)?;
     session.rebind_provider(config);
+    state.note_sessions_dirty();
     Ok(session_info(&session))
 }
 
@@ -301,6 +308,7 @@ pub fn session_bind_role(
     }
     let config = state.model_config(&model_id)?;
     session.rebind_role(role, config);
+    state.note_sessions_dirty();
     Ok(session_info(&session))
 }
 
@@ -316,6 +324,7 @@ pub fn session_clear_role(
         return Err("the chat role is the session model itself; rebind the session instead".into());
     }
     session.clear_role(role);
+    state.note_sessions_dirty();
     Ok(session_info(&session))
 }
 
@@ -468,6 +477,10 @@ pub fn agent_sync_document(
         .validated()
         .map_err(|e| format!("invalid document: {e}"))?;
     session.sync_document(doc);
+    // `sync_document` 有意不动 revision（广播基准另有一份账），所以指纹抓不到它；
+    // 这里的显式标记就是补口子的那一下——漏了它，用户回灌整份文档后立刻关窗，
+    // 回来的还是上一个版本的画布。
+    state.note_sessions_dirty();
     Ok(serde_json::json!({ "revision": session.revision() }))
 }
 
@@ -523,7 +536,8 @@ fn fallback_frame_index(doc: &pixel_core::document::Document, active_frame: &str
 
 /// 把整个动画导出到磁盘：`gif` 走无限循环动画，`sheet` 走 PNG spritesheet。
 /// `ase`/`aseprite` 写 Aseprite 文件（图层+帧语义原样保留），`frame` 写单帧 PNG
-/// （`frame` 参数即帧索引，缺省第一帧），`strip` 把所有帧横向铺成一张 PNG。
+/// （`frame` 参数即帧索引，缺省第一帧），`strip` 把所有帧横向铺成一张 PNG，
+/// `gpl`/`pal`/`act` 各写一份调色板文件，`manifest` 写一份 JSON 交付清单。
 /// `columns` 为 0 或 None 时 spritesheet 排成一行。
 ///
 /// 用户选什么扩展名就写什么字节，引擎和素材库各取所需，不做二次确认。
@@ -573,6 +587,11 @@ pub(crate) fn export_canvas_bytes(
             let img = pixel_core::sheet::spritesheet(doc, columns.unwrap_or(0));
             pixel_core::png::encode_png(&img)?
         }
+        // 三套调色板文件：同一个区间，三种行业标准。下游按自己的工具选，
+        // 不用先自己从 PNG 里数像素点。`palette_files` 里写明各是什么格式。
+        "gpl" | "pal" | "act" => pixel_core::palette_files::encode(doc, format)?,
+        // 交付清单：尺寸、色数、图层配色范围、帧时长，一篇说完。
+        "manifest" => pixel_core::palette_files::encode_manifest(doc),
         other => return Err(format!("unsupported export format: {other}")),
     })
 }

@@ -1300,6 +1300,18 @@ impl AgentSession {
             .clone()
     }
 
+    /// 历史消息条数，不克隆内容。
+    ///
+    /// 上面那个 `history()` 会把整份对话（含每条工具结果）拷一份出来：会话持久化
+    /// 每隔两秒就要问一次「历史有没有变长」，用它在轮询路径上等于每两秒把整场对话
+    /// 复制一遍。条数这个答案足够判断「要不要落盘」了。
+    pub fn history_len(&self) -> usize {
+        self.messages
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+
     pub fn load_history(&self, messages: Vec<Message>) {
         *self
             .messages
