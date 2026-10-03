@@ -87,6 +87,16 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         body: "A multi-frame deliverable inherits the rhythm of its motion: keep subject placement and palette byte-identical across the strip so only the moving limbs change, park the key and contact poses at the ends of the row and space the in-betweens evenly between them, then hold each key pose one duration longer than its briefs. Keep the ground line, the light direction and the body outline the same on every frame - a limb that drifts one pixel mid-loop reads as a glitch, not as motion. Read the frames back before finishing: a tool result shows the active frame only, so a limb that wanders out of the body on frame three is invisible unless you look at all of them.",
     },
     KnowledgeEntry {
+        id: "sheet-layouts",
+        title: "Layout templates and character facings",
+        keywords: &[
+            "朝向", "四个方向", "四向", "八向", "侧视", "排版模板", "素材模板", "几行几帧",
+            "sheet layout", "layout template", "facing", "facings", "direction", "directions",
+            "4-direction", "8-direction", "side view", "side only", "rows", "tile sheet", "ui sheet",
+        ],
+        body: "Layout is a contract, not a look. Character facings: 4-direction for a top-down RPG (down/up/left/right, one row each), 8-direction for directional movers, side-only for a platformer (one row mirrored), single for a portrait or card. This tool holds ONE strip per canvas, so one action per session and each facing its own session - never stack two actions in one strip. Template rows: 4-direction, 4 rows of 3-4 frames; RPG, 5 rows of 4-6; platformer, 5 rows of 4-6. Tiles: one cell basic, a 3x3 nine-piece autotile or 5x3 (byte 47), animated N frames in a row. Items: one cell, or 4-8 frames for a pickup spin. UI: a 3-cell strip or a 3x3 nine-slice. Every cell the same size and the subject anchored in one shared box so only the moving parts shift.",
+    },
+    KnowledgeEntry {
         id: "target-platform",
         title: "Target platform and export constraints",
         keywords: &[
@@ -428,7 +438,7 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "grid size",
             "how big",
         ],
-        body: "Read width and height from the canvas context and derive EVERY coordinate from them - a script with literal constants tuned for 64px blasts off the edge of a 24px canvas. Under 16 pixels the silhouette is the whole picture and outlines hurt; at 32-64 spend it on two or three signature details plus a 3-step ramp; at 96 and above loops and math pay for themselves and you can carry 4-5 ramp steps per material. Use canvas.scale(k) for a 64px-design constant, canvas.grid(cols, rows) for a cell grid, and canvas.cx / canvas.cy instead of a hand-computed centre.",
+        body: "Read width and height from the canvas context and derive EVERY coordinate from them - a script with literal constants tuned for 64px blasts off the edge of a 24px canvas. Under 16 pixels the silhouette is the whole picture and outlines hurt; at 32-64 spend it on two or three signature details plus a 3-step ramp; at 96 and above loops and math pay for themselves and you can carry 4-5 ramp steps per material. Use canvas.scale(k) for a 64px-design constant, canvas.grid(cols, rows) for a cell grid, and canvas.cx / canvas.cy instead of a hand-computed centre. Colour budget follows the canvas: 4 at 8x8, 8 at 16x16, 16 at 24 and 32, 24 at 48x48, 32 at 64x64, 48 at 128x128, 64 at 256, 96 at 512, 128 at 1024, 256 at 2048 - more colours on a small canvas buys noise, not detail.",
     },
     KnowledgeEntry {
         id: "quadruped",
@@ -1219,6 +1229,7 @@ mod tests {
             ("帮我列一下这套素材的交付分类", "asset-classes"),
             ("用 db32 的配色画一个角色", "palette-library"),
             ("配上 idle 和 attack 的动作，各多少帧", "anim-catalog"),
+            ("角色要上下左右四个朝向，每个朝向一套行走", "sheet-layouts"),
         ] {
             let hits = retrieve(query, 4);
             assert!(

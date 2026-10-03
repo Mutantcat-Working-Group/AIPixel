@@ -57,6 +57,25 @@ const BUILTIN_SPECS: &[BuiltinSpec] = &[
         ],
     },
     BuiltinSpec {
+        id: "nuclear8",
+        name: "Nuclear Blaze 8",
+        hex: &[
+            "#0c0c0c", "#3b1c1c", "#7a2e2e", "#b64545", "#d67b4e", "#e6a96e", "#f0d4a8", "#faf0e0",
+        ],
+    },
+    BuiltinSpec {
+        id: "mushi8",
+        name: "Mushi 8",
+        hex: &[
+            "#1b1b2b", "#3a3042", "#5c6158", "#8b9a7c", "#c4cfa4", "#e0dfc8", "#f2f0e0", "#faf8f0",
+        ],
+    },
+    BuiltinSpec {
+        id: "ink5",
+        name: "Ink 5",
+        hex: &["#000000", "#444444", "#888888", "#bbbbbb", "#ffffff"],
+    },
+    BuiltinSpec {
         id: "gameboy",
         name: "Game Boy",
         hex: &["#0f380f", "#306230", "#8bac0f", "#9bbc0f"],
