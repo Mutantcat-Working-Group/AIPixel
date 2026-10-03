@@ -368,8 +368,24 @@ export type EditorOperation =
 /** 落笔颜色：hex 字面量；null = 擦回透明（索引 0）。 */
 export type InkColor = string | null;
 
-/** 编辑器工具。橡皮是独立工具：落笔即擦回透明，不必先去调色板点到透明格。 */
-export type EditorTool = "brush" | "eraser" | "fill";
+/**
+ * 编辑器工具：一枚图标一个工具，全排在工具条同一行上。
+ *
+ * 画笔、橡皮、油漆桶各自独立自不必说，五种形状也占位而不是另开一个
+ * 「形状下拉」——「自由笔」和画笔是同一件事，分成两组只会让用户以为
+ * 少点了一个开关。形状实心与否另有一个独立的「实心」开关（见 `solid`）。
+ *
+ * 橡皮恒为独立工具：落笔即擦回透明，不必先去调色板点到透明格。
+ */
+export type EditorTool =
+  | "brush"
+  | "line"
+  | "rect"
+  | "ellipse"
+  | "triangle"
+  | "smooth"
+  | "fill"
+  | "eraser";
 
 export interface StrokeCell {
   x: number;

@@ -39,16 +39,20 @@ use serde_json::Value;
 /// 改只有一个地方要改。措辞刻意写成「一张画画完是什么意思」而不是又一条禁令，
 /// 模型对着一串否定词容易把手缩回去，最后什么都没画。
 pub const DEFAULT_QUALITY_TIER: &str = "the user named no style, so this is what a finished \
-drawing means here: ONE light direction (default top-left) honoured by every object; 4-5 \
-hue-shifted ramp steps per material at 64px and up, 3 under 32px, the darkest step placed just \
-past the terminator and never riding the silhouette edge; occlusion darkened one step wherever \
+drawing means here: ONE light direction honoured by every object, and when the user named none \
+no invented key light either - tops a half step lighter and undersides a half step darker off \
+the viewer's angle, with the cast shadow pooled beneath the form; 4-5 hue-shifted ramp steps per \
+material at 64px and up, 3 under 32px, the darkest step placed just past the terminator and \
+never riding the silhouette edge; one consistent solid outline, one pixel wide, in the darkened \
+hue of each shape and never pure black, around every shape; occlusion darkened one step wherever \
 two forms meet; half a step of the background colour bounced back under every lifted form; a \
 tight 1-2px contact shadow where the subject meets the ground, then a dithered falloff that \
 thins to nothing; two or three signature details placed last (a 2x2 pupil with a one-pixel \
 highlight, a pink inner ear, a lighter pad, a tapering tail); every curve that meets a \
 contrasting background drawn through the aa* family or blend() at 32px and up, never stair-stepped; \
-and one closing polish pass that adds only what the form already implies. Stop the moment the \
-subject reads at 1x - a crowded drawing is as wrong as a bare one.";
+one closing polish pass that adds only what the form already implies, then one self-review pass \
+that fixes what the first pass actually missed. Stop the moment the subject reads at 1x - a \
+crowded drawing is as wrong as a bare one, and a second redraw is wrong too.";
 
 /// 生图提示词出门前挂上的质量档。`None` 表示这一句没点名风格，走默认档。
 ///

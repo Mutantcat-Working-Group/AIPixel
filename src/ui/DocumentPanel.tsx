@@ -7,6 +7,7 @@ import {
   useState,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
+  type ReactNode,
 } from "react";
 import {
   Button,
@@ -28,6 +29,7 @@ import {
   ChevronsRight,
   Brush,
   Copy,
+  Droplet,
   Eraser,
   Eye,
   EyeOff,
@@ -92,6 +94,56 @@ function integerScale(
   return Math.max(1, Math.floor(Math.min(budget / width, maxHeight / height)));
 }
 
+/**
+ * 工具 -> 形状档位。画笔、橡皮、油漆桶是「点什么算什么」，没有形状；
+ * 其余五个工具本身就是形状的名字。
+ *
+ * 平滑曲线虽然也是形状，但它不吃锚点：采样点自己就是输入。所以预览和
+ * 拖动两处都要把它单独摘出来，别和「锚点 -> 松手」那一族混在一起。
+ */
+function shapeOf(tool: EditorTool): ShapeKind | null {
+  switch (tool) {
+    case "line":
+    case "rect":
+    case "ellipse":
+    case "triangle":
+    case "smooth":
+      return tool;
+    default:
+      return null;
+  }
+}
+
+/** 能吃「实心」开关的形状。直线只会描边，平滑曲线没有填充这一说。 */
+function canSolid(tool: EditorTool): boolean {
+  return tool === "line" || tool === "rect" || tool === "ellipse" || tool === "triangle";
+}
+
+/** 圆角只对矩形和三角形有意义：椭圆本来就滑，直线滑起来就不是直线了。 */
+function canCorner(tool: EditorTool): boolean {
+  return tool === "rect" || tool === "triangle";
+}
+
+/**
+ * 工具条上的一枚工具：图标 + 悬浮提示，不要文字。
+ *
+ * 工具条在 1168px 宽的窗口里只剩两百多像素，「画笔 / 矩形 / 三角形」一排
+ * 文字挤下去会折成三四行，把画布顶出视野。图标加提示既看得见是什么、
+ * 又只占一格宽，鼠标停一下就知道名字。
+ */
+function toolOption(value: EditorTool, tip: string, icon: ReactNode) {
+  return {
+    value,
+    label: (
+      <Tooltip title={tip}>
+        <span className="tile-label" aria-label={tip}>
+          {icon}
+        </span>
+      </Tooltip>
+    ),
+  };
+}
+
 /** 指针位置 -> 格子坐标。用实测矩形换算，CSS 缩放图片后格子也不会对不齐。 */
 function cellFromEvent(
   event: ReactMouseEvent<HTMLDivElement>,
@@ -143,13 +195,14 @@ export default function DocumentPanel() {
   const lang = useStore((s) => s.lang);
   const undoDepth = useStore((s) => s.undoStack.length);
   const redoDepth = useStore((s) => s.redoStack.length);
- const [tool, setTool] = useState<EditorTool>("brush");
-  // 形状档位：null = 自由笔。和「笔/橡皮/油漆桶」是两个维度——笔决定落什么色，
-  // 形状决定怎么走。油漆桶碰上形状时自动变成「实心形状」而不是泼油漆。
-  const [shape, setShape] = useState<ShapeKind | null>(null);
+  const [tool, setTool] = useState<EditorTool>("brush");
   // 形状的圆角量：短边比例，0 = 尖角。只对矩形/三角形有意义——
   // 椭圆本来就滑，直线滑起来就不是直线了。
   const [corner, setCorner] = useState(0);
+  // 实心开关：形状落下来是实心一块还是只描边。这是个独立维度，和「选哪个
+  // 工具」分开——早期把实心绑在油漆桶上，用户勾着填充拖矩形得到的是泼油漆，
+  // 而不是一块实心矩形，界面上还看不出来为什么。
+  const [solid, setSolid] = useState(false);
   const [aipText, setAipText] = useState<string | null>(null);
   const [aipOpen, setAipOpen] = useState(false);
   const [budget, setBudget] = useState(300);
@@ -379,8 +432,9 @@ export default function DocumentPanel() {
   function shapePreview(anchor: StrokeCell, now: StrokeCell): StrokeCell[] {
     // 形状的几何全在 shapes.ts 里收口：这里只说明语义（填充与否、圆角多少），
     // 每加一种形状或一个参数都不用回来改这段 switch。
-    if (!shape) return [];
-    return shapeCells(shape, anchor, now, { filled: tool === "fill", radius: corner });
+    const shape = shapeOf(tool);
+    if (!shape || shape === "smooth") return [];
+    return shapeCells(shape, anchor, now, { filled: solid, radius: corner });
   }
 
   function onPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
@@ -392,10 +446,10 @@ export default function DocumentPanel() {
     }
     const cell = cellFromEvent(event, document);
     if (!cell) return;
-    // 油漆桶只在没挂形状时才真泼油漆：勾着填充拖矩形，用户要的是一块实心，
-    // 不是把整个封闭区域染一遍。两种「填充」各有各的场合，互不占用。
-    if (tool === "fill" && !shape) {
-      // 油漆桶按下就生效，没有「墨迹」要预览。
+    // 油漆桶按下就生效，没有「墨迹」要预览。早期它一身兼两职：没挂形状时
+    // 泼油漆、挂了形状时变「实心形状」，而界面上一点提示都没有——用户看到
+    // 的就是「填充时好时坏」。现在实心是独立开关，油漆桶只管泼油漆。
+    if (tool === "fill") {
       void useStore.getState().fillCell(cell.x, cell.y, ink);
       return;
     }
@@ -423,6 +477,7 @@ export default function DocumentPanel() {
     if (!cell || !last) return;
     if (cell.x === last.x && cell.y === last.y) return;
     // 形状工具：锚点不动，整条形状按「锚点 -> 现在这一格」重算，预览即结果。
+    const shape = shapeOf(tool);
     if (shape && shape !== "smooth") {
       const anchor = shapeAnchorRef.current ?? cell;
       strokeRef.current = shapePreview(anchor, cell);
@@ -817,27 +872,32 @@ export default function DocumentPanel() {
       checked: tileMode === mode,
       onSelect: () => setTileMode(mode),
     });
+    // 工具全列出来，不只三个：右键菜单是「这条画布现在能怎么画」的唯一入口，
+    // 少一项用户就得回工具条找。勾在哪一项，就是现在手里拿的那个工具。
+    const pick = (value: EditorTool, label: string, icon: ReactNode): ContextMenuItem => ({
+      key: `tool-${value}`,
+      label,
+      icon,
+      checked: tool === value,
+      onSelect: () => setTool(value),
+    });
     openContextMenu(event, [
+      pick("brush", t("doc.brush"), <Brush size={13} />),
+      pick("line", t("doc.shape_line"), <Minus size={13} />),
+      pick("rect", t("doc.shape_rect"), <Square size={13} />),
+      pick("ellipse", t("doc.shape_ellipse"), <Circle size={13} />),
+      pick("triangle", t("doc.shape_triangle"), <Triangle size={13} />),
+      pick("smooth", t("doc.shape_smooth"), <PenTool size={13} />),
+      pick("fill", t("doc.fill"), <PaintBucket size={13} />),
+      pick("eraser", t("doc.eraser"), <Eraser size={13} />),
+      // 实心是形状的独立开关，跟着形状走：手拿画笔时它没意义。
       {
-        key: "brush",
-        label: t("doc.brush"),
-        icon: <Brush size={13} />,
-        checked: tool === "brush",
-        onSelect: () => setTool("brush"),
-      },
-      {
-        key: "fill",
-        label: t("doc.fill"),
-        icon: <PaintBucket size={13} />,
-        checked: tool === "fill",
-        onSelect: () => setTool("fill"),
-      },
-      {
-        key: "eraser",
-        label: t("doc.eraser"),
-        icon: <Eraser size={13} />,
-        checked: tool === "eraser",
-        onSelect: () => setTool("eraser"),
+        key: "solid",
+        label: t("doc.solid"),
+        icon: <Droplet size={13} />,
+        checked: solid,
+        disabled: !canSolid(tool),
+        onSelect: () => setSolid((value) => !value),
       },
       {
         key: "undo",
@@ -957,117 +1017,67 @@ export default function DocumentPanel() {
   return (
     <aside className="panel doc">
       <div className="doc-preview">
-        <div className="canvas-tools">
+        {/* 第一行只放「工具」这一件事：八枚图标一个轴，永远不折行。
+            早期这里把「笔/填充/橡皮」和「自由/线/矩形…」拆成两组，结果
+            「画笔」和「自由」是同一个功能，「填充」在两处含义还不一样——
+            用户看到的就是「三个画笔没区别、填充时好时坏」。现在归一：
+            八个工具各占一格，实心和圆角是它们共用的开关。 */}
+        <div className="canvas-tools core">
           <Segmented
             size="small"
             value={tool}
             onChange={(value) => setTool(value as EditorTool)}
             options={[
-              {
-                value: "brush",
-                label: (
-                  <span className="tool-label">
-                    <Brush size={13} /> {t("doc.brush")}
-                  </span>
-                ),
-              },
-              {
-                value: "fill",
-                label: (
-                  <span className="tool-label">
-                    <PaintBucket size={13} /> {t("doc.fill")}
-                  </span>
-                ),
-              },
-             {
-               value: "eraser",
-               label: (
-                 <span className="tool-label">
-                   <Eraser size={13} /> {t("doc.eraser")}
-                 </span>
-               ),
-             },
-           ]}
-         />
-          {/* 形状档位：和笔/橡皮/填充各管一件事。选了下拉形状就按「锚点 -> 松手」
-              那一格出结果，选「自由」回到原来的随手画。填充勾着时形状自动变实心。 */}
-          <Tooltip title={t("doc.shape_tip")}>
-            <Segmented
-              size="small"
-              value={shape ?? "free"}
-              onChange={(value) =>
-                setShape(value === "free" ? null : (value as ShapeKind))
-              }
-              options={[
-                {
-                  value: "free",
-                  label: (
-                    <span className="tool-label">
-                      <Pencil size={13} /> {t("doc.shape_free")}
-                    </span>
-                  ),
-                },
-                {
-                  value: "line",
-                  label: (
-                    <span className="tile-label" aria-label={t("doc.shape_line")}>
-                      <Minus size={14} />
-                    </span>
-                  ),
-                },
-                {
-                  value: "rect",
-                  label: (
-                    <span className="tile-label" aria-label={t("doc.shape_rect")}>
-                      <Square size={14} />
-                    </span>
-                  ),
-                },
-                {
-                  value: "ellipse",
-                  label: (
-                    <span className="tile-label" aria-label={t("doc.shape_ellipse")}>
-                      <Circle size={14} />
-                    </span>
-                  ),
-                },
-                {
-                  value: "triangle",
-                  label: (
-                    <span className="tile-label" aria-label={t("doc.shape_triangle")}>
-                      <Triangle size={14} />
-                    </span>
-                  ),
-                },
-                {
-                  value: "smooth",
-                  label: (
-                    <span className="tile-label" aria-label={t("doc.shape_smooth")}>
-                      <PenTool size={14} />
-                    </span>
-                  ),
-                },
-              ]}
-            />
-          </Tooltip>
-          {/* 圆角档：跟在形状后面，只在该圆角有意义的形状上出现。
-              用户提过「基础图形太突兀，画细节要平滑曲线」——矩形和三角的尖角
-              是突兀感的来源，这里把它们让成圆弧；椭圆和直线不给这个档。 */}
-          {(shape === "rect" || shape === "triangle") && (
-            <Tooltip title={t("doc.corner_tip")}>
-              <Segmented
+              toolOption("brush", t("doc.tool_brush"), <Brush size={14} />),
+              toolOption("line", t("doc.shape_line"), <Minus size={14} />),
+              toolOption("rect", t("doc.shape_rect"), <Square size={14} />),
+              toolOption("ellipse", t("doc.shape_ellipse"), <Circle size={14} />),
+              toolOption("triangle", t("doc.shape_triangle"), <Triangle size={14} />),
+              toolOption("smooth", t("doc.shape_smooth"), <PenTool size={14} />),
+              toolOption("fill", t("doc.tool_fill"), <PaintBucket size={14} />),
+              toolOption("eraser", t("doc.tool_eraser"), <Eraser size={14} />),
+            ]}
+          />
+          {/* 形态选项自成一组：实心开关 + 圆角档。右栏定宽 330px，八枚图标
+              已经贴边，这组整块折到工具下一行（见 .tool-mods 的注），内部
+              仍是一行——绝不并排挤压，一挤按钮就成细条，横向还滚出栏外。 */}
+          <div className="tool-mods">
+            {/* 实心开关：形状落下来是一块还是只描边。只对形状有意义，
+                手拿画笔/橡皮/油漆桶时它置灰，不会让人以为点了没反应。 */}
+            <Tooltip title={solid ? t("doc.solid_on") : t("doc.solid_off")}>
+              <Button
                 size="small"
-                value={corner}
-                onChange={(value) => setCorner(value as number)}
-                options={[
-                  { value: 0, label: <span className="tile-label">{t("doc.corner_sharp")}</span> },
-                  { value: 0.2, label: <span className="tile-label">{t("doc.corner_small")}</span> },
-                  { value: 0.35, label: <span className="tile-label">{t("doc.corner_mid")}</span> },
-                  { value: 0.5, label: <span className="tile-label">{t("doc.corner_big")}</span> },
-                ]}
+                type="text"
+                aria-label={solid ? t("doc.solid_on") : t("doc.solid_off")}
+                icon={<Droplet size={14} />}
+                className={solid ? "tool-on" : ""}
+                disabled={!canSolid(tool)}
+                onClick={() => setSolid((value) => !value)}
               />
             </Tooltip>
-          )}
+            {/* 圆角档：跟在形状后面，只在该圆角有意义的形状上出现。
+                用户提过「基础图形太突兀，画细节要平滑曲线」——矩形和三角的尖角
+                是突兀感的来源，这里把它们让成圆弧；椭圆和直线不给这个档。 */}
+            {canCorner(tool) && (
+              <Tooltip title={t("doc.corner_tip")}>
+                <Segmented
+                  size="small"
+                  value={corner}
+                  onChange={(value) => setCorner(value as number)}
+                  options={[
+                    { value: 0, label: <span className="tile-label">{t("doc.corner_sharp")}</span> },
+                    { value: 0.2, label: <span className="tile-label">{t("doc.corner_small")}</span> },
+                    { value: 0.35, label: <span className="tile-label">{t("doc.corner_mid")}</span> },
+                    { value: 0.5, label: <span className="tile-label">{t("doc.corner_big")}</span> },
+                  ]}
+                />
+              </Tooltip>
+            )}
+          </div>
+        </div>
+        {/* 第二行是「看着办」的档位：瓦片、播放、洋葱皮、撤销重做。它们
+            不参与落笔，所以窄一点没关系，放不下了自然折到下一行。 */}
+        <div className="canvas-tools">
           {/* 瓦片底图：平铺开才看得出接缝。选项格号就是倍率，不用再多解释。 */}
           <Tooltip title={t("doc.tile_tip")}>
             <Segmented

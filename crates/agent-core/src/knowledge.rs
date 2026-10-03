@@ -98,7 +98,7 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         id: "outlines",
         title: "Outline strategy",
         keywords: &["勾线", "描边", "轮廓线", "线稿", "outline", "outlines", "line art", "hard edge"],
-        body: "Pick ONE strategy for the whole drawing - solid dark, darker only on the shadowed side, or none - and keep it consistent. Hue-shift the outline toward the surface color instead of using pure black on a saturated body, or it eats the silhouette. Keep outlines 1px at 32px and above; below 16px skip them entirely.",
+        body: "Pick ONE strategy for the whole drawing and keep it consistent, and the default is a solid outline on every shape: users read an outlined sprite as finished and an un-outlined one as an unfinished fill. Hue-shift the outline toward the surface color instead of using pure black on a saturated body, or it eats the silhouette - take the local hue a few steps darker rather than inventing a black. Keep outlines 1px at 32px and above; below 16px skip them entirely, or drop them everywhere only when the user asked for no outline, fog or backlight.",
     },
     KnowledgeEntry {
         id: "pixel-clusters",
@@ -132,7 +132,7 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         id: "lighting",
         title: "One light source",
         keywords: &["光源", "光照", "受光", "背光", "阴影", "投影", "cast shadow", "light source", "lighting"],
-        body: "Fix ONE light direction (default top-left) and honour it on every object in the scene. The lit side takes the highlight, the shadow side a darker ramp step, and the darkest core shadow sits just past where the form turns away. Cast shadows must agree with that same direction in both length and lean.",
+        body: "Fix ONE light direction and honour it on every object in the scene. When the user named no direction, no lamp, no hour of day, do not invent one: read tops a half step lighter and undersides a half step darker off the viewer's angle, and pool the cast shadow on the ground beneath the form instead of leaning it toward an assumed source. The lit side takes the highlight, the shadow side a darker ramp step, and the darkest core shadow sits just past where the form turns away. Cast shadows must agree with that same direction in both length and lean.",
     },
     KnowledgeEntry {
         id: "silhouette",
@@ -225,7 +225,7 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         id: "eyes",
         title: "Eyes and facial read",
         keywords: &["眼睛", "眼部", "瞳孔", "眼神", "脸部", "表情", "eye", "eyes", "pupil", "face", "expression"],
-        body: "On most sprites the eye white is a 2x3 to 4x6 block and the pupil a 2x2 core. Put the highlight in the upper left for the default light. Do not outline the eye against the face - a dark pupil on light fur reads better than a black socket.",
+        body: "On most sprites the eye white is a 2x3 to 4x6 block and the pupil a 2x2 core. The wet eye takes one sharp highlight dot because the material is reflective, and it sits on the side the light comes from - with no light named, put it on the upper side. Do not outline the eye against the face - a dark pupil on light fur reads better than a black socket.",
     },
     KnowledgeEntry {
         id: "motion",

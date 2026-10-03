@@ -2935,6 +2935,30 @@ a.about-val {
   min-width: 0;
 }
 
+/* 工具主行：八枚工具图标，这一行只回答「手里拿什么笔」，同一行排到底。
+   折成两行就和下方的播放/撤销混作一团，也会把画布往下顶，所以八枚图标
+   再窄也不拆；放不下的是形态选项，交给 .tool-mods 在第二行整组折下去。 */
+.canvas-tools.core {
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+
+/* 实心开关与圆角档：形状落下来的形态选项，跟着工具走但只占第二行。
+   右栏定宽 330px（窄窗 290px），八枚图标 276px 已经贴边，再并排只会把
+   整行挤出横向滚动、把按钮挤变形，所以这一组整体折到工具下面，
+   内部仍然同一行——两个开关挨着，语义上才像「形状长什么样」。 */
+.tool-mods {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: nowrap;
+}
+
+/* flex 默认遇挤就缩，工具条里一缩按钮就成细条。整组按内容宽度站死。 */
+.canvas-tools.core > * {
+  flex: 0 0 auto;
+}
+
 .tool-label {
   display: inline-flex;
   align-items: center;

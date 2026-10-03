@@ -1639,7 +1639,8 @@ for y = 0, H - 1 do
   if xa then rows[y] = {xa, xb} if not top then top = y end bot = y end
 end
 -- pass two: band every base-coloured pixel by a normal read off the form itself
--- (row centre offset and body offset, both over the half height) against a top-left light.
+-- (row centre offset and body offset, both over the half height). The light direction is
+-- baked in from the top-left: flip both signs for a light from the bottom-right.
 -- Every loop-invariant is hoisted: a pget already costs a colour string and a 1024px
 -- canvas has a million of them, so the fixed ones stay out of the inner loop.
 local hh = bot and (bot - top) or 0

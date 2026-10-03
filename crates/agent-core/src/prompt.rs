@@ -34,6 +34,7 @@ WORKFLOW - prompt craft first, compose once, verify once:
    TURN ROUTING is already the current state, decided from the user's words before this request went out - read it, do not restate it. Re-sending a routing the section above already carries is a wasted round. Call pixel_plan ONCE, before any drawing tool, ONLY where something there is actually wrong: the user's own words clearly contradict the mode written for a reference, or the deliverable type / locked art style above is clearly wrong for what the user asked. In every other case never call it, and draw instead.
 3. Use pixel_apply_operations only for document structure (create/rename/move/delete layers, frames, palette colors) and tiny precise patches (a few pixels via set_pixels, stamp_grid, draw_shape, bucket_fill, clear_region). Batch structural changes into ONE call. You may combine it with pixel_run_shader in the same turn.
 4. After edits, the tool result contains the updated active-layer grid. Check it once. Call pixel_read_canvas only when you need the canvas again later. If it reads right, finish the turn with a one-sentence summary - a script that already ran and changed nothing will be skipped as a replay, so change the script or finish, never re-run it.
+5. SELF REVIEW PASS - the drawing is not finished when the script returns, and at least one review round is owed before the turn closes. Read the grid that came back in the tool result against the rules above: is the subject centred and filling the canvas, does the palette stay inside its range, does the outline sit on every shape at one consistent value, is the light the one the user asked for (no invented highlight), does each frame read at 1x. Where a canvas snapshot arrived with the turn and you can see images, look at that too. Fix what is genuinely wrong with ONE small follow-up script - the one bug, never a redraw - then close the turn with the one-sentence summary. Skip the whole pass when the user said 'leave it', 'that is enough' or 'do not touch it', and never review a second round: the pass exists to catch the miss, not to redraw the sprite forever.
 
 LARGE CANVASES: the default grid context is a limited top-left window; pixels outside it are UNKNOWN, never transparent. For larger canvases, first call pixel_read_canvas with {"overview": true} for a downsampled map, then read exact windows (up to 128x128) of the areas you are about to edit. If the request targets a region, read it first.
 
@@ -49,16 +50,16 @@ PIXEL ART CRAFT - apply whenever you draw:
 - Simplify to the canvas resolution: keep the silhouette plus at most a few signature details; tiny canvases (<32px) need fewer colors (2-4) and bolder features.
 - SMALL CANVASES: below 32px the silhouette IS the picture, so settle the whole silhouette first out of filled shapes (overlapping circles plus a rect to flatten a bottom is the normal way), then shade by REWRITING pixels that pass a pget test (if pget(x,y)==body then pset(x,y,dark) end). The deadly order is drawing a detail and then dropping a bigger filled shape over it - the new fill erases the detail and it is gone for good. Filled shapes may only ever extend the silhouette; once the silhouette is final, every further edit is pset / line / rect on pixels you picked yourself.
 - Keep diagonals and curves clean with a regular step rhythm (45 degrees = one pixel per row; ~22.6 = 2-pixel runs; ~30 degrees = even spacing; isometric scenes stay on one grid angle). No irregular bumps, no stray single pixels; details read as 2x2+ clusters, never lone pixels. A silhouette curve keeps that rhythm; a small detail curve - a tail, a lock of hair, a rounded paw - may instead be drawn with aacurve or aapoly so the line is genuinely smooth.
-- One light source, and unless the user named one it is a WARM KEY FROM THE TOP-LEFT against a COOL ambient fill: a single key light plus the sky/room colour bounced back in. Neutral flat light is the usual reason a generated sprite reads as plastic, so the split temperature is the default, not a flourish. Lay the flat base first, then a darker ramp step on the shadow side, darkest at the core shadow just past the terminator, and a cast shadow consistent with the light.
+- THE LIGHT IS OFF UNTIL THE USER NAMES ONE: when the request carries no direction, no hour of day and no lamp / sun / window / rim, do not invent a key light, do not place a specular highlight and do not run a rim light off an assumed direction. Shade from the VIEWER's angle instead - the tops a half step lighter, the undersides and receding planes a half step darker, the cast shadow pooled on the ground directly beneath the form and leaning with the form rather than with a source. A drawing with no stated light is not a failure; one that carries an invented top-left highlight and a left-leaning shadow is wrong the moment the user never asked for a light. The moment the user does name a direction or a lamp, it becomes the ONE light source for the whole drawing, the split temperature (warm key, cool fill) becomes available as a technique, and the rest applies: lay the flat base first, then a darker ramp step on the shadow side, darkest at the core shadow just past the terminator, and a cast shadow consistent with that light.
 - Build 3-5 step light-to-dark ramps per material, hue-shifted: cool the shadow toward '#2a1f3d' (violet-blue, the cool side of the key) and warm the highlight toward '#ffd9a8' - never toward '#000000' or '#FFFFFF', which read as dirt and as plastic respectively. Generate them with hsv()/mix() instead of guessing hex, keep the material's own hue in the middle steps, cap the shadow near v 0.35 and the highlight near v 0.85, and use the SAME light and ambient hues across every material in one drawing so the whole picture sits in one room.
-- HIGHLIGHTS ARE PLACED, NOT SPRINKLED: the specular is the one band where the contour actually turns to face the key light, the rim light runs along the top-left silhouette where the background shows through, and the ambient bounce lifts the underside facing the fill half a step of that fill's colour. At 64px a body carries one or two highlight pixels, a metal surface one band plus an angular tail, glass and wet eyes one sharp dot; anything beyond that is noise. They belong to the material's own ramp - never a new colour invented just for them, and never a pure white pixel. Different from translucency: a specular is one bright band on an opaque surface, while a translucent surface (see MEMBRANES AND WINGS) glows across its whole thin area, so a wing lit from behind is brightest in its middle, not along one edge.
+- HIGHLIGHTS ARE PLACED, NOT SPRINKLED: they exist only where light is in play - the user named a source, or the material is itself reflective (metal, glass, a wet eye). With no light in play there is no specular band at all: the lift on the tops is a half step of ambient, not a highlight, and no rim light runs anywhere. When a source IS in play, the specular is the one band where the contour actually turns to face it, the rim light runs along the lit-side silhouette where the background shows through, and the ambient bounce lifts the underside facing the fill half a step of that fill's colour. At 64px a body carries one or two highlight pixels, a metal surface one band plus an angular tail, glass and wet eyes one sharp dot; anything beyond that is noise. They belong to the material's own ramp - never a new colour invented just for them, and never a pure white pixel. Different from translucency: a specular is one bright band on an opaque surface, while a translucent surface (see MEMBRANES AND WINGS) glows across its whole thin area, so a wing lit from behind is brightest in its middle, not along one edge.
 - Keep the palette tight: reuse existing palette colors; for large smooth transitions prefer ordered dithering between two ramp steps (checkerboard or a noise() threshold) over piling up in-between colors.
-- Outline deliberately: one strategy per drawing - solid dark outline, darker selective outline on shadowed edges only, or none - kept consistent; hue-shifted outlines read softer than pure black.
+- OUTLINE BY DEFAULT: pick one strategy per drawing and the default is ONE CONSISTENT SOLID OUTLINE, one pixel wide, around every shape - the same darkened value of each shape's own hue across the whole drawing, never pure black, never a second width. A darker selective outline on shadowed edges only, and no outline at all, are the two alternatives, each chosen when the subject actually calls for it (fog, backlight, a silhouette study). The outline comes OFF only when the user says so in words - "no outline", "without outline", "soft edge only" - and then it comes off everywhere, not on some shapes. Users read an outlined sprite as finished and an un-outlined one as an unfinished fill, so err on the side of drawing it.
 PIXELS ARE PLACED, NOT APPROXIMATED - the rules that separate a finished sprite from a smudge:
 - BUILD THE SUBJECT AS HELPERS, NOT AS A STORY: define small local Lua functions (drawBody, drawLeg, drawEar, drawTail) and call them with parameters. One place to get the geometry right, no copy-paste drift, and a whole limb can be re-derived from phase in one line.
 - DEPTH LAYERING: when a subject has limbs, tails or wings, paint the FAR ones first, then the body, then the NEAR ones last. A limb drawn after the body must not cover the torso silhouette, and a joint never crosses the body outline.
 - SHADE BY RE-WRITING, NOT BY OVERPAINTING: after a filled shape is final, pass over it again with a pget test (if pget(x,y)==body then pset(x,y,dark) end) for rim, shadow and contact bands. Overpainting with a second filled shape deletes the first one's detail.
-- 5-STEP LIGHTING: one base, one highlight, one mid shadow, one core shadow, one rim light. Compute the band per pixel from the form (the dy of the ellipse, a distance from the light, a dot with a normal) instead of blanket-filling a shape in one value.
+- 5-STEP LIGHTING: one base, one highlight, one mid shadow, one core shadow, one rim light. The highlight and the rim slots only exist when light is in play (a named source, or a reflective material); with no light named the highlight slot is the half step of ambient lift on the tops and the rim slot is dropped, which leaves a three-step form shading and is the correct answer. Compute the band per pixel from the form (the dy of the ellipse, a distance from the light, a dot with a normal) instead of blanket-filling a shape in one value.
 - SHADING RECIPE: the pixel_run_shader description carries TWO copyable ramp-and-band functions for exactly this - FORM SHADING RECIPE, which reads its normal off the pixels row by row and so works on ANY contour (a torso, a trunk, a tile, a tail), and SHADING RECIPE, the round-body original. Both build the ramp with hue-shifted mix(), lay ONE flat base pass in the middle step, then re-shade the body pixel by pixel from its own form normal with a pget test. Copy the one that matches the form and scale it to your canvas rather than re-deriving the arithmetic. The row-scanning one only re-writes the base-colour pixels, so stripes, eyes and whiskers already layered on top survive, and a wide body reads as one ball stretched sideways - which is what a torso is.
 - MATERIAL LIGHT RESPONSE: the material decides how light lands on it, and getting it wrong is why a drawing reads as plastic. Metal takes a 1px specular band with an angular tail and a very dark core shadow; skin and fur take the widest diffuse and glow warm where the form is thin; cloth takes no specular at all and dithers its deepest creases; stone is matte with occlusion darkening every pit and one bright top edge per facet; leather takes a broad mid highlight and a worn edge; glass is transmission plus a dark line at the liquid surface and a bright rim on the far side; foliage glows where thin leaves are backlit; membrane - bat and insect wings, fins, sails, horn ears - is translucent, so it glows a half step toward the light wherever it is thin, keeps its bone structure readable through it, and casts the light's colour onto whatever is behind it. Give each material its own ramp, and shade a form made of two materials as two separate passes.
 - MEMBRANES, WINGS AND THIN STRETCHED FORMS - the form that most often comes back as stacked stripes, and a bat is exactly it: never band a wing with a few parallel fills. Lay ONE flat base pass over the whole wing, then band it panel by panel from its own normal (the dy across the panel, the distance from the shoulder joint, a dot with the panel normal) the same way you band a body, so the wing reads as ONE surface that stretches and turns. Then its bones: two to four structural lines from the shoulder out to the finger tips, each with a one-pixel occlusion band on its shadow side, and the membrane between two bones takes one step darker toward the crease. Thin membrane with the light behind it glows - mix half a step of the light colour back in there. The edge between two fingers is scalloped or torn, never a clean diagonal, and every finger keeps the same taper. Symmetry is a loop, not a rewrite: build ONE wing and mirror it (for d = 0, canvas.cx do local c = pget(cx + d, y); if c ~= nil then pset(cx - d, y, c) end end) because two hand-written halves drift apart by a pixel and the drift reads as an error. Paint the far wing first, the body next, the near wing last.
@@ -416,19 +417,30 @@ mod tests {
     }
 
     /// 光照的默认值和膜材那套画法必须钉在系统提示词里。
-    /// 前者是「暖主光 + 冷环境光」这个默认拆分：不写出来，模型默认给中性平光，
-    /// 画面就读成塑料；后者是翅膀这类薄膜的唯一正解，缺了它模型只会拿几条平行
-    /// 色带铺翅膀——蝙蝠就是这么变成一堆横道的。断言摆在这儿，缺口再合上能立刻发现。
+    /// 默认光照改成「用户没点名就不造光」：之前写死左上暖主光，用户只说「画只猫」
+    /// 也照样收一个左上高光加左倾投影——那正是用户抱怨「高光和阴影莫名其妙」的
+    /// 来源。现在默认按观察角度推，点名才有主光；膜材那半是翅膀这类薄膜的唯一
+    /// 正解，缺了它模型只会拿几条平行色带铺翅膀。断言放在这儿，口径漂了能立刻发现。
     #[test]
     fn the_default_light_and_membrane_rules_are_stated() {
         let doc = pixel_core::Document::new("t", 64, 64).unwrap();
         let prompt = build_system_prompt(&doc, "L0", "F0", None, 4000, PromptExtras::default());
-        // 温度拆分：暖主光、冷补光，两侧都不能只剩形容词。
+        // 默认不造光：这句是整个光照段的闸门，缺了模型就回去写左上暖主光。
         assert!(
-            prompt.contains("WARM KEY FROM THE TOP-LEFT"),
-            "缺默认主光方向与色温"
+            prompt.contains("THE LIGHT IS OFF UNTIL THE USER NAMES ONE"),
+            "缺「默认不造光」这个闸门"
         );
-        assert!(prompt.contains("COOL ambient fill"), "缺冷环境光这一半");
+        assert!(
+            prompt.contains("do not invent a key light"),
+            "缺明令禁止凭空造主光"
+        );
+        // 不造光时的替代口径：观察角度 + 顶部亮底部暗 + 投影落在脚下。
+        assert!(prompt.contains("VIEWER's angle"), "没说不造光时按什么推");
+        // 点名之后那一整套仍在场：温度拆分不能连坐删掉。
+        assert!(
+            prompt.contains("it becomes the ONE light source"),
+            "用户点名光源之后没有紧接着给出整套光照规矩"
+        );
         // 冷暖的具体落点：往哪个色偏、上限在哪。只写「冷暖对比」等于没写。
         assert!(prompt.contains("#2a1f3d"), "没说阴影往哪个冷色偏");
         assert!(prompt.contains("#ffd9a8"), "没说高光往哪个暖色偏");
@@ -436,10 +448,11 @@ mod tests {
             prompt.contains("never toward '#000000' or '#FFFFFF'"),
             "缺纯黑纯白禁令，暗部还是会糊成脏块"
         );
-        // 高光三条各自的落点：从形体推，不是撒上去的装饰。
+        // 高光：默认没有，点了名才有，落点仍从形体推而不是撒上去的装饰。
         for rule in [
             "HIGHLIGHTS ARE PLACED, NOT SPRINKLED",
-            "the rim light runs along the top-left silhouette",
+            "they exist only where light is in play",
+            "the rim light runs along the lit-side silhouette",
             "ambient bounce",
         ] {
             assert!(prompt.contains(rule), "缺高光规则 {rule}");
@@ -465,6 +478,45 @@ mod tests {
         assert!(
             prompt.contains("membrane - bat and insect wings"),
             "材质表里没有膜材"
+        );
+    }
+
+    /// 描边默认带上，并且至少自检一轮——这两条默认值都来自用户反馈：
+    /// 不描边的图被当成「没画完」，而模型画完就收工导致明显的问题留在画面上。
+    /// 断言钉住默认值本身，也钉住「用户说不要就不做」这个退路，两样缺一个都不行。
+    #[test]
+    fn the_outline_and_self_review_defaults_are_stated() {
+        let doc = pixel_core::Document::new("t", 64, 64).unwrap();
+        let prompt = build_system_prompt(&doc, "L0", "F0", None, 4000, PromptExtras::default());
+        // 描边：默认整幅一致实心，取局部色相暗化，禁纯黑。
+        assert!(prompt.contains("OUTLINE BY DEFAULT"), "缺默认描边这一条");
+        assert!(
+            prompt.contains("ONE CONSISTENT SOLID OUTLINE"),
+            "没说默认是整幅一致的实心描边"
+        );
+        assert!(
+            prompt.contains("never pure black"),
+            "描边没禁纯黑，饱和色上还是会吃掉剪影"
+        );
+        // 退路：用户说不要才关，而且关就全关。
+        assert!(
+            prompt.contains("\"no outline\", \"without outline\", \"soft edge only\""),
+            "没说用户明确不要描边时才关"
+        );
+        // 自检：工作流里必须多出这一步，且限死只修一个小脚本、不循环第二轮。
+        assert!(prompt.contains("SELF REVIEW PASS"), "缺自检这一步");
+        assert!(
+            prompt.contains("at least one review round is owed"),
+            "没说至少自检一轮，模型会画完就收工"
+        );
+        assert!(
+            prompt.contains("ONE small follow-up script"),
+            "自检没限定只修一个问题，模型会把整张画重画一遍"
+        );
+        // 视觉模型能看到画布截图：这一步要明说，否则带眼睛的模型也不看图。
+        assert!(
+            prompt.contains("a canvas snapshot arrived with the turn"),
+            "自检没提到要看画布截图"
         );
     }
 }
