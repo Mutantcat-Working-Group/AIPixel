@@ -98,6 +98,9 @@ pub struct AppState {
     /// MCP 服务器登记表：配置的唯一真相，mcp.json 只是它的落盘影子。
     mcp: Arc<McpRegistry>,
     config_dir: Mutex<PathBuf>,
+    /// 关窗守门员登记。false 时 CloseRequested 直接放行——那一刻没有能
+    /// 替用户拿主意的人，按住窗口只会让应用关不掉。前端 boot 时登记。
+    close_guard: Mutex<bool>,
     /// 落盘串行化。三份配置共用一套「写临时文件再 rename」的路子，
     /// 两条命令同时保存时得排队，否则两份内容会互相盖对方的临时文件。
     save_lock: Mutex<()>,
@@ -116,6 +119,7 @@ impl Default for AppState {
             // 落到「当前工作目录/models.json」，跑一遍单测就等于往仓库里写一份
             // 含 api_key 的模型配置。setup 里的 bootstrap 会立刻把它换成真目录。
             config_dir: Mutex::new(scratch_config_dir()),
+            close_guard: Mutex::new(false),
             save_lock: Mutex::new(()),
             counter: Mutex::new(0),
         }
@@ -625,6 +629,22 @@ impl AppState {
             .mcp_enabled
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// 关窗守门员当前登记状态。
+    pub fn close_guard(&self) -> bool {
+        *self
+            .close_guard
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// 装上/撤下关窗守门员。
+    pub fn set_close_guard(&self, ready: bool) {
+        *self
+            .close_guard
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = ready;
     }
 
     /// 开/关 MCP，并当场作用到所有活着的会话。

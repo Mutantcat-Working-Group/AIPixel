@@ -1,7 +1,8 @@
 // Copyright (C) 2026 Mutantcat Working Group
 // SPDX-License-Identifier: GPL-3.0-only
-// 三处「删了就找不回来」的动作，删之前必须挡一道：
-// 会话（聊天记录加画布一起没）、模型定义（API Key 跟着没）、MCP 服务器（工具整箱没）。
+// 几处「删了就找不回来」的动作，动手之前必须挡一道：
+// 会话（聊天记录加画布一起没）、模型定义（API Key 跟着没）、MCP 服务器（工具整箱没）、
+// 关窗时不保存就退出（没写进 .aip 的改动当场没）。
 // 判据是「动作只能长在确认控件里」——按源码原文比对，不碰 DOM。
 // 删帧删图层不在此列：那些走编辑器 op，落撤销栈，一步 undo 就回来了。
 
@@ -58,6 +59,17 @@ const SITES = [
     cancel: "settings.delete_cancel",
   },
   {
+    // 关窗时不保存退出：没写进 .aip 的改动当场没了，所以「直接走」这个动作
+    // 只能在问询弹窗里发生，弹窗之外不能再有第二个入口。
+    file: "CloseGuardModal.tsx",
+    guard: "Modal",
+    action: "discardQuit",
+    call: "discardQuit",
+    label: "close.title",
+    ok: "close.save_quit",
+    cancel: "close.discard_quit",
+  },
+  {
     file: "McpSection.tsx",
     guard: "Popconfirm",
     action: "removeMcpServer",
@@ -88,8 +100,9 @@ describe("删档动作只能长在确认控件里", () => {
       expect(block).toContain(site.label);
       expect(block).toContain('t("' + site.ok + '")');
       expect(block).toContain('t("' + site.cancel + '")');
-      // 都是危险操作，红钮不能少。
-      expect(block).toContain("okButtonProps={{ danger: true }}");
+      // 都是危险操作，红钮不能少。红钮长在确定还是取消上不设限：
+      // 关窗问询里危险的那下是「不保存退出」，它是取消键。
+      expect(block).toMatch(/ButtonProps=\{\{[^}]*danger: true/);
     });
 
     it(site.label + " 两种语言都写了字", () => {

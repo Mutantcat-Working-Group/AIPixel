@@ -13,7 +13,7 @@
 import { emit } from "@tauri-apps/api/event";
 import { mockIPC } from "@tauri-apps/api/mocks";
 
-import { AGENT_EVENT_CHANNEL } from "./bridge";
+import { AGENT_EVENT_CHANNEL, CLOSE_EVENT_CHANNEL } from "./bridge";
 import { publishLocal } from "./local-bus";
 import { PALETTE_PRESETS, nearestHex, parseHex, rgbaToHex } from "./palette";
 import { compositeFrame } from "./render";
@@ -1927,8 +1927,10 @@ function handler(cmd: string, raw?: unknown): unknown {
     }
   }
   // model_* 的 id 是模型 id 不是会话 id，拿它盖归属会把事件发到一个不存在的
-  // 会话上去，画面就再也不更新了。
-  if (!cmd.startsWith("model_")) ownerSession = id;
+  // 会话上去，画面就再也不更新了。不带 id 的指令（app_close_reply 这类全局
+  // 命令）同样不该抢归属：真机那边它压根不针对会话，mock 里把它盖回默认值
+  // 会让后续广播发错人家，前端的 activeId 分流就当垃圾事件扔掉。
+  if (payload.id != null && !cmd.startsWith("model_")) ownerSession = id;
   switch (cmd) {
     case "agent_list_models":
       return emptyModels ? { active_id: "", entries: [] } : modelsView();
@@ -2562,6 +2564,10 @@ function handler(cmd: string, raw?: unknown): unknown {
       return null;
     case "aip_text":
       return "AIP1\n";
+    // 关窗值守：浏览器里没人真来问，登记和答复都当空操作放行。
+    case "app_close_guard":
+    case "app_close_reply":
+      return null;
     default:
       if (cmd.startsWith("plugin:")) return null;
       throw new Error(`浏览器预览没有这条假数据：${cmd}`);
@@ -2629,4 +2635,12 @@ export function installBrowserMock(): void {
   emptyModels = new URLSearchParams(window.location.search).get("mock") === "empty";
   mockIPC(handler, { shouldMockEvents: true });
   (window as unknown as { __AIP_MOCK__?: () => unknown }).__AIP_MOCK__ = mockDebug;
+  // 两个只活在预览里的测试缝：emit 一条关窗问询（模拟 Rust 按住窗口）、
+  // 广播一条 document_updated（顺着真链路置脏）。无头浏览器靠它们把关窗值守跑通。
+  (window as unknown as { __AIP_MOCK_CLOSE__?: () => void }).__AIP_MOCK_CLOSE__ = () => {
+    void fire(CLOSE_EVENT_CHANNEL, null);
+  };
+  (window as unknown as { __AIP_MOCK_DIRTY__?: () => void }).__AIP_MOCK_DIRTY__ = () => {
+    broadcast();
+  };
 }

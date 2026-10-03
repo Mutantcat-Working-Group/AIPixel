@@ -358,6 +358,10 @@ export default function ModelSettingsModal() {
     }
   }
 
+  // 切换选中项时整份表单换血。setFieldsValue 只写 store 里的值，
+  // 输入框要等字段自己注册才肯显示；StrictMode 下 Modal 子树 mount→unmount→remount，
+  // preserve={false} 会在那次 unmount 把值抹掉，于是表单看着是空的。
+  // 按选中项给 Form 换 key + initialValues：重挂时初始值就带上了，跟挂载早晚无关。
   useEffect(() => {
     form.setFieldsValue(toForm(selected));
   }, [form, selected]);
@@ -551,7 +555,8 @@ export default function ModelSettingsModal() {
               form={form}
               layout="vertical"
               requiredMark={false}
-              preserve={false}
+              key={selectedId ?? "new"}
+              initialValues={toForm(selected)}
             >
               <SettingsSection title={t("settings.connection")} hint={t("settings.connection_hint")}>
                 <Form.Item

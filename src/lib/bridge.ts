@@ -53,6 +53,9 @@ export const AGENT_EVENT_CHANNEL = "agent-event";
 
 export const BATCH_EVENT_CHANNEL = "batch-event";
 
+/** Rust 在关窗前广播的通道：问前端「有没有没存的工程」。 */
+export const CLOSE_EVENT_CHANNEL = "app-close-requested";
+
 /** 模型清单一览：Rust 侧 models.json 里存了什么这里就回什么，密钥只留在 Rust。 */
 export function listModels(): Promise<ModelsView> {
   return invoke<ModelsView>("agent_list_models");
@@ -383,6 +386,25 @@ export function videoBrief(
   params: VideoBriefParams,
 ): Promise<VideoBrief> {
   return invoke<VideoBrief>("video_brief", { id, params });
+}
+
+/**
+ * 装上关窗守门员。Rust 那头没登记就绝不在关窗前发问——
+ * 前端这一刻要是没起来，问谁去。
+ * @param ready true = 装守门员，false = 撤掉（Shutdown 前可以撤）。
+ */
+export function closeGuardReady(ready: boolean): Promise<void> {
+  return invoke<void>("app_close_guard", { ready });
+}
+
+/** 对关窗问询的答复。quit = true 才放行退出，false 就是「接着用」。 */
+export function closeReply(quit: boolean): Promise<void> {
+  return invoke<void>("app_close_reply", { quit });
+}
+
+/** 订阅关窗问询。问的是一切：载荷为空，答案前端的账里。 */
+export function listenCloseRequest(handler: () => void): Promise<UnlistenFn> {
+  return listenSafe<void>(CLOSE_EVENT_CHANNEL, () => handler());
 }
 
 /** 订阅 agent 主循环与工作流的事件。handler 第二个参数是这条事件的会话归属——

@@ -7,6 +7,7 @@
 //! 主循环、文档与导出、模型与能力、MCP、会话、工作流、编辑器、批量。
 //! 新增命令时归进既有分组，别往末尾一挂了事——清单本身就是索引。
 
+mod close;
 mod commands;
 mod editor;
 mod mcp;
@@ -22,6 +23,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(state::AppState::default())
+        .on_window_event(close::guard_close)
         .setup(|app| {
             let handle = app.handle().clone();
             let app_state = handle.state::<state::AppState>();
@@ -86,6 +88,9 @@ pub fn run() {
             editor::editor_fill,
             editor::editor_paint_stroke,
             editor::editor_resize_canvas,
+            // ---- 窗口：关窗前问一声，答复由前端递回来 ----
+            close::app_close_guard,
+            close::app_close_reply,
             // ---- 批量：文件夹进文件夹出 + 配方簿 ----
             batch::batch_scan,
             batch::batch_run,

@@ -219,6 +219,14 @@ interface StoreState extends DocumentSnapshot, WorkflowState, BatchState {
   presetOverrides: string[];
   /** 工具块展开状态，按工具调用 id 记。跨会话重载也不丢：用户摊开的 JSON 不该
    * 因为切走再回来就自己合上。 */
+  /** 当前会话的 .aip 落盘路径。null = 还没存过，关窗时要给用户一个「存哪儿」。 */
+  projectPath: string | null;
+  /** 当前会话有没有没存进 .aip 的改动。关窗问的就是这一笔账。 */
+  projectDirty: boolean;
+  /** 每个会话一份落盘账本。切走再切回来，不至于忘了自己还没存。 */
+  projectLedger: Record<string, { path: string | null; dirty: boolean }>;
+  /** 关窗问询弹窗开着。true = Rust 把窗口按住了，就等一个答复。 */
+  closeGuardOpen: boolean;
   toolOpen: Record<string, boolean>;
 }
 
@@ -227,6 +235,10 @@ export interface StoreActions {
   setPresetOverrides: (presets: string[]) => void;
   /** 摊开/收起某条工具调用；autoOpen 是这一条的默认姿态（分流节点默认摊开）。 */
   toggleToolOpen: (id: string, autoOpen: boolean) => void;
+  /** 当前会话动过了：记一笔「没存」。存过的路（openAip / saveAip）自己会清。 */
+  markProjectDirty: () => void;
+  /** 对关窗问询的答复。quit = true 才放行退出，false 只是收起弹窗接着用。 */
+  answerClose: (quit: boolean) => void;
   boot: () => Promise<void>;
   setLang: (lang: Lang) => void;
   selectSession: (id: string) => Promise<void>;
@@ -547,6 +559,8 @@ let unlisten: (() => void) | null = null;
 let restoreChain: Promise<unknown> = Promise.resolve();
 // 批量跑在独立通道上，与 agent-event 各听一条，互不打扰。
 let batchUnlisten: (() => void) | null = null;
+// 关窗问询也常住一条：Rust 按住窗口时只有它能应答，注销了就等于没人应答。
+let closeUnlisten: (() => void) | null = null;
 let booting: Promise<void> | null = null;
 let snapshotSeq = 0;
 
@@ -593,6 +607,24 @@ function recordUndo(state: StoreState, before: PixelDocument): Partial<StoreStat
     undoStack: pushDocStack(state.undoStack, before),
     redoStack: [],
   };
+}
+
+/**
+ * 给当前会话记一笔落盘账。账本和「当前会话看到的那份」同步写：
+ * 只写一份的话，切走再切回来就丢账——A 会话没存的东西，
+ * 不该因为用户去 B 看了一眼就变成已保存。
+ */
+function bumpBill(patch: Partial<{ path: string | null; dirty: boolean }>): void {
+  const state = useStore.getState();
+  const id = state.activeId;
+  if (!id) return;
+  const current = state.projectLedger[id] ?? { path: null, dirty: false };
+  const next = { ...current, ...patch };
+  useStore.setState({
+    projectLedger: { ...state.projectLedger, [id]: next },
+    projectPath: next.path,
+    projectDirty: next.dirty,
+  });
 }
 
 /**
@@ -865,6 +897,9 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       active.frame !== state.active.frame ||
       active.layer !== state.active.layer;
     setState({ ...next, active });
+    // 模型这一笔也落在画布上：盘上那份 .aip 同样旧了。用户视角里
+    // 「AI 画完」和「自己画的」都是待存的改动，都得问过再走。
+    bumpBill({ dirty: true });
     if (activeChanged) {
       const id = getState().activeId;
       if (id) syncActive(id, active);
@@ -905,8 +940,34 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       frameIndex,
       active,
     });
+    // 画笔、填充、撤销全从这条漏斗过：画布变了，盘上那份 .aip 就旧了。
+    bumpBill({ dirty: true });
     syncActive(id, active);
     await getState().refreshPng();
+  }
+
+  /**
+   * 关窗值守：Rust 按住窗口时会广播一条问询，这里把弹窗亮起来。
+   * 没脏就直接放行——问一句「你要不要存」而答案永远是「没什么可存」，
+   * 纯属拿一个问题换一次多余的点击。
+   */
+  async function ensureCloseGuard() {
+    if (closeUnlisten) return;
+    closeUnlisten = await bridge.listenCloseRequest(() => {
+      if (!useStore.getState().projectDirty) {
+        // 没什么可丢的：答复就是放行，弹窗都不用亮。
+        bridge.closeReply(true).catch(() => {
+          // 答复递不回去（前端正被销毁）也别崩：让系统自己收尾。
+        });
+        return;
+      }
+      useStore.setState({ closeGuardOpen: true });
+    });
+    // 订阅上了才登记守门员：两条指令换序的话，登记之后、订阅之前那一下
+    // 关窗会问出一个没人听的问。
+    await bridge.closeGuardReady(true).catch(() => {
+      // 浏览器预览里没有这条命令：值守照样挂着，只是没人真来问。
+    });
   }
 
   /** agent-event 路由：文档事件驱动画布，其余折叠进对话条目。 */
@@ -1010,7 +1071,12 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       redoStack: [],
       pendingApproval: null,
       pendingFrameIndex: null,
+      closeGuardOpen: false,
     });
+    // 落盘账跟着会话走：账本里有就请回来，没有的就是一份新账（还没存过）。
+    // 放在默认清零之后、读文档之前，好让「打开 .aip → 记账为已存」覆盖它。
+    const bill = getState().projectLedger[id] ?? { path: null, dirty: false };
+    setState({ projectPath: bill.path, projectDirty: bill.dirty });
     if (switching) {
       // revision 一起归零：会话之间的 revision 没有可比性，带着旧值会让
       // 后续 document_updated 被 `revision < pngRevision` 误判成过期事件。
@@ -1113,6 +1179,10 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     recipeName: "",
     recipeBusy: false,
     recipeImport: null,
+    projectPath: null,
+    projectDirty: false,
+    projectLedger: {},
+    closeGuardOpen: false,
 
     toggleToolOpen: (id, autoOpen) => {
       // 没记过就照默认姿态取反：分流节点默认摊开，第一下按是收起。
@@ -1128,6 +1198,8 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         await ensureListener();
         // 批量通道与会话无关，开机听上就行：用户随时可能从工作台起一趟。
         await ensureBatchListener();
+        // 关窗值守：开机就登记，之后每一下关闭都先问前端。
+        await ensureCloseGuard();
         let models: ModelsView;
         try {
           models = await bridge.listModels();
@@ -1211,6 +1283,8 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         frameIndex: 0,
     });
       await loadDocument(info.id, true);
+      // 新工程从没存过：账本里划一笔「待存」，关窗时才问得到用户。
+      bumpBill({ path: null, dirty: true });
       // 只有从尺寸弹窗进来的才告知：别的方式来这儿就安静建，不刷通知。
       if (width && height) {
         noteKey("sidebar.created_hint", { width: info.width, height: info.height });
@@ -1347,6 +1421,9 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       });
       // 从这一刻起盯着静默：路上一个事件都不来的话，界面上会出现「可能卡住了」。
     touchStallWatch();
+    // 说出去的话也是工程的一部分：.aip 只有文档，但用户嘴里「这个会话」
+    // 是连聊天记录一起算的。发过一句就记上待存，关窗时才问得到人。
+    getState().markProjectDirty();
     try {
       // 风格锁定跟着这一句走：用户在输入区钉了画风，模型这一回合就得按它画，
       // 话里没提也不能改主意。
@@ -1726,6 +1803,8 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         await bridge.syncDocument(id, document);
         // 新文档和旧笔迹无关，撤销栈清空；否则一撤销就退回上一个文件。
         setState({ undoStack: [], redoStack: [], pendingFrameIndex: null });
+        // 这份文档正是从 path 读来的：它就是当前会话的落盘点，账上记平。
+        bumpBill({ path, dirty: false });
         noteKey("store.loaded", { name: baseName(path) });
         // 刚把外来文件灌进后端：这份文档的号比本地旧，但就是要它盖掉本地，
         // 所以这一趟得无条件认领。
@@ -1743,6 +1822,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       setState({ busy: true });
       try {
         await bridge.aipSave(id, path);
+        bumpBill({ path, dirty: false });
         noteKey("store.saved", { name: baseName(path) });
       } catch (error) {
         flagKey("store.save_failed", { error: String(error) });
@@ -1774,6 +1854,17 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         flagKey("store.read_aip_failed", { error: String(error) });
         return null;
       }
+    },
+
+    markProjectDirty: () => bumpBill({ dirty: true }),
+
+    answerClose: (quit) => {
+      // 答复只递一句话：Rust 那头已经按住窗口，它要的只是「放不放」。
+      // 取消只是收起弹窗接着用，别顺手把账改平了。
+      setState({ closeGuardOpen: false });
+      bridge.closeReply(quit).catch((error) => {
+        flagKey("store.close_reply_failed", { error: String(error) });
+      });
     },
 
     clearNotice: () => setState({ notice: null }),

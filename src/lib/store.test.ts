@@ -2127,3 +2127,65 @@ describe("号更小的增量也得照合", () => {
     expect(state.document?.cels.L0.F0).toEqual({ indices: touched });
   });
 });
+
+describe("落盘账本与关窗问询", () => {
+  it("改过就置脏，写盘就把账记平，路径跟着确定下来", async () => {
+    useStore.setState({
+      activeId: "doc-01",
+      projectLedger: {},
+      projectPath: null,
+      projectDirty: false,
+    });
+    invokeCalls.length = 0;
+
+    useStore.getState().markProjectDirty();
+    expect(useStore.getState().projectDirty).toBe(true);
+    expect(useStore.getState().projectLedger["doc-01"].dirty).toBe(true);
+
+    await useStore.getState().saveAip("/tmp/cat.aip");
+    expect(useStore.getState().projectDirty).toBe(false);
+    expect(useStore.getState().projectPath).toBe("/tmp/cat.aip");
+    const saves = invokeCalls.filter((call) => call.cmd === "aip_save");
+    expect(saves[saves.length - 1].args.path).toBe("/tmp/cat.aip");
+
+    // 写盘之后又动一笔：脏回来。不然「存完接着画」在关窗时问都不问。
+    useStore.getState().markProjectDirty();
+    expect(useStore.getState().projectDirty).toBe(true);
+  });
+
+  it("账本按会话分开：切走再切回来，没存的改动不丢", async () => {
+    invokeResults["session_list"] = [];
+    useStore.setState({ activeId: "s1", projectLedger: {}, projectPath: null, projectDirty: false });
+    useStore.getState().markProjectDirty();
+    expect(useStore.getState().projectDirty).toBe(true);
+
+    // 切去一条从没动过的会话：账是平的。loadDocument 会把那本账请回来。
+    useStore.setState({ sessions: [] });
+    await useStore.getState().selectSession("s2");
+    expect(useStore.getState().projectDirty).toBe(false);
+    expect(useStore.getState().projectPath).toBe(null);
+
+    // 切回 s1：那笔没存的改动还在，路径也跟着回来。
+    await useStore.getState().selectSession("s1");
+    expect(useStore.getState().projectDirty).toBe(true);
+  });
+
+  it("关窗答复原样递回 Rust，弹窗只负责收起来", () => {
+    useStore.setState({ closeGuardOpen: true, activeId: "doc-01", projectDirty: true });
+    invokeCalls.length = 0;
+
+    // 取消：账不动，只是说「接着用」。
+    useStore.getState().answerClose(false);
+    expect(useStore.getState().closeGuardOpen).toBe(false);
+    expect(useStore.getState().projectDirty).toBe(true);
+    expect(invokeCalls.filter((c) => c.cmd === "app_close_reply").pop()?.args).toEqual({
+      quit: false,
+    });
+
+    useStore.setState({ closeGuardOpen: true });
+    useStore.getState().answerClose(true);
+    expect(invokeCalls.filter((c) => c.cmd === "app_close_reply").pop()?.args).toEqual({
+      quit: true,
+    });
+  });
+});

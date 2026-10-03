@@ -1726,6 +1726,33 @@ body {
   filter: brightness(1.08);
 }
 
+/* 关窗问询：正文一段话 + 「接着用」的退路，按钮行交给 antd 摆。 */
+.close-guard-modal .ant-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.close-guard-body {
+  margin: 0;
+  line-height: 1.6;
+}
+
+/* 存过的文件单独一行：长路径折行会顶乱按钮，截断加 title 里给全的。 */
+.close-guard-path {
+  display: block;
+  margin-top: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  opacity: 0.72;
+  overflow-wrap: anywhere;
+}
+
+.close-guard-keep {
+  display: flex;
+  justify-content: flex-end;
+}
+
 .size-modal .ant-modal-body {
   display: flex;
   flex-direction: column;

@@ -6,6 +6,7 @@ import { Download, FolderOpen, ImagePlus, Save, Settings2, X } from "lucide-reac
 import { open, save } from "@tauri-apps/plugin-dialog";
 
 import ChatPanel from "./ui/ChatPanel";
+import CloseGuardModal from "./ui/CloseGuardModal";
 import DocumentPanel from "./ui/DocumentPanel";
 import BatchPanel from "./ui/BatchPanel";
 import ModelSettingsModal from "./ui/ModelSettingsModal";
@@ -345,6 +346,7 @@ export default function App() {
       </div>
 
       <ModelSettingsModal />
+      <CloseGuardModal />
       <ContextMenuHost />
     </div>
   );

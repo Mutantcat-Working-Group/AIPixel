@@ -46,6 +46,15 @@ export const zh = {
   "dialog.aseprite": "Aseprite 文件",
   "dialog.aipr": "AIPixel 配方",
 
+  // ---------- 关窗问询 ----------
+  "close.title": "有还没保存的更改",
+  "close.body":
+    "当前会话还没有存成 .aip 文件。现在退出的话，这些更改会留在本机会话里，但不会写进 .aip。",
+  "close.save_quit": "保存并退出",
+  "close.saving": "正在保存…",
+  "close.discard_quit": "不保存退出",
+  "close.cancel": "继续使用",
+
   "gate.add_first": "添加第一个模型",
 
   // ---------- 会话侧栏 ----------
@@ -624,6 +633,7 @@ export const zh = {
   "store.open_aip_failed": "打开 .aip 失败：{error}",
   "store.saved": "已保存 {name}",
   "store.save_failed": "保存失败：{error}",
+  "store.close_reply_failed": "回复「是否退出」失败：{error}",
   "store.save_limits_failed": "保存运行护栏失败：{error}",
   "store.exported": "已导出 {name}",
   "store.export_failed": "导出失败：{error}",
@@ -895,6 +905,15 @@ export const en: Record<TKey, string> = {
   "dialog.png": "PNG image",
   "dialog.aseprite": "Aseprite file",
   "dialog.aipr": "AIPixel recipe",
+
+  // ---------- Close guard ----------
+  "close.title": "You have unsaved changes",
+  "close.body":
+    "This conversation has not been saved to a .aip file yet. If you quit now, the changes stay in the local session but will not be written into a .aip.",
+  "close.save_quit": "Save and quit",
+  "close.saving": "Saving…",
+  "close.discard_quit": "Quit without saving",
+  "close.cancel": "Keep using AIPixel",
 
   "gate.add_first": "Add your first model",
 
@@ -1490,6 +1509,7 @@ export const en: Record<TKey, string> = {
   "store.open_aip_failed": "could not open the .aip: {error}",
   "store.saved": "saved {name}",
   "store.save_failed": "save failed: {error}",
+  "store.close_reply_failed": "could not answer the quit prompt: {error}",
   "store.save_limits_failed": "could not save the run guard rails: {error}",
   "store.exported": "exported {name}",
   "store.export_failed": "export failed: {error}",
