@@ -175,6 +175,22 @@ export interface McpServersView {
   entries: McpServerView[];
 }
 
+/** 本程序自己当 MCP 服务端时的运行快照。endpoint 是人肉健康检查的入口。 */
+export interface McpServerStatusView {
+  /** 用户是否允许本程序监听。false = 端口根本没开。 */
+  enabled: boolean;
+  /** enabled 且已经 bind 成功。只 true 时外部客户端才连得上。 */
+  running: boolean;
+  /** 实际监听端口。填 0 时由内核挑，挑中的值从这里读回去。 */
+  port: number;
+  /** 形如 http://127.0.0.1:7815 ，空串表示还没起来。 */
+  endpoint: string;
+  /** 起来之后一共伺候了多少个请求；停机不清零，好让用户回看这一回的量。 */
+  requests: number;
+  /** 最近一次起监听失败的原因（通常是端口被占）；正常为 null。 */
+  last_error: string | null;
+}
+
 /** 发给 Rust 的服务器配置。env / headers 只出不进：视图永不回传明文。 */
 export type McpTransportConfig =
   | { kind: "stdio"; command: string; args: string[]; env: Record<string, string> }

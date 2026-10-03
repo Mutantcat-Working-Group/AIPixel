@@ -17,6 +17,7 @@ use tauri::{AppHandle, State};
 
 use crate::state::AppState;
 use crate::workflow::emit_document;
+use std::sync::Arc;
 
 /// 一笔笔画里的一个格子。颜色按整笔给：一笔一色，换色必然是下一笔。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,7 +181,7 @@ fn fill_inner(
 #[tauri::command]
 pub fn editor_paint_stroke(
     app: AppHandle,
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     id: String,
     stroke: StrokeRequest,
 ) -> Result<u64, String> {
@@ -195,7 +196,7 @@ pub fn editor_paint_stroke(
 #[tauri::command]
 pub fn editor_fill(
     app: AppHandle,
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     id: String,
     fill: FillRequest,
 ) -> Result<u64, String> {
@@ -234,7 +235,7 @@ fn resize_inner(doc: &mut Document, width: u32, height: u32) -> Result<u64, Stri
 #[tauri::command]
 pub fn editor_resize_canvas(
     app: AppHandle,
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     id: String,
     width: u32,
     height: u32,
@@ -259,7 +260,7 @@ pub fn editor_resize_canvas(
 #[tauri::command]
 pub fn editor_apply_ops(
     app: AppHandle,
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     id: String,
     ops: Vec<PixelOperation>,
 ) -> Result<u64, String> {

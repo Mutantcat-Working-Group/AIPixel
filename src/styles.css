@@ -2285,6 +2285,74 @@ body {
   gap: 8px;
 }
 
+/* 「本程序当服务端」卡片。它和下面用户自配的服务器是两回事：
+   这里是本程序反过来对外提供工具，所以单独一块，别混进 mcp-list。 */
+.mcps-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  background: var(--bg-panel-2);
+  min-width: 0;
+}
+
+.mcps-grid {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 16px;
+}
+
+.mcps-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.mcps-field > span {
+  color: var(--text-dim);
+  font-size: 11.5px;
+}
+
+.mcps-count {
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.mcps-endpoint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.mcps-endpoint > code {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.mcps-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.mcps-tools-title {
+  color: var(--text-dim);
+  font-size: 11.5px;
+}
+
 .notice-bar {
   display: flex;
   align-items: center;

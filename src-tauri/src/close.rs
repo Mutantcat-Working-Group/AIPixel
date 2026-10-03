@@ -11,6 +11,8 @@
 
 use tauri::{Emitter, Manager, State, WindowEvent};
 
+use std::sync::Arc;
+
 use crate::state::AppState;
 
 /// Rust 广播给前端的通道名：该问话了。载荷是空的，问的是一切尽在前端的账。
@@ -21,7 +23,7 @@ pub fn guard_close(window: &tauri::Window, event: &WindowEvent) {
     let WindowEvent::CloseRequested { api, .. } = event else {
         return;
     };
-    if !window.state::<AppState>().close_guard() {
+    if !window.state::<Arc<AppState>>().close_guard() {
         return;
     }
     // 系统先关着。放行不由这里决定：前端存完（或说不用存）之后走
@@ -32,7 +34,7 @@ pub fn guard_close(window: &tauri::Window, event: &WindowEvent) {
 
 /// 前端装上/撤下关窗守门员。boot 时装上，之后每一句关窗都先来问。
 #[tauri::command]
-pub fn app_close_guard(state: State<'_, AppState>, ready: bool) {
+pub fn app_close_guard(state: State<'_, Arc<AppState>>, ready: bool) {
     state.set_close_guard(ready);
 }
 

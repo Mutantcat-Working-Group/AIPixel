@@ -13,36 +13,39 @@ use serde_json::Value;
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::mpsc;
 
+use pixel_core::document::Document;
+
 use crate::state::{default_document, AppState, ModelsView};
+use std::sync::Arc;
 
 /// 模型清单。api_key 一律不回传 webview，只给 has_api_key。
 #[tauri::command]
-pub fn agent_list_models(state: State<'_, AppState>) -> ModelsView {
+pub fn agent_list_models(state: State<'_, Arc<AppState>>) -> ModelsView {
     state.models_view()
 }
 
 /// 运行护栏当前值：续写、重试、纯思考各自封顶。
 #[tauri::command]
-pub fn agent_loop_limits(state: State<'_, AppState>) -> LoopLimits {
+pub fn agent_loop_limits(state: State<'_, Arc<AppState>>) -> LoopLimits {
     state.limits()
 }
 
 /// 改运行护栏。立即推到所有活着的会话，并落盘供下次启动读回。
 #[tauri::command]
-pub fn agent_set_loop_limits(state: State<'_, AppState>, limits: LoopLimits) -> LoopLimits {
+pub fn agent_set_loop_limits(state: State<'_, Arc<AppState>>, limits: LoopLimits) -> LoopLimits {
     state.set_limits(limits);
     state.limits()
 }
 
 /// MCP 总开关当前值。true = 模型看得见用户自配的外部工具。
 #[tauri::command]
-pub fn agent_mcp_enabled(state: State<'_, AppState>) -> bool {
+pub fn agent_mcp_enabled(state: State<'_, Arc<AppState>>) -> bool {
     state.mcp_enabled()
 }
 
 /// 开/关 MCP。当场摘掉或挂回所有活会话的注册表，并落盘。
 #[tauri::command]
-pub fn agent_set_mcp_enabled(state: State<'_, AppState>, enabled: bool) -> bool {
+pub fn agent_set_mcp_enabled(state: State<'_, Arc<AppState>>, enabled: bool) -> bool {
     state.set_mcp_enabled(enabled);
     state.mcp_enabled()
 }
@@ -51,7 +54,7 @@ pub fn agent_set_mcp_enabled(state: State<'_, AppState>, enabled: bool) -> bool 
 /// api_key 留空表示沿用本机已存密钥：改已有定义时用户不用把密钥再贴一遍。
 #[tauri::command]
 pub async fn model_fetch_models(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     id: Option<String>,
     base_url: String,
     api_key: String,
@@ -80,7 +83,7 @@ pub async fn model_fetch_models(
 /// api_key 留空时和「获取」一样，沿用这个模型定义已存的密钥。
 #[tauri::command]
 pub async fn model_probe_image(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     id: Option<String>,
     base_url: String,
     api_key: String,
@@ -114,7 +117,10 @@ fn probe_api_key(state: &AppState, id: Option<&str>, api_key: &str) -> String {
 
 /// 新增/更新一个模型。api_key 留空表示沿用本机已存密钥。
 #[tauri::command]
-pub fn model_upsert(state: State<'_, AppState>, config: ModelConfig) -> Result<ModelsView, String> {
+pub fn model_upsert(
+    state: State<'_, Arc<AppState>>,
+    config: ModelConfig,
+) -> Result<ModelsView, String> {
     if config.id.trim().is_empty() {
         return Err("model id must not be empty".into());
     }
@@ -134,13 +140,13 @@ pub fn model_upsert(state: State<'_, AppState>, config: ModelConfig) -> Result<M
 }
 
 #[tauri::command]
-pub fn model_remove(state: State<'_, AppState>, id: String) -> Result<ModelsView, String> {
+pub fn model_remove(state: State<'_, Arc<AppState>>, id: String) -> Result<ModelsView, String> {
     state.remove_model(&id);
     Ok(state.models_view())
 }
 
 #[tauri::command]
-pub fn model_set_active(state: State<'_, AppState>, id: String) -> Result<ModelsView, String> {
+pub fn model_set_active(state: State<'_, Arc<AppState>>, id: String) -> Result<ModelsView, String> {
     state.set_active_model(&id)?;
     Ok(state.models_view())
 }
@@ -164,7 +170,7 @@ pub struct SessionInfo {
 
 /// 会话 -> 前端视图。前后端契约的唯一出口：Arc、文档原文、api_key
 /// 都在这一层截断，后端形状再怎么变，前端拿到的一直是这份扁平结构。
-fn session_info(session: &AgentSession) -> SessionInfo {
+pub(crate) fn session_info(session: &AgentSession) -> SessionInfo {
     let config = session.model_config();
     let doc = session.document();
     SessionInfo {
@@ -183,7 +189,7 @@ fn session_info(session: &AgentSession) -> SessionInfo {
 /// 建一个会话；`document` 可带初始文档 JSON，缺省 64x64 空白画布。
 #[tauri::command]
 pub fn session_create(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     document: Option<Value>,
     title: Option<String>,
 ) -> Result<SessionInfo, String> {
@@ -200,8 +206,27 @@ pub fn session_create(
     Ok(session_info(&session))
 }
 
+/// 按宽高造一份空白文档。MCP 服务端的 create_canvas 用。
+/// 走 `session_create` 那条路要经 JSON 序列化再解析，纯属绕远；
+/// 而校验规则必须和那条路一模一样——同一个口子进人，就该同一把关。
+pub(crate) fn sized_document(
+    width: u32,
+    height: u32,
+    name: Option<String>,
+) -> Result<Document, String> {
+    let doc = Document::new(
+        name.unwrap_or_else(|| "untitled".to_string()),
+        width,
+        height,
+    )
+    .map_err(|e| format!("invalid document: {e}"))?;
+    // 前端传什么都能进来，宽高不校验的话后面一次 width*height 分配就能打死进程。
+    doc.validated()
+        .map_err(|e| format!("invalid document: {e}"))
+}
+
 #[tauri::command]
-pub fn session_list(state: State<'_, AppState>) -> Vec<SessionInfo> {
+pub fn session_list(state: State<'_, Arc<AppState>>) -> Vec<SessionInfo> {
     let mut ids = state.session_ids();
     ids.sort();
     let mut infos: Vec<SessionInfo> = ids
@@ -218,7 +243,7 @@ pub fn session_list(state: State<'_, AppState>) -> Vec<SessionInfo> {
 /// 改侧边栏显示名。空白名当取消：不留一个看不见的会话标题。
 #[tauri::command]
 pub fn session_rename(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     id: String,
     title: String,
 ) -> Result<SessionInfo, String> {
@@ -229,7 +254,7 @@ pub fn session_rename(
 
 /// 拖动排序：按新次序整批改写排序位。id 不在簿里就当没发生过。
 #[tauri::command]
-pub fn session_reorder(state: State<'_, AppState>, ids: Vec<String>) -> Result<(), String> {
+pub fn session_reorder(state: State<'_, Arc<AppState>>, ids: Vec<String>) -> Result<(), String> {
     for (index, id) in ids.iter().enumerate() {
         let Ok(session) = state.session(id) else {
             continue;
@@ -241,7 +266,7 @@ pub fn session_reorder(state: State<'_, AppState>, ids: Vec<String>) -> Result<(
 }
 
 #[tauri::command]
-pub fn session_drop(state: State<'_, AppState>, id: String) -> Result<(), String> {
+pub fn session_drop(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
     state.session(&id)?;
     state.drop_session(&id);
     Ok(())
@@ -250,7 +275,7 @@ pub fn session_drop(state: State<'_, AppState>, id: String) -> Result<(), String
 /// 把会话改绑到另一个模型（保留文档与历史消息；只重建 provider）。
 #[tauri::command]
 pub fn session_bind_model(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     id: String,
     model_id: String,
 ) -> Result<SessionInfo, String> {
@@ -265,7 +290,7 @@ pub fn session_bind_model(
 /// 主模型不允许从这里改：那是 `session_bind_model` 的活。
 #[tauri::command]
 pub fn session_bind_role(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     id: String,
     role: ModelRole,
     model_id: String,
@@ -282,7 +307,7 @@ pub fn session_bind_role(
 /// 取消某个角色的单独绑定，让它回落去用会话主模型。
 #[tauri::command]
 pub fn session_clear_role(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     id: String,
     role: ModelRole,
 ) -> Result<SessionInfo, String> {
@@ -297,7 +322,7 @@ pub fn session_clear_role(
 /// 切换会话的激活图层/帧/笔刷颜色，进系统提示词与工具默认值。
 #[tauri::command]
 pub fn agent_set_active(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     id: String,
     active: ActiveContext,
 ) -> Result<(), String> {
@@ -308,7 +333,7 @@ pub fn agent_set_active(
 /// 权限模式：Auto 直接执行；Chat/Ask 先行提示（工作台阶段接审批交互）。
 #[tauri::command]
 pub fn agent_set_permission(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     id: String,
     permission: PermissionMode,
 ) -> Result<(), String> {
@@ -323,7 +348,7 @@ pub fn agent_set_permission(
 #[tauri::command]
 pub fn agent_send_message(
     app: AppHandle,
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     id: String,
     text: String,
     attachments: Option<Vec<Attachment>>,
@@ -331,41 +356,77 @@ pub fn agent_send_message(
     style: Option<String>,
     presets: Option<Vec<String>>,
 ) -> Result<(), String> {
-    let session = state.session(&id)?;
+    run_turn(
+        Some(&app),
+        &state,
+        &id,
+        &text,
+        attachments.unwrap_or_default(),
+        model_id.as_deref(),
+        style.as_deref(),
+        presets.unwrap_or_default(),
+    )
+}
+
+/// 起一个 agent 回合：界面发送和 MCP 服务端的 prompt_agent 共用这一份。
+///
+/// `app` 为 None 表示没有事件总线可投（MCP 的单测里就是这种）——
+/// unbounded channel 不会阻塞，主循环照常跑完，只是没人收事件。
+///
+/// 参数刻意保持扁平：这是 IPC 契约的形状，收成结构体就要同时改前端调用
+/// 形状和 mock，收益只是一处 lint 安静，不值当。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_turn(
+    app: Option<&AppHandle>,
+    state: &AppState,
+    id: &str,
+    text: &str,
+    attachments: Vec<Attachment>,
+    model_id: Option<&str>,
+    style: Option<&str>,
+    presets: Vec<String>,
+) -> Result<(), String> {
+    let session = state.session(id)?;
     if let Some(model_id) = model_id.filter(|m| !m.trim().is_empty()) {
-        let config = state.model_config(&model_id)?;
+        let config = state.model_config(model_id)?;
         session.rebind_provider(config);
     }
     // 风格锁定与提示词预设都走 pins 那一份解析：微调和工作流坞问的是同一个问题，
     // 三处各写一遍就意味着补了一处、另外两处还在原地——用户选了「写实渲染」，
     // 成品却不带这条规矩，查的就是那种地方。报错语义（认不出就拒绝、超额就拒绝、
     // 「不限」放行）见 pins 模块自己的说明。
-    let pinned_style = pins::pinned_style(style.as_deref())?;
-    let pinned_presets = pins::pinned_presets(presets.unwrap_or_default())?;
-    let attachments = attachments.unwrap_or_default();
+    let pinned_style = pins::pinned_style(style)?;
+    let pinned_presets = pins::pinned_presets(presets)?;
 
     let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
     // 转发任务：把主循环事件搬上 Tauri 事件总线，流式期间不阻塞 UI。
-    let forwarder = app.clone();
-    // 会话标识跟着事件一起走：用户切走之后，上一个还没停干净的回合不能把
-    // 它的 token 和 document_updated 落到新会话的对话与画布上。
-    let owner = id.clone();
-    // 同步命令跑在主线程（WebView 的 IPC 回调线程），那里没有 tokio 运行时上下文，
-    // 直接 tokio::spawn 会 panic 并把整个进程带崩；必须走 Tauri 自己的异步运行时。
-    tauri::async_runtime::spawn(async move {
-        while let Some(event) = rx.recv().await {
-            let _ = forwarder.emit(
-                "agent-event",
-                AgentEventEnvelope {
-                    session_id: owner.clone(),
-                    event,
-                },
-            );
-        }
-    });
+    if let Some(forwarder) = app {
+        let forwarder = forwarder.clone();
+        // 会话标识跟着事件一起走：用户切走之后，上一个还没停干净的回合不能把
+        // 它的 token 和 document_updated 落到新会话的对话与画布上。
+        let owner = id.to_string();
+        // 同步命令跑在主线程（WebView 的 IPC 回调线程），那里没有 tokio 运行时上下文，
+        // 直接 tokio::spawn 会 panic 并把整个进程带崩；必须走 Tauri 自己的异步运行时。
+        tauri::async_runtime::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                let _ = forwarder.emit(
+                    "agent-event",
+                    AgentEventEnvelope {
+                        session_id: owner.clone(),
+                        event,
+                    },
+                );
+            }
+        });
+    } else {
+        // 没有事件总线可投：把收件端放掉。unbounded channel 的发送端不会
+        // 因为没人收而阻塞，主循环照常跑完，只是这一回合的过程没人旁听。
+        drop(rx);
+    }
     // 主循环跑在独立任务里，命令拿到的是「已受理」而非「已跑完」。
     // 走守门员那层：主循环万一崩在半路，也要给这一回合补一个收口事件，
     // 不然前端的 running 永远不收，用户按什么都没反应。
+    let text = text.to_string();
     tauri::async_runtime::spawn(async move {
         session
             .run_turn_guarded_with_preset(text, attachments, tx, pinned_style, pinned_presets)
@@ -376,7 +437,7 @@ pub fn agent_send_message(
 
 /// 中断当前 turn：流式轮询 120ms 内收尾，回一条 Interrupted 事件。
 #[tauri::command]
-pub fn agent_interrupt(state: State<'_, AppState>, id: String) -> Result<(), String> {
+pub fn agent_interrupt(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
     state.session(&id)?.interrupt();
     Ok(())
 }
@@ -385,7 +446,7 @@ pub fn agent_interrupt(state: State<'_, AppState>, id: String) -> Result<(), Str
 /// 前端的审批卡片据此自己收起来，不会把一次过期点击当成放行。
 #[tauri::command]
 pub fn agent_resolve_approval(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     id: String,
     call_id: String,
     decision: ApprovalDecision,
@@ -396,7 +457,7 @@ pub fn agent_resolve_approval(
 /// 前端整体同步文档（打开 .aip、撤销、或工作台编辑后回灌），返回新 revision。
 #[tauri::command]
 pub fn agent_sync_document(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     id: String,
     document: Value,
 ) -> Result<Value, String> {
@@ -412,7 +473,7 @@ pub fn agent_sync_document(
 
 /// 文档快照：revision + 文档 JSON（文本网格是权威状态）。
 #[tauri::command]
-pub fn agent_document(state: State<'_, AppState>, id: String) -> Result<Value, String> {
+pub fn agent_document(state: State<'_, Arc<AppState>>, id: String) -> Result<Value, String> {
     let session = state.session(&id)?;
     Ok(serde_json::json!({
         "id": session.id(),
@@ -427,7 +488,7 @@ pub fn agent_document(state: State<'_, AppState>, id: String) -> Result<Value, S
 /// 文档合成的 PNG data URL，画布预览与导出共用。
 #[tauri::command]
 pub fn document_png_url(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     id: String,
     frame: Option<u32>,
 ) -> Result<String, String> {
@@ -468,7 +529,7 @@ fn fallback_frame_index(doc: &pixel_core::document::Document, active_frame: &str
 /// 用户选什么扩展名就写什么字节，引擎和素材库各取所需，不做二次确认。
 #[tauri::command]
 pub fn document_export(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     id: String,
     format: String,
     path: String,
@@ -476,26 +537,44 @@ pub fn document_export(
     frame: Option<u32>,
 ) -> Result<(), String> {
     let doc = state.session(&id)?.document();
-    let bytes = match format.as_str() {
-        "gif" => pixel_core::sheet::encode_gif(&doc)?,
-        "ase" | "aseprite" => pixel_core::ase::encode_ase(&doc)?,
+    let bytes = export_canvas_bytes(&doc, &format, columns, frame)?;
+    std::fs::write(&path, &bytes).map_err(|e| format!("cannot write {path}: {e}"))
+}
+
+/// 把一份文档编码成目标格式的字节。`document_export` 与 MCP 服务端的
+/// `export_canvas` 共用：两边的格式名表必须一模一样，否则用户在界面上
+/// 导得出来的东西，外部 AI 按 tools/list 报的名字去导反而失败。
+pub(crate) fn export_canvas_bytes(
+    doc: &Document,
+    format: &str,
+    columns: Option<u32>,
+    frame: Option<u32>,
+) -> Result<Vec<u8>, String> {
+    Ok(match format {
+        "gif" => pixel_core::sheet::encode_gif(doc)?,
+        "ase" | "aseprite" => pixel_core::ase::encode_ase(doc)?,
         "frame" => {
             // 单帧导出：点名哪一帧就合哪一帧，没点名就合第一帧。
-            let img = pixel_core::png::composite_frame(&doc, frame.unwrap_or(0));
+            let img = pixel_core::png::composite_frame(doc, frame.unwrap_or(0));
+            pixel_core::png::encode_png(&img)?
+        }
+        // "png" 是 "frame" 的别名：list_export_formats 对外就是这么报的，
+        // 少这一支的话，模型照着列表去调，第一个请求就被拒。
+        "png" => {
+            let img = pixel_core::png::composite_frame(doc, frame.unwrap_or(0));
             pixel_core::png::encode_png(&img)?
         }
         // 横向整条：所有帧并排贴成一张，逐帧动画的接缝一眼能看完。
         "strip" => {
-            let img = pixel_core::png::flatten(&doc);
+            let img = pixel_core::png::flatten(doc);
             pixel_core::png::encode_png(&img)?
         }
         "sheet" => {
-            let img = pixel_core::sheet::spritesheet(&doc, columns.unwrap_or(0));
+            let img = pixel_core::sheet::spritesheet(doc, columns.unwrap_or(0));
             pixel_core::png::encode_png(&img)?
         }
         other => return Err(format!("unsupported export format: {other}")),
-    };
-    std::fs::write(&path, &bytes).map_err(|e| format!("cannot write {path}: {e}"))
+    })
 }
 
 /// 读一张参考图，转成 send_message 可用的附件（角色为 reference）。
@@ -523,19 +602,23 @@ pub fn read_image_context(path: String) -> Result<Attachment, String> {
 
 /// 会话历史：切回会话时前端用它重建对话视图（文档仍以 agent_document 为准）。
 #[tauri::command]
-pub fn agent_history(state: State<'_, AppState>, id: String) -> Result<Vec<Message>, String> {
+pub fn agent_history(state: State<'_, Arc<AppState>>, id: String) -> Result<Vec<Message>, String> {
     Ok(state.session(&id)?.history())
 }
 
 /// 当前文档的 .aip v2 文本，不落盘。文本网格是权威状态，前端直接渲染给用户看。
 #[tauri::command]
-pub fn aip_text(state: State<'_, AppState>, id: String) -> Result<String, String> {
+pub fn aip_text(state: State<'_, Arc<AppState>>, id: String) -> Result<String, String> {
     state.session(&id)?.aip_text()
 }
 
 /// 当前文档另存为 .aip v2 文本，同时把文本回给前端做兜底。
 #[tauri::command]
-pub fn aip_save(state: State<'_, AppState>, id: String, path: String) -> Result<String, String> {
+pub fn aip_save(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    path: String,
+) -> Result<String, String> {
     let session = state.session(&id)?;
     let text = session.aip_text()?;
     std::fs::write(&path, text.as_bytes()).map_err(|e| format!("cannot write {path}: {e}"))?;

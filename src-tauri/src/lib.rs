@@ -11,10 +11,13 @@ mod close;
 mod commands;
 mod editor;
 mod mcp;
+mod mcp_server;
 mod state;
 mod workflow;
 
 mod batch;
+
+use std::sync::Arc;
 
 use tauri::Manager;
 
@@ -22,12 +25,18 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .manage(state::AppState::default())
+        // 托管 Arc 而不是裸值：MCP 服务端是一条长命任务，它要在几十秒里
+        // 一直够得到状态。命令侧拿 State 再克隆一份 Arc 出来即可，改动
+        // 只是签名里的类型，State 的解引用让所有调用点原样能跑。
+        .manage(Arc::new(state::AppState::default()))
         .on_window_event(close::guard_close)
         .setup(|app| {
             let handle = app.handle().clone();
-            let app_state = handle.state::<state::AppState>();
+            let app_state = handle.state::<Arc<state::AppState>>().inner().clone();
             app_state.bootstrap(&handle)?;
+            // 设了「开着」就把 MCP 服务端拉起来。放在 bootstrap 之后：
+            // 配置目录要先定位完，端口改动才落得了盘。
+            mcp_server::start_if_enabled(&app_state, &handle);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -64,6 +73,11 @@ pub fn run() {
             mcp::mcp_list,
             mcp::mcp_remove,
             mcp::mcp_upsert,
+            // ---- MCP 服务端：本程序自己当服务端，外部 AI 与引擎连进来 ----
+            mcp_server::mcp_server_restart,
+            mcp_server::mcp_server_set_enabled,
+            mcp_server::mcp_server_set_port,
+            mcp_server::mcp_server_status,
             // ---- 会话：建、列、删、改名、排序、绑模型 ----
             commands::session_bind_model,
             commands::session_bind_role,

@@ -28,6 +28,7 @@ use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::state::AppState;
+use std::sync::Arc;
 
 /// 视频抽帧的临时落点。放在系统临时目录，不占用用户的工程目录。
 pub const FRAME_STAGING_DIR: &str = "aipixel/video-frames";
@@ -211,7 +212,7 @@ fn default_migrate_order() -> MigrateOrder {
 /// 用户随时可以把会话改绑到另一个模型。
 #[tauri::command]
 pub fn workflow_catalog(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     id: String,
 ) -> Result<Vec<WorkflowEntry>, String> {
     let session = state.session(&id)?;
@@ -257,7 +258,7 @@ pub async fn video_probe(path: String) -> Result<VideoProbeResult, String> {
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn prompt_refine(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     id: String,
     idea: String,
     width: u32,
@@ -293,7 +294,7 @@ pub async fn prompt_refine(
 /// 因为简报是要给用户改的中间产物，改完再由用户决定发不发去画。
 #[tauri::command]
 pub async fn vision_brief(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     id: String,
     path: String,
 ) -> Result<vision::VisionBrief, String> {
@@ -319,7 +320,7 @@ pub async fn vision_brief(
 #[tauri::command]
 pub async fn workflow_image_gen(
     app: AppHandle,
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     id: String,
     params: ImageGenParams,
 ) -> Result<WorkflowOutcome, String> {
@@ -421,7 +422,7 @@ pub async fn workflow_image_gen(
 #[tauri::command]
 pub async fn workflow_video_frames(
     app: AppHandle,
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     id: String,
     params: VideoFramesParams,
 ) -> Result<WorkflowOutcome, String> {
@@ -560,7 +561,7 @@ pub async fn workflow_video_frames(
 #[tauri::command]
 pub async fn video_brief(
     app: AppHandle,
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     id: String,
     params: VideoBriefParams,
 ) -> Result<agent_core::VideoBrief, String> {
@@ -649,7 +650,7 @@ pub async fn video_brief(
 #[tauri::command]
 pub fn workflow_tween(
     app: AppHandle,
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     id: String,
     params: TweenParams,
 ) -> Result<WorkflowOutcome, String> {
@@ -707,7 +708,7 @@ pub fn workflow_tween(
 #[tauri::command]
 pub fn workflow_pixelize(
     app: AppHandle,
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     id: String,
     params: PixelizeParams,
 ) -> Result<WorkflowOutcome, String> {

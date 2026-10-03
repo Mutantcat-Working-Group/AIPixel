@@ -10,14 +10,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_core::{
-    AgentSession, Capabilities, LoopLimits, McpRegistry, McpServerConfig, ModelConfig, Protocol,
-    RunnerConfig,
+    AgentSession, Capabilities, LoopLimits, McpRegistry, ModelConfig, Protocol, RunnerConfig,
 };
 use pixel_core::document::Document;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
 use crate::mcp::McpFile;
+use crate::mcp_server::McpServerRuntime;
 
 /// 模型配置文件，落盘在 app config 目录。api_key 只留在本机。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -97,6 +97,10 @@ pub struct AppState {
     mcp_enabled: Mutex<bool>,
     /// MCP 服务器登记表：配置的唯一真相，mcp.json 只是它的落盘影子。
     mcp: Arc<McpRegistry>,
+    /// 「本程序当服务端」的那一份生命周期：开关、端口、监听停机信号。
+    /// 和上面的登记表是反方向的两件事，但共用同一个 AppState——外部进程
+    /// 从这端口改画布，和用户在前端点同一支笔，走的是同一条会话路径。
+    mcp_server: Mutex<crate::mcp_server::McpServerRuntime>,
     config_dir: Mutex<PathBuf>,
     /// 关窗守门员登记。false 时 CloseRequested 直接放行——那一刻没有能
     /// 替用户拿主意的人，按住窗口只会让应用关不掉。前端 boot 时登记。
@@ -115,6 +119,7 @@ impl Default for AppState {
             limits: Mutex::new(LoopLimits::DEFAULT),
             mcp_enabled: Mutex::new(true),
             mcp: Arc::new(McpRegistry::new()),
+            mcp_server: Mutex::new(McpServerRuntime::default()),
             // 还没 bootstrap 也要有个站得住的配置目录：空路径会让 save_models()
             // 落到「当前工作目录/models.json」，跑一遍单测就等于往仓库里写一份
             // 含 api_key 的模型配置。setup 里的 bootstrap 会立刻把它换成真目录。
@@ -240,8 +245,21 @@ impl AppState {
         self.mcp.clone()
     }
 
+    /// 服务端运行时的守卫。刻意不返回 Arc：持锁的代码全都很短，而且
+    /// 「拿设置 -> 改 -> 落盘」这三步之间不容许别人插进来改端口。
+    ///
+    /// 锁序警告：`save_mcp_file` 自己也要拿这把锁，所以任何持着本守卫的
+    /// 代码都不要再调 `save_mcp_file`，否则同一线程二次上锁直接死掉。
+    /// mcp_server.rs 里都是先用 `{}` 块把守卫 drop 掉再落盘的。
+    pub fn mcp_server(&self) -> std::sync::MutexGuard<'_, crate::mcp_server::McpServerRuntime> {
+        self.mcp_server
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     pub fn save_mcp_file(&self) {
         let file = McpFile {
+            server: self.mcp_server().settings(),
             entries: self.mcp.configs(),
         };
         if let Ok(text) = serde_json::to_string_pretty(&file) {
@@ -249,16 +267,19 @@ impl AppState {
         }
     }
 
-    fn load_mcp_file(&self) -> Vec<McpServerConfig> {
-        load_json_or_quarantine::<McpFile>(&self.mcp_path())
-            .map(|file| file.entries)
-            .unwrap_or_default()
-    }
-
     /// 开机恢复：逐条登记（校验不过的跳过），auto_connect 的再排队连。
     /// 一个坏服务器不该挡住启动，失败只留状态，不冒泡。
     fn schedule_mcp_recovery(&self) {
-        let entries = self.load_mcp_file();
+        // 一次读进来分两路用：entries 给外部服务器登记，server 给本程序
+        // 自己当服务端的那一份设置。分两次读会让一个跑到一半被改坏的文件
+        // 读出两份不一样的答案。
+        let Some(file) = load_json_or_quarantine::<McpFile>(&self.mcp_path()) else {
+            return;
+        };
+        // 「开着」必须先搬回内存再进 lib.rs 的 start_if_enabled：
+        // 那个函数只认内存里的设置，读不到用户的开关就会让外部接不进来。
+        self.mcp_server().set_settings(file.server);
+        let entries = file.entries;
         let registry = self.mcp.clone();
         tauri::async_runtime::spawn(async move {
             for entry in entries {

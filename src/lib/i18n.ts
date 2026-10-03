@@ -456,6 +456,20 @@ export const zh = {
   "mcp.credentials_note":
     "值留空即沿用本机已存值；删掉整行即去掉该键。凭据只存在本机 mcp.json。",
   "mcp.no_description": "服务器没有提供描述",
+  "mcps.title": "本程序当 MCP 服务端",
+  "mcps.hint":
+    "监听本机回环端口，把画布的创建、绘制、导出的能力交出去，让外部 AI 或游戏引擎直接驱动本程序。默认关闭——开启相当于把写文件的能力递出去，请自己确认。",
+  "mcps.running": "运行中",
+  "mcps.stopped": "未启动",
+  "mcps.port": "监听端口",
+  "mcps.port_hint": "填 0 表示让内核挑一个空闲端口，挑中的值会写回这里。",
+  "mcps.requests": "已响应请求",
+  "mcps.restart": "僵局自救",
+  "mcps.restart_action": "重启监听",
+  "mcps.endpoint": "服务地址",
+  "mcps.copy": "复制地址",
+  "mcps.copied": "已复制",
+  "mcps.tools": "对外提供 {count} 个工具",
 
   // ---------- 工作流坞 ----------
   "dock.title": "工作流",
@@ -616,6 +630,10 @@ export const zh = {
   // ---------- 本机通知 ----------
   "store.read_models_failed": "读取模型配置失败：{error}",
   "store.read_mcp_failed": "读取 MCP 服务器配置失败：{error}",
+  "store.read_mcp_server_failed": "读取 MCP 服务端状态失败：{error}",
+  "store.set_mcp_server_enabled_failed": "切换 MCP 服务端开关失败：{error}",
+  "store.set_mcp_server_port_failed": "修改 MCP 服务端端口失败：{error}",
+  "store.restart_mcp_server_failed": "重启 MCP 服务端失败：{error}",
   "store.read_sessions_failed": "读取会话列表失败：{error}",
   "store.drop_session_failed": "删除会话失败：{error}",
   "store.no_session": "还没有会话",
@@ -1333,6 +1351,21 @@ export const en: Record<TKey, string> = {
   "mcp.credentials_note":
     "Blank value keeps the stored one; delete a line to drop the key. Credentials stay in the local mcp.json.",
   "mcp.no_description": "no description from the server",
+  "mcps.title": "This app as MCP server",
+  "mcps.hint":
+    "Listens on the local loopback port and hands out canvas create / paint / export abilities so an external AI or game engine can drive this app directly. Off by default: turning it on hands over file-writing power, so confirm it yourself.",
+  "mcps.running": "Running",
+  "mcps.stopped": "Not started",
+  "mcps.port": "Listen port",
+  "mcps.port_hint":
+    "0 lets the kernel pick a free port; the chosen one is written back here.",
+  "mcps.requests": "Requests served",
+  "mcps.restart": "Self rescue",
+  "mcps.restart_action": "Restart listener",
+  "mcps.endpoint": "Endpoint",
+  "mcps.copy": "Copy endpoint",
+  "mcps.copied": "Copied",
+  "mcps.tools": "{count} tools exposed",
 
   "dock.title": "Workflows",
   "dock.pending": "readiness",
@@ -1495,6 +1528,10 @@ export const en: Record<TKey, string> = {
 
   "store.read_models_failed": "could not read the model config: {error}",
   "store.read_mcp_failed": "could not read the MCP server config: {error}",
+  "store.read_mcp_server_failed": "could not read the MCP server status: {error}",
+  "store.set_mcp_server_enabled_failed": "could not toggle the MCP server: {error}",
+  "store.set_mcp_server_port_failed": "could not change the MCP server port: {error}",
+  "store.restart_mcp_server_failed": "could not restart the MCP server: {error}",
   "store.read_sessions_failed": "could not read the session list: {error}",
   "store.drop_session_failed": "could not delete the session: {error}",
   "store.no_session": "no session yet",

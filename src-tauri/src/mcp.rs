@@ -9,11 +9,18 @@ use agent_core::{namespaced_tool, McpRegistry, McpServerConfig, McpTool, McpTran
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
+use crate::mcp_server::McpServerSettings;
 use crate::state::AppState;
+use std::sync::Arc;
 
 /// mcp.json：和 models.json 并列落在 app config 目录，重启后原样恢复。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct McpFile {
+    /// 本程序自己当服务端的那一份设置，和「挂了哪些外部服务器」住在同一个文件里：
+    /// 两者都是 MCP 的本机选择，分开存会让用户在两个地方之间来回猜。
+    /// 没有这个键的老文件照原样读得进来，服务端保持默认关。
+    #[serde(default)]
+    pub server: McpServerSettings,
     #[serde(default)]
     pub entries: Vec<McpServerConfig>,
 }
@@ -146,14 +153,14 @@ pub fn servers_view(registry: &McpRegistry) -> McpServersView {
 
 /// 服务器清单：连接状态、各自暴露的工具、最近一次错误。
 #[tauri::command]
-pub fn mcp_list(state: State<'_, AppState>) -> McpServersView {
+pub fn mcp_list(state: State<'_, Arc<AppState>>) -> McpServersView {
     servers_view(&state.mcp_registry())
 }
 
 /// 新增/更新一个服务器配置。只登记不连接，连不连由用户点。
 #[tauri::command]
 pub async fn mcp_upsert(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     mut config: McpServerConfig,
 ) -> Result<McpServersView, String> {
     config.validate()?;
@@ -173,7 +180,7 @@ pub async fn mcp_upsert(
 /// 删除服务器并断开连接。
 #[tauri::command]
 pub async fn mcp_remove(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     name: String,
 ) -> Result<McpServersView, String> {
     let registry = state.mcp_registry();
@@ -185,7 +192,7 @@ pub async fn mcp_remove(
 /// 手动连接：握手 + 拉工具清单。失败原因随视图带回，弹窗里直接显示。
 #[tauri::command]
 pub async fn mcp_connect(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     name: String,
 ) -> Result<McpServersView, String> {
     let registry = state.mcp_registry();
@@ -196,7 +203,7 @@ pub async fn mcp_connect(
 /// 断开但保留配置。
 #[tauri::command]
 pub async fn mcp_disconnect(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     name: String,
 ) -> Result<McpServersView, String> {
     let registry = state.mcp_registry();

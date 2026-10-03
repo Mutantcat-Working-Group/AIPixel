@@ -15,4 +15,6 @@ authors = ["Mutantcat Working Group"]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+# net / io-util：MCP 服务端自己听 127.0.0.1 的 socket 说 HTTP，
+# 不额外拉 hyper / axum 这类整框架进来。
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }

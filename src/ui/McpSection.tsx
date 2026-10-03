@@ -6,16 +6,18 @@ import {
   Button,
   Checkbox,
   Input,
+  InputNumber,
   Popconfirm,
   Segmented,
   Switch,
   Tag,
   Tooltip,
 } from "antd";
-import { Plus, Trash2 } from "lucide-react";
+import { ClipboardCopy, Plus, Trash2 } from "lucide-react";
 
 import { useStore } from "../lib/store";
 import { useT, type T } from "../lib/t";
+import type { McpServerStatusView } from "../lib/types";
 import type {
   McpServerConfig,
   McpServerView,
@@ -51,6 +53,28 @@ const KIND_OPTIONS = [
   { label: "HTTP", value: "http" },
 ];
 
+/** 服务端对外那些工具的清单。名字必须与 Rust 侧 `TOOL_SPECS` 逐字对齐，
+ *  这里只负责把说明摊给用户看，不参与调用。 */
+const SERVER_TOOLS: { name: string; hint: string }[] = [
+  { name: "list_sessions", hint: "列出全部画布会话，含宽高与帧数" },
+  { name: "create_canvas", hint: "按指定宽高开一个新画布" },
+  { name: "drop_canvas", hint: "关掉并丢弃一个画布会话" },
+  { name: "rename_canvas", hint: "给画布会话改个显示名" },
+  { name: "get_canvas", hint: "读画布全貌：图层、帧、调色板、像素统计" },
+  { name: "canvas_preview", hint: "导出当前帧的 PNG base64，给视觉模型看" },
+  { name: "paint_stroke", hint: "在指定图层画一条折线笔触" },
+  { name: "fill_region", hint: "从某个像素开始做四邻域填充" },
+  { name: "apply_ops", hint: "批量套用点/线/矩形/填充等算子，带整体回滚" },
+  { name: "resize_canvas", hint: "改画布宽高，可选是否保留原内容" },
+  { name: "list_export_formats", hint: "列出全部可导出的文件格式" },
+  { name: "export_canvas", hint: "把画布写到调用方指定的磁盘路径" },
+  { name: "save_project", hint: "把当前工程存成 .aip 文件" },
+  { name: "import_project", hint: "读入一个 .aip 工程文件" },
+  { name: "import_image", hint: "把一张位图降采样量化进画布（外部 AI 自己的生图模型）" },
+  { name: "prompt_agent", hint: "用主智能体干一件事（生成、修改、分析）" },
+  { name: "interrupt_agent", hint: "让正在跑的智能体立刻停下" },
+];
+
 function linesToList(text: string): string[] {
   return text
     .split("\n")
@@ -76,6 +100,114 @@ function statusTag(server: McpServerView, t: T) {
     return <Tag color="red">{t("mcp.error")}</Tag>;
   }
   return <Tag>{t("mcp.offline")}</Tag>;
+}
+
+/** 运行状态的小牌子。running / enabled / enabled-but-broken 三态要说人话。 */
+function serverStateTag(status: McpServerStatusView, t: T) {
+  if (status.running) {
+    return <Tag color="green">{t("mcps.running")}</Tag>;
+  }
+  if (status.enabled && status.last_error) {
+    return <Tag color="red">{t("mcp.error")}</Tag>;
+  }
+  return <Tag>{t("mcps.stopped")}</Tag>;
+}
+
+/** 端点地址行：右边一个复制按钮，省得用户在浏览器和编辑器之间手抄。 */
+function EndpointRow({ status }: { status: McpServerStatusView }) {
+  const t = useT();
+  const [copied, setCopied] = useState(false);
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(status.endpoint);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1600);
+    } catch {
+      // 剪贴板不给就安静退场：地址本身还摆在那儿，用户看得见。
+    }
+  }
+
+  return (
+    <div className="mcps-endpoint">
+      <code>{status.endpoint}</code>
+      <Tooltip title={copied ? t("mcps.copied") : t("mcps.copy")}>
+        <Button
+          size="small"
+          aria-label={t("mcps.copy")}
+          icon={<ClipboardCopy size={13} />}
+          onClick={() => void copy()}
+        />
+      </Tooltip>
+    </div>
+  );
+}
+
+/** 「本程序当服务端」卡片：让外部 AI / 游戏引擎反过来驱动本程序的画布。
+ *  开关默认是关的——监听端口等于把写文件的能力递出去，得由人点头。 */
+function McpServerCard() {
+  const t = useT();
+  const status = useStore((s) => s.mcpServerStatus);
+  const busy = useStore((s) => s.mcpServerBusy);
+  const setEnabled = useStore((s) => s.setMcpServerEnabled);
+  const setPort = useStore((s) => s.setMcpServerPort);
+  const restart = useStore((s) => s.restartMcpServer);
+
+  if (!status) return null;
+
+  return (
+    <div className="mcps-card">
+      <div className="mcp-row-head">
+        <span className="mcp-row-name">{t("mcps.title")}</span>
+        {serverStateTag(status, t)}
+        <span className="grow" />
+        <Switch
+          size="small"
+          checked={status.enabled}
+          loading={busy}
+          onChange={(next) => void setEnabled(next)}
+        />
+      </div>
+      <p className="settings-blurb">{t("mcps.hint")}</p>
+        <div className="mcps-grid">
+          <Tooltip title={t("mcps.port_hint")}>
+          <label className="mcps-field">
+            <span>{t("mcps.port")}</span>
+            <InputNumber
+              size="small"
+            min={0}
+            max={65535}
+            value={status.port}
+            disabled={busy}
+            onChange={(value) => void setPort(Number(value) || 0)}
+          />
+          </label>
+          </Tooltip>
+        <div className="mcps-field">
+          <span>{t("mcps.requests")}</span>
+          <span className="mcps-count">{status.requests}</span>
+        </div>
+        <div className="mcps-field">
+          <span>{t("mcps.restart")}</span>
+          <Button size="small" disabled={busy || !status.enabled} onClick={() => void restart()}>
+            {t("mcps.restart_action")}
+          </Button>
+        </div>
+      </div>
+      {status.endpoint ? <EndpointRow status={status} /> : null}
+      {status.last_error ? <div className="mcp-error">{status.last_error}</div> : null}
+      <div className="mcps-tools">
+        <span className="mcps-tools-title">
+          {t("mcps.tools", { count: SERVER_TOOLS.length })}
+        </span>
+        {SERVER_TOOLS.map((tool) => (
+          <Tooltip key={tool.name} title={tool.hint}>
+            <span className="mcp-tool">{tool.name}</span>
+          </Tooltip>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 /** MCP 一整块：总闸加服务器去留。以前顶栏那个独立弹窗并进了设置，
@@ -177,7 +309,7 @@ export default function McpSection() {
   }
 
   return (
-    <section className="settings-section mcp-section">
+  <section className="settings-section mcp-section">
       <div className="settings-section-title">
         <span>{t("settings.mcp")}</span>
         <span className="grow section-hint">
@@ -190,6 +322,8 @@ export default function McpSection() {
         />
       </div>
       <p className="settings-blurb">{t("settings.mcp_hint")}</p>
+
+      <McpServerCard />
 
       <div className="mcp-list">
         {servers.length === 0 ? (

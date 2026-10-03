@@ -36,6 +36,7 @@ import type {
   ImageSupport,
   McpServerConfig,
   McpServersView,
+  McpServerStatusView,
   NamedPalette,
   ModelConfig,
   ModelsView,
@@ -205,6 +206,10 @@ interface StoreState extends DocumentSnapshot, WorkflowState, BatchState {
   loopLimits: LoopLimits | null;
   /** MCP 总开关。true = 模型看得见用户自配的外部工具。 */
   mcpEnabled: boolean;
+  /** 本程序当 MCP 服务端的运行快照；null = 还没读过 Rust。 */
+  mcpServerStatus: McpServerStatusView | null;
+  /** 服务端起停进行中：期间开关与端口全灭，防止连点把监听器打爆。 */
+  mcpServerBusy: boolean;
   /** 设置弹窗停在哪一页：模型 / 行为护栏 / 关于。 */
   settingsTab: SettingsTab;
   /** 会话输入区里钉住的画风 id；null = 让模型按这句话自己判断。
@@ -275,6 +280,14 @@ export interface StoreActions {
   refreshMcpEnabled: () => Promise<void>;
   /** 开/关 MCP。Rust 当场作用到活着的会话，回值才是生效的那份。 */
   setMcpEnabled: (enabled: boolean) => Promise<void>;
+  /** 读一次本程序 MCP 服务端的运行快照。 */
+  refreshMcpServer: () => Promise<void>;
+  /** 开/关服务端。回值才算生效：bind 失败时 Rust 会把原因带回来。 */
+  setMcpServerEnabled: (enabled: boolean) => Promise<void>;
+  /** 换监听端口；0 = 让内核挑。改端口会自动重起监听。 */
+  setMcpServerPort: (port: number) => Promise<void>;
+  /** 先停再起，读配置不变。端口被占的僵局靠它解。 */
+  restartMcpServer: () => Promise<void>;
   /** 探测这个模型能不能出图；只回结论，不改任何设置。 */
   probeImage: (params: {
     id?: string | null;
@@ -1150,6 +1163,8 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     mcpServers: EMPTY_MCP,
     mcpBusy: false,
     loopLimits: null,
+    mcpServerStatus: null,
+    mcpServerBusy: false,
     workflows: [],
     catalogReady: false,
     kind: "image_gen",
@@ -1209,6 +1224,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         }
         setState({ models });
         await getState().refreshMcpEnabled();
+        await getState().refreshMcpServer();
         await getState().refreshLoopLimits();
         let mcpServers: McpServersView;
         try {
@@ -1546,6 +1562,51 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       } catch (error) {
         flagKey("store.set_mcp_enabled_failed", { error: String(error) });
         await getState().refreshMcpEnabled();
+      }
+    },
+
+    refreshMcpServer: async () => {
+      try {
+        setState({ mcpServerStatus: await bridge.mcpServerStatus() });
+      } catch (error) {
+        // 读不回来不嚷嚷：这一块只影响设置页，主界面照常跑。
+        flagKey("store.read_mcp_server_failed", { error: String(error) });
+      }
+    },
+
+    setMcpServerEnabled: async (enabled) => {
+      setState({ mcpServerBusy: true });
+      try {
+        setState({ mcpServerStatus: await bridge.mcpServerSetEnabled(enabled) });
+      } catch (error) {
+        flagKey("store.set_mcp_server_enabled_failed", { error: String(error) });
+        await getState().refreshMcpServer();
+      } finally {
+        setState({ mcpServerBusy: false });
+      }
+    },
+
+    setMcpServerPort: async (port) => {
+      setState({ mcpServerBusy: true });
+      try {
+        setState({ mcpServerStatus: await bridge.mcpServerSetPort(port) });
+      } catch (error) {
+        flagKey("store.set_mcp_server_port_failed", { error: String(error) });
+        await getState().refreshMcpServer();
+      } finally {
+        setState({ mcpServerBusy: false });
+      }
+    },
+
+    restartMcpServer: async () => {
+      setState({ mcpServerBusy: true });
+      try {
+        setState({ mcpServerStatus: await bridge.mcpServerRestart() });
+      } catch (error) {
+        flagKey("store.restart_mcp_server_failed", { error: String(error) });
+        await getState().refreshMcpServer();
+      } finally {
+        setState({ mcpServerBusy: false });
       }
     },
 

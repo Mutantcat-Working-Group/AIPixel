@@ -1,151 +1,132 @@
-<div align="center">
-<img src="./icon.png" style="width:100px;" width="100"/>
-<h2>AIPixel</h2>
+<div align=center>
+<img src="icon.png" style="width:100px;" width="100"/>
+<h2>AI像素画</h2>
+<p>AIPixel</p>
 </div>
 
-> GPL-3.0 开源的像素画 Agent 桌面工具：Tauri 2 + React 18 + antd 5，Rust 主循环，
-> 只用你自己的模型，中间文件是 `.aip`。
+[English](README.en.md) | 中文
 
 ### 一、产品概述
 
-- AIPixel 是一个跑在本地的像素画 agent 工作台：左侧会话、中间对话、右侧画布与文档，一次对话产出一张 `.aip`
-- **BYOM（自带模型）**：没有内置服务器、没有登录、没有计费。模型只来自你在本机 UI 里填的 Provider，密钥存在 `app_config_dir/models.json`，永不出本机
-- **Rust 主循环**：prompt 组装、provider 流式、`tool_use` 抽取、工具执行、结果回填、续轮全部在 Rust 侧跑完，前端只负责渲染与输入
-- **文本网格即权威状态**：canvas 的权威形态是文本网格（RLE 编码）而不是位图，图片只是上下文，模型永远不许手写像素矩阵
-- 面向做 RPG / 独立游戏的美术与程序，也面向想研究「agent 怎么安全地驱动一个文档模型」的人
+- AI像素画（AIPixel）是一款跑在本机的像素画 Agent 桌面工具：左侧会话、中间对话、右侧画布，一次对话产出一份 `.aip`。
+- **BYOM（自带模型）**：没有内置服务器、没有登录、没有计费。模型只来自你在界面里自己填的 Provider（Anthropic / OpenAI 兼容），地址与密钥只存在本机。
+- **每一笔像素都落在受预算约束的沙箱里**：模型不许凭感觉手写像素矩阵，结构改动走类型化操作，绘制与动画跑在 Lua 沙箱，读回用压缩编码。
+- 中间文件 `.aip` 是明文文本：宽高、调色板、图层、帧都写在文本里，天然适合版本管理和人工微调。
+- **发行方** 由异猫工作群（mutantcat.org）发行，GitHub: https://github.com/Mutantcat-Working-Group
 
-核心价值：让模型碰像素画，最怕它一口气「手写」一屏 4096 个色号，改一个像素要重画整张图，一跑偏就整张作废。
-AIPixel 把生图路径收窄成六条类型化工具（结构 ops、脚本、读回、补帧、图片转像素、直连生图），模型的自由度放到该放的地方（结构、构图、脚本、垫图），每一笔像素都落在受预算约束的沙箱里。
+核心价值：
 
-### 二、界面
+- 让模型画像素画，最怕它一口气「手写」一屏色号，改一个像素要重画整张图。这里把生图路径收窄成七条受预算约束的工具，模型的自由度留给结构、构图、脚本和垫图。
+- 画布不是给人看的截图，而是唯一权威状态：图层、帧、配色范围都是一等公民，改一处、撤销一处、导出一处，前后端是同一份东西。
+- 桌面版双击即用，模型配置、MCP 服务器、批量配方全部只在本机，不上传任何服务器。
 
-Agent 会话与工作台都已落地：会话负责产出，工作台负责盯着它、以及在画布上直接动手。
+### 二、功能说明
 
-左侧 `src/ui/SessionSidebar.tsx` 是会话列表，新建时先选画布宽高（支持改名与拖动排序）；中间 `src/ui/ChatPanel.tsx` 是对话流：
-用户气泡带附件条、助手消息带流式光标、工具调用可展开看 JSON 入参、推理片段折叠在 `<details>` 里；右侧 `src/ui/DocumentPanel.tsx` 把
-document 渲染成画布，图层 / 帧 / 配色范围各一行，还能切到 `.aip` 原文。
+#### 工作台三栏
 
-画布上方是画笔 / 填充 / 橡皮三个工具加撤销，旁边是播放与洋葱皮，另有一档瓦片底图：把画面平铺成
-1x1 / 2x2 / 3x3，瓦片接缝一眼能看完；只有中间那格接管指针，其余格是同一幅画的回声。
-帧条每一格是一张缩略图（画法与 Rust 权威渲染同源的 `compositeFrame`，看到的就是会导出的），缩略图下面是帧号与停留时长，点哪格跳哪帧；
-帧那一行右边是新建、复制、删除、前后挪帧，
-行下面一格直接填这一帧停留多少毫秒。
-逐帧工具生成了帧却看不到动画是说不通的，所以播放用一个轻量 `setTimeout` 循环，帧号在前端本地走，
-不每帧打一次 IPC；洋葱皮把上一帧按 24% 透明度垫在当前帧底下，逐帧对位才有依据。
-图层列表按栈顶在上的惯例倒着排（和 Aseprite / Photoshop 一致），每行有显隐开关，行尾两个箭头把选中图层沿绘制顺序挪一格，
-列表下方是当前图层的不透明度。这些改动都走 `pixel_apply_operations`，所以和画笔一样进撤销栈。
-右侧面板的「配色范围」一栏把调色板当成边界而不是摆设：六套预设（Gray 8 / Sweetie 16 / DawnBringer 16 /
-PICO-8 / Game Boy / 1-bit，专有名词两种语言下都不改写）加一个「任意颜色」槽，拖动取色实时预览、松手才算落，
-一个预制只带得动一个自定义槽位。换预设不是换着玩：Rust 侧 `set_palette` 会按 CIELAB 就近色把已有像素
-重映射进新范围，画面留住、颜色归队，所以预设收到的都是清一色不透明色。索引 0 恒为透明、不属于配色范围，
-调色板行首那颗透明格就是擦除落点，画笔选它也当橡皮用。
+- 左侧会话列表：新建时先选画布宽高，支持改名与拖动排序；会话可分别绑定模型与角色。
+- 中间对话流：用户消息带附件条，助手消息流式输出，工具调用可展开看入参，推理片段折叠显示。
+- 右侧画布与文档面板：图层 / 帧 / 配色范围各一行，可随时切到 `.aip` 原文查看与手改。
 
-导出收在右上角工具链的下载菜单里，不占右侧面板：GIF（无限循环，帧延时取文档自己的 `duration_ms`，
-短于 20ms 会被抬上去——GIF 的延时单位是厘秒，不少查看器把 0 当成立刻切帧）、当前帧 PNG、
-横向整条 PNG（所有帧并排一张）、精灵表 PNG、Aseprite（`.ase`）。编码全在 Rust 侧，
-合成的原料是调色板索引而不是位图像素，所以导出来的和画布上看到的是同一份东西。
+#### 画布与动画
 
-落地逻辑在 `src/lib/store.ts`：画笔的笔迹先在 `DocumentPanel` 的透明画布上增量预览，抬笔才整笔发给 Rust，
-改动统一经 `document_updated` 回到前端，画布只有一条刷新路径。单帧合成在 `src/lib/render.ts`，
-与 Rust 侧 `pixel_core::png::composite_pixel` 逐位对齐，两侧画出来的东西不会岔开。
+- 画笔、填充、橡皮三个工具加撤销，抬笔才把整笔提交，笔迹先在画布上增量预览。
+- 帧条每格一张缩略图，画法与导出同源，看到的就是会导出的；缩略图下是帧号与停留时长，点哪格跳哪帧。
+- 帧的新建、复制、删除、前后挪帧；播放用轻量本地循环，不逐帧打后端；洋葱皮把上一帧按 24% 透明度垫在当前帧底下，逐帧对位有依据。
+- 一档瓦片底图：把画面平铺成 1x1 / 2x2 / 3x3，瓦片接缝一眼看完，只有中间那格接管指针。
 
-顶栏依次是当前会话绑定的模型、权限档位（Auto / Chat / Ask，决定每次工具调用要不要先问）、打开与另存 `.aip`、挂参考图、模型设置，右侧是导出菜单。
-一条模型都没配、或者会话还挂在已删掉的模型上时，顶栏显示「未设置模型」并给一条指向设置的横幅——界面不收起：会话能建、画布能画，只是发消息没人接。
+#### 图层
 
-顶栏左侧的「工作流」一栏是一组可切换的工作流条目，`src/ui/WorkflowDock.tsx`。每条按当前会话绑定的模型算 readiness：
-模型能力不够的条目照样列出来，只是禁用并写清缺什么，不让你只看到一个灰按钮。目录七条：
+- 图层列表按栈顶在上倒序排列（与 Aseprite / Photoshop 一致），每行带显隐开关。
+- 行尾箭头把选中图层沿绘制顺序挪一格，列表下方是当前图层不透明度。
+- 索引 0 恒为透明，调色板行首那颗透明格就是擦除落点。
 
-智能体绘制（对话即绘制，每次编辑跑一个沙箱 Lua 脚本）、图像生成（模型渲染一张位图再量化到画布网格）、参考图简报
-（视觉模型读成结构化简报再照着画）、视频抽帧（ffprobe 抽帧后逐帧纯本机量化，全程不调模型）、视频运动简报（读视频模型把一段
-视频读成可编辑的运动简报，产物是文本不是帧）、补间帧（本机插值）、提示词微调。外加一条不在能力目录里的量化：把一张位图丢到
-网格上，纯本机运行。七条按对模型的要求分三档：三条要专项能力（生图、读图、读视频），两条只要会话模型（智能体绘制、提示词微调），
-两条全程本机、一个 token 都不花（视频抽帧、补间帧）——所以没有读视频模型的用户照样能把一段视频抽成帧。运动简报跑完不落文档，
-结果塞进生图面板或对话输入框，由你决定下一步往哪走。
+#### 配色范围
 
-右栏三条轨道：画布、工作流、批量。「批量」一栏是 `src/ui/BatchPanel.tsx`，一个文件夹进、一个文件夹出的纯本机批处理，
-和 agent 会话互补：会话是「一次一两张、一个模型盯着」，这里是「一个 token 都不花」的确定性重复劳动。两个方向：
-量化把参考图批量反查成 `.aip`（量化参数与工作流同源，共用 `src/ui/QuantizeFields.tsx`），导出把 `.aip` 批量渲染成 PNG / GIF。
-开跑前先扫一遍，把候选文件数报给你；过程走独立的 `batch-event` 通道，逐文件折进行表，单个文件失败只记原因不中断，
-跑完的回执带成败计数与输出目录。同样的输入与同样的配方得到同样的输出，方便复跑与版本管理。调顺的参数组起个名字就能存进本机配方簿（落盘 app config 目录的 `recipes.json`，与 `models.json` 同目录同套路），下次直接取，可删可覆盖。
+- 六套预设：Gray 8 / Sweetie 16 / DawnBringer 16 / PICO-8 / Game Boy / 1-bit，另加一个「任意颜色」槽。
+- 换预设不是换着玩：已有像素会按 CIELAB 就近色重映射进新范围，画面留住、颜色归队。
+- 拖动取色实时预览、松手才算落，工具按钮轻点即复制色值。
 
-### 三、架构
+#### 导出
 
-两个 Rust crate 加一个 Tauri 壳，前端是一层薄壳。
+- 编码全在 Rust 侧完成，合成原料是调色板索引而不是位图像素，所以导出的和画布上看到的是同一份东西。
+- 支持 GIF（无限循环，帧延时取文档自己的时长）、当前帧 PNG、横向整条 PNG、所有帧并排一张、精灵表 PNG、Aseprite `.ase`（图层与帧语义原样保留）。
 
-| 层 | 位置 | 职责 |
-| --- | --- | --- |
-| Rust 壳 | `src-tauri/` | 应用状态托管、命令注册、`agent-event` 事件广播。只做桌面装配，没有业务逻辑；`src-tauri/src/editor.rs` 是工作台编辑器命令层（画笔 / 油漆桶 / 结构操作），与主循环共用同一把文档锁 |
-| Agent 主循环 | `crates/agent-core/` | prompt 组装、provider 流式、`tool_use` 抽取、工具执行、结果回填、续轮 |
-| 像素文档模型 | `crates/pixel-core/` | document 模型、类型化操作、RLE 上下文编码、`.aip` v2、Lua 沙箱着色器、PNG / GIF / 精灵表导出 |
-| 前端 | `src/` | React + antd + zustand，只做渲染和输入；`src/lib/bridge.ts` 是唯一的 invoke / event 出口 |
+#### 工作流坞
 
-agent-core 不依赖 Tauri，是纯 Rust。它通过一个 `tokio::sync::mpsc` 通道向外吐 `AgentEvent`，由 Tauri 壳转成事件广播，
-前端在 `src/lib/transcript.ts` 把事件流折叠成可渲染条目（纯函数，可单测）。
+- 七条工作流，按当前模型的能力自动判断可用性：模型能力不够的条目照样列出，只是禁用并写清缺什么。
+- 智能体绘制：对话即绘制，每次编辑跑一个沙箱 Lua 脚本。
+- 图像生成：模型渲染一张位图再量化到画布网格，支持垫图。
+- 参考图简报：读图模型把参考图读成结构化简报，再照着画。
+- 视频抽帧：抽帧后逐帧纯本机量化，全程不调模型、一个 token 都不花。
+- 视频运动简报：读视频模型把一段视频读成可编辑的运动简报，产物是文本不是帧。
+- 补间帧：在两个已有帧之间本机插值。
+- 提示词微调：把一句大白话改写成结构化生图提示词。
+- 外加一条挂在坞末尾的量化：把一张位图丢到网格上，纯本机运行。
 
-### 四、Agent 怎么工作
+#### 批量工作台
 
-一次发送的流程：`prompt admission -> provider 流式输出 -> tool_use -> 工具执行 -> 结果回填 -> 续轮`。
-每轮都重新组装系统提示词，因为上一轮的工具可能已经改过 canvas。模型能用的工具有七个：
-- `pixel_apply_operations`：一次事务里做一坨类型化操作。图层 / 帧 / 调色板的结构改动走这里（建、复制、挪、删、改名、设时长），也可以用 `set_pixels`、`stamp_grid`、`draw_shape`、`bucket_fill`、`clear_region` 打小补丁。任一操作非法则整事务回滚，错误信息会指出失败的操作下标
-- `pixel_run_shader`：一段 Lua 脚本，配一次事务的绘制与动画。带 Loops 与 palette helpers，`animate=true` 时按 `phase`（0..1）驱动每一帧
-- `pixel_read_canvas`：读回当前网格，`overview=true` 时给降采样地图，最多读 128x128 的精确窗口
-- `pixel_tween_frames`：在两个已存在的帧之间插中间帧。要补间、过渡、或者「从 A 姿态长到 B 姿态」时用。`migrate` 按序翻差异像素（像素画该有的变形）、`blend` 插值颜色、`copy` 是占位，`ease` 会给迁移进度上 smoothstep
-- `pixel_pixelize_image`：把一张位图（通常是生图模型的产出，base64 PNG/JPEG）量化成索引像素落到目标 cel，往画布调色板上吸附、尽量复用接近色而不撑爆调色板。用来把生成结果落到网格，而不是一个像素一个像素地描述
-- `pixel_generate_image`：让生图模型直接画一张位图、再量化上画布。画刷、细密过渡、偏写实这类 Lua 脚本和类型化 ops 表达不来的走这条。默认覆盖激活 cel；要「改这一帧」就把当前帧 id 透传进 `reference_frame` 当垫图，`spot="new_frame"` 则落到新建帧而不是覆盖
-- `pixel_plan`：纠正「这一轮被理解成了什么」。一个 turn 只允许调一次，且必须赶在任何绘制工具之前，其余时候调它只会得到报错
+- 一个文件夹进、一个文件夹出的纯本机批处理，与会话互补：会话是一两张图一个模型盯着，这里是确定性重复劳动，一个 token 都不花。
+- 两个方向：量化把参考图批量反查成 `.aip`，导出把 `.aip` 批量渲染成 PNG / GIF。
+- 开跑前先扫描一遍报出候选文件数；过程走独立事件通道逐文件折进行表，单个文件失败只记原因不中断，跑完回执带成败计数与输出目录。
+- 同样的输入与同样的配方得到同样的输出，方便复跑与版本管理。
 
-直连生图的传输链见 `crates/agent-core/src/imagegen.rs`：有垫图时优先走 `images/edits` 多段上传，没有垫图时走 `images/generations`，
-两者都被端点拒绝（404/405/501）才退回 chat 的 `modalities=["image"]`。这里有一条硬规则——垫图绝不静默丢失：只要调用带了 reference，
-就永远不会掉回纯提示词的 `generations`，只能退回把 base64 垫图塞进 content parts 的 chat 通道，宁可报错也不悄悄画一张没参考过的图。
-所以「改这一帧」「照这一帧再长一帧」「照示例图画」在任何 OpenAI 风格端点上行为一致。
+#### 配方簿
 
-「模型不许手写矩阵」的契约在 `crates/agent-core/src/tools.rs` 收口：绘制和动画统一走 Lua 沙箱，结构改动统一走 ops，读回统一走 RLE。
+- 调顺的参数组起个名字就能存进本机配方簿，下次直接取，可删可覆盖。
+- 配方可用 `.aipr` 单条或整本导出：伸手给对方的就是一个能在任何编辑器里读的 JSON，手上这份没存过也能直接分享。
+- 导入时同名不覆盖而是加序号，坏条目单独跳过并在回执里逐条交代。
 
-#### 本轮分流与知识库
+#### 模型与 MCP
 
-开一个 turn 之前，Rust 先按用户原话把这一轮的方向定一次，再交给模型——这件事在 `crates/agent-core/src/plan.rs`。五件事：参照图是「只借画风」还是「照着实临摹」、成品是瓦片 / 角色 / 场景 / 图标 / 图案 / 道具、风格预设锁不锁（1-bit、Game Boy、NES、PICO-8、CGA、抖动递色、粉彩、高比特）、收尾规矩取哪一档（写实渲染、电影打光、材质区分、细节精修、景深层次、柔边平滑、肌理质感）、这一轮该带哪几条像素画工艺知识。定性的位置放在 Rust 而不放在模型：把预算全花在思考、一个工具都不调的情况真实存在，那时候约束必须已经在路上。
+- 模型设置里填 Provider、接口地址、密钥与模型名，可配多个模型并切换激活；每个会话可单独绑定模型。
+- 权限档位三档：Auto 每个调用直接执行；Ask 每个调用先停下来等你批准；Chat 只拦写操作，只读调用直接过。
+- 「这次别烦我」只把当前轮降级成 Auto，不写回会话配置。
+- 主循环能力不止内置工具：顶栏插头图标打开 MCP 工具服务器面板，可挂自己的 MCP 服务器，stdio（拉起子进程）与 HTTP 两种传输都支持。
+- MCP 服务器上的工具以命名空间进入每轮调用，和内置像素工具并列交给模型，同样过审批闸门。
+- 反方向也算：本程序自己还是个 MCP 服务端，外部 AI 连进来就能「建画布、画、导到指定路径」，详见第十节。
 
-聊天里每轮最多出现一张「理解这一轮」卡片，五件事摆成几行，行尾带上判据——用户原话里定下这件事的那个说法。模型读了觉得不对，可以调一次 `pixel_plan` 纠正；`none` 是显式摘掉上一轮的预设，「不限」也是一条要说出来的结论。
+#### 预算护栏
 
-画风与收尾规矩是两根平行的轴，各管一半：画风钉的是硬指标——四级绿就只有四级绿，谁来说情都不改；收尾规矩讲的是另一半，同样四级绿，可以画成一张干瘪的示意图，也可以画成有形体、有材质、有收尾的一张图。两者同时选上时不打架，规则段里写明「色数、描边、抖动听画风的，其余照常上路」，id 撞车的两个（写实、精细）由画风段直接顶替，不发两遍。收尾规矩只认界面上那一下点击：一句话里出现「电影感」不等于要把整轮锁成电影打光——它可能只是在描述题材，所以没有、也不该有 `classify_text`。
+- 单轮工具步数、续轮次数、回灌字节数都可设；同一个失败调用连续多次自动退避。
+- 流式期间随时可以中断，中断立即收尾，不会把后半场卡死。
 
-知识库是 59 条像素画工艺条目（`crates/agent-core/src/knowledge.rs`），按「技法 -> 素材 -> 生物 -> 器物 -> 场景 -> 工具词」排好——「画只猫」只给上色规则是不够的，模型知道怎么铺色阶，照样能把猫画成四条腿的毯子，所以生物和器物两组讲的是「怎么把一样东西画对」。按用户原话做关键词加权明文检索，命中前几条随系统提示词进本轮。没有向量库、没有嵌入模型，也多不出一个要用户自己去配的服务：搜「瓦片」就该命中瓦片，明文命中就够。美术名词的中英别称表与常用色名表同理（`glossary.rs` / `colornames.rs`），按需检索，不整本塞进提示词。
+### 三、安装与下载
 
-预算与退避保护同样在主循环里：`max_tool_steps`（单 turn 工具步数，默认 24）、`max_turns`（续轮次数，默认 12）、
-`max_tool_result_bytes`（回灌截断，默认 6000 字符），外加同一个失败调用连续 3 次的退避。流式期间按 120ms 轮询取消标志，`interrupt()` 立刻收尾。
+桌面版从 [Releases](https://github.com/Mutantcat-Working-Group/AIPixel/releases) 下载，版本号形如 `1.0.20261009`（小版本加构建日期）：
 
-审批闸门是权限档位的落点，见 `crates/agent-core/src/runner.rs` 的 `await_approval`：Auto 每个调用直接执行；
-Ask 每个调用都停在 `approval_request` 上等用户；Chat 只拦写操作，`pixel_read_canvas` 这种只读回放直接过。
-一个 turn 顺序执行工具，同时最多挂一条等票；等待期间照样本轮询取消标志，所以中断不会把后半场卡死。
-Approve all 只把当前 turn 降级成 Auto，不写回会话配置——「这次别烦我」不是「以后都别问」。
-Reject 不当失败调用（不进退避计数）：喂一条 tool_result 让模型解释它想干什么、换方向，对话继续。
+| 平台 | 安装包 |
+| --- | --- |
+| Windows x86_64 | `AIPixel_<版本>_x64-setup.exe` |
+| Windows arm64 | `AIPixel_<版本>_arm64-setup.exe` |
+| macOS（Intel） | `AIPixel_<版本>_x64.dmg` |
+| macOS（Apple Silicon） | `AIPixel_<版本>_aarch64.dmg` |
+| macOS（universal） | `AIPixel_<版本>_universal.dmg` |
+| Linux x86_64 | `AIPixel_<版本>_amd64.AppImage` |
+| Linux aarch64 | `AIPixel_<版本>_aarch64.AppImage` |
 
-系统提示词是「静态 craft 规则 + 动态 canvas 上下文」两段，见 `crates/agent-core/src/prompt.rs`。静态部分写工作流、像素与动画 craft、
-RLE 编码约定；动态部分由 `pixel_core::context` 按当前激活图层 / 帧实时生成。提示词与工具契约按本项目自己的约束重做。
+Windows 为 NSIS 安装包（perMachine，简体中文安装界面）；macOS DMG 为 ad-hoc 签名，含 Applications 拖放快捷方式；Linux 为 AppImage，赋予执行权限后双击运行。每个 Release 同时附带 `checksums.txt`、`checksums-md5.txt`、`checksums-sha1.txt` 三个校验文件，可核对下载文件完整性。
 
-#### MCP 工具服务器
+### 四、快速上手
 
-主循环的能力不止七个内置工具。顶栏的插头图标打开「MCP tool servers」面板，可以挂用户自己的 MCP 服务器：stdio（拉起子进程、
-换行分隔 JSON-RPC）和 HTTP（JSON-RPC POST，兼容 SSE 响应）两种传输都支持，协议版本按 2025-06-18 / 2025-03-26 / 2024-11-05
-依次协商。配置落盘在 app config 目录的 `mcp.json`；勾了 Auto 的服务器在启动时自动连接，失败的只记错误、不阻塞启动。
+1. 安装并启动桌面版，新建会话时先选画布宽高。
+2. 点顶栏「模型设置」，填入你自己的 Provider 接口地址、API Key 与模型名称，可先测试连接。
+3. 在对话框里描述你想要的像素画，例如「画一只 32x32 的骑士 idle 姿态，四级绿」，模型会按受预算约束的方式落到画布。
+4. 在右侧画布检查效果：切帧看动画、开洋葱皮对位、在配色范围里换预设或吸取单色。
+5. 需要动画就新建帧让模型补间，或自己用帧条与播放逐帧调。
+6. 满意后用右上角导出菜单输出 GIF / PNG / 精灵表 / Aseprite，或把 `.aip` 另存到磁盘。
+7. 手上有一批参考图要转成 `.aip`，或一批 `.aip` 要出 PNG / GIF，切到右侧「批量」一栏，选文件夹、扫一遍、开始。
 
-服务器上的工具以 `mcp__<server>__<tool>` 命名空间进入每轮的 tool specs，和内置像素工具并列交给模型。名字过长会被截断并加哈希
-后缀，调用时由 `crates/agent-core/src/mcp.rs` 的 registry 按最长前缀还原到具体服务器。MCP 调用同样过审批闸门：Ask 档位每个
-调用都停在 `approval_request` 上，Chat 档位把写操作挑出来拦；回灌结果和内置工具共用同一条截断预算。
+### 五、数据存储与隐私
 
-`env` / `headers` 只写在本机 `mcp.json`，界面视图只回键名不回值，凭据不回传 webview。编辑已有服务器时，值留空表示沿用本机旧值，
-整行删掉才清掉这个键。
+- 模型配置（Provider、接口地址、API Key）落盘在系统应用配置目录的 `models.json`，密钥只留在本机、不回传 WebView，可随时修改或清空。
+- 同目录下还有 `mcp.json`（MCP 服务器，`env` / `headers` 只写本机，界面只回键名不回值，编辑时值留空表示沿用旧值）与 `recipes.json`（批量配方簿）。
+- `.aip` / `.aipr` 是明文文本，想 diff、想手工微调、想进 Git 都行。
+- 软件不内置任何服务器、不发起除你配置的模型接口与 MCP 服务器之外的网络请求；视频抽帧与补间帧在本机完成。
 
-### 五、`.aip` 格式
+### 六、本地开发与构建
 
-`.aip` 是明文文本：宽高、调色板、图层、帧都在文本里，天然适合版本管理和人工微调。v2 把图层和帧提成一等公民，
-可以存动画。索引 0 恒为透明。它既是中间文件，也是 agent 的持久化产物：顶栏可以把当前文档另存为 `.aip` v2，
-也能打开 v2 或旧版。
-
-### 六、开发
-
-需要 Node 20+、Rust stable 与 pnpm 12，包管理器用 pnpm。esbuild 的 postinstall 需要放行，
-白名单写在根目录 [pnpm-workspace.yaml](pnpm-workspace.yaml) 里，漏了它全新克隆 `pnpm install` 会失败。
+环境要求：Node.js 20+、Rust stable、pnpm 12，包管理器用 pnpm。esbuild 的 postinstall 需要放行，白名单写在根目录 [pnpm-workspace.yaml](pnpm-workspace.yaml) 里，漏了它全新克隆 `pnpm install` 会以 `ERR_PNPM_IGNORED_BUILDS` 失败。
 
 ```bash
 # 前端
@@ -157,73 +138,166 @@ pnpm test           # vitest
 # 桌面端
 pnpm tauri dev      # 完整桌面调试
 
-`pnpm tauri dev` 自己会再拉一个 vite。要是 1420 已经被 `pnpm dev` 占着，先关掉那个再跑，
-否则前端会热更新到新代码、Rust 侧却还是上一个二进制，界面就会出现「Command xxx not found」
-这种前后端版本错位的报错。
-
 # Rust 侧
 cargo test --workspace
 ```
 
-模型配置在应用内「设置」里填，落盘在 app config 目录的 `models.json`，`api_key` 只留在本机、不回传 webview。
-app config 目录下共有三份 JSON：`models.json`（Provider 与密钥）、`mcp.json`（MCP 服务端）、`recipes.json`（批量配方簿），都只在本机，不进仓库。
+`pnpm tauri dev` 自己会再拉一个 vite。要是 1420 已经被 `pnpm dev` 占着，先关掉那个再跑，否则前端会热更新到新代码、Rust 侧却还是上一个二进制，界面就会出现「Command xxx not found」这种前后端版本错位的报错。
 
 #### 打包（`pnpm tauri build`）
 
-`targets` 里三个目标都配好了：macOS 出 `.app` + `.dmg`，Windows 出 NSIS 安装包。
+`tauri.conf.json` 的 `bundle.targets` 已配好 dmg / app / nsis / appimage / deb：macOS 出 `.app` + `.dmg`，Windows 出 NSIS 安装包，Linux 出 AppImage / deb。
 
-macOS：没有开发者证书也能打，[`tauri.conf.json`](src-tauri/tauri.conf.json) 里 `bundle.macOS.signingIdentity`
-取 `"-"`，签名走 ad-hoc（`codesign -s -`）。自签的 `.app` 在 Finder 里能直接打开，不会被当成无名无姓的
-未签名产物。`.dmg` 里除了 `.app` 还带一个指向 `/Applications` 的拖拽安装快捷方式，卷图标用根目录的
-`icon.png` 转出来的 `.icns`。打 DMG 的机器要同意 Xcode 命令行工具许可，缺了会死在 `SetFile` 那句上。
+- macOS：没有开发者证书也能打，`bundle.macOS.signingIdentity` 取 `"-"`，签名走 ad-hoc（`codesign -s -`）。自签的 `.app` 在 Finder 里能直接打开，不会被当成无名无姓的未签名产物。打 DMG 的机器要同意 Xcode 命令行工具许可，缺了会死在 `SetFile` 那句上。
+- Windows：NSIS 模板是 [src-tauri/nsis/installer.nsi](src-tauri/nsis/installer.nsi)，配了 `installMode: "perMachine"`（弹 UAC、装到 `Program Files\AIPixel`）、`languages: ["SimpChinese"]`（安装界面整站简体中文，连 WebView2 缺失提示也是中文），左下角显示产品名加版本号。模板基线是 Tauri 官方默认 `installer.nsi`（tag `tauri-v2.12.0`），只改了 `BrandingText` 一行；升级 Tauri 后需重新对齐一次官方模板。
 
-Windows：NSIS 安装包走 [`src-tauri/nsis/installer.nsi`](src-tauri/nsis/installer.nsi) 这套模板。三处配置：
+### 七、CI 与自动发布
 
-- `installMode: "perMachine"`：安装时弹 UAC 申请管理员权限，默认装到 `Program Files\AIPixel`，注册表落 HKLM
-- `languages: ["SimpChinese"]`：安装界面整站简体中文（连 WebView2 缺失提示也是中文，用 Tauri 自带的 `SimpChinese.nsh`）
-- `template: "nsis/installer.nsi"`：左下角不再是 `NullSoft Install System v3.xx`，显示 `AIPixel v0.1.0` 这样的产品名加版本号
+推送 `v*` 格式的 tag（例如 `v1.0.20261009`）即触发 `.github/workflows/release.yml`：
 
-模板基线是 Tauri 官方默认 `installer.nsi`（tag `tauri-v2.12.0`），只改了 `BrandingText` 一行。
-升级 Tauri 后重新对齐一次官方模板，免得新配置项在这里缺占位符。
-模板拿本地 `makensis` 干编译过：占位符按真实构建的数据填充（`installMode=perMachine`、
-`languages=SimpChinese`），Windows 专有的 `nsis_tauri_utils` 插件调用打桩，能一路编到输出
-安装包退出码 0。没在真机 Windows 上跑过安装流程。
+1. 六路并行构建桌面安装包：macOS x86_64 / aarch64（dmg）、Windows x86_64 / arm64（NSIS）、Linux x86_64 / aarch64（AppImage / deb）。
+2. 同步构建 `example/` 下遗留工具链的 Python 包与源码 tar。
+3. 资产齐了之后统一计算 `checksums.txt`、`checksums-md5.txt`、`checksums-sha1.txt`，与全部产物一起发布到 GitHub Release。
 
-### 七、`example/`：遗留工具链与样例数据
+`.github/workflows/ci.yml` 负责每次推送的 Rust 工作区测试、格式化与 Clippy，以及前端的 lint、单测与构建。
 
-仓库根目录只放桌面端。最初那套 Pillow 脚本、早期网页版像素编辑器和全部样例数据都在
-[`example/`](example/README.md) 里，与桌面端没有代码共用：`.aip` 的早期约定从这里来，
-桌面端沿用并长成了 v2；工作台的「量化」就是 `img2aip_converter.py` 那条思路的 Rust 实现。
+### 八、项目结构
 
-```bash
-python3 example/aip_converter.py                 # input/ -> output/
-python3 example/img2aip_converter.py             # refer_img/ -> refer_aip/
+```text
+.
+├── icon.png                     # 应用与 README 图标
+├── package.json                 # 版本号唯一出处，构建期烘成常量
+├── pnpm-workspace.yaml          # pnpm 12 构建脚本白名单（esbuild postinstall）
+├── Cargo.toml                   # Rust workspace 清单
+├── crates
+│   ├── pixel-core               # 像素文档模型、类型化操作、RLE 编码
+│   │                            # .aip v2、Lua 沙箱、PNG / GIF / 精灵表导出
+│   └── agent-core               # Agent Rust 主循环：prompt、provider 流式、
+│                                # tool_use 抽取、工具执行、结果回填、续轮
+├── src-tauri                    # Tauri 桌面壳：状态托管、命令注册、事件广播
+│   ├── src
+│   │   ├── commands.rs          # 会话 / 模型 / 文档 / 导出命令层
+│   │   ├── editor.rs            # 工作台编辑器命令层（画笔 / 填充 / 结构操作）
+│   │   ├── workflow.rs          # 七条工作流的命令层
+│   │   ├── mcp.rs               # MCP 工具服务器配置与命令
+│   │   ├── batch.rs             # 批量工作台与配方簿落盘
+│   │   └── state.rs             # models.json / mcp.json / recipes.json 的读写
+│   ├── nsis/installer.nsi       # Windows NSIS 自定义模板
+│   ├── capabilities/            # Tauri 权限清单
+│   └── tauri.conf.json          # 应用与打包配置
+├── src                          # React 薄壳：只做渲染和输入
+│   ├── ui                       # 会话 / 对话 / 画布 / 工作流坞 / 批量 / MCP 面板
+│   ├── lib                      # invoke 与事件的唯一出口，加各域纯函数（可单测）
+│   ├── assets
+│   ├── App.tsx  main.tsx  styles.css
+├── example                      # 遗留 Pillow 工具链与样例数据，桌面端不依赖
+├── .github/workflows
+│   ├── ci.yml                  # Rust 测试 / 格式化 / Clippy + 前端 lint / 测试 / 构建
+│   └── release.yml             # 六平台打包 + checksums + Release
+└── vite.config.ts               # vite / vitest 配置，版本号从 package.json 烘入
 ```
 
-脚本按自己所在目录找数据，整个 `example/` 目录要一起搬；里面有什么、怎么跑，见
-[`example/README.md`](example/README.md)。
+### 九、开源协议与致谢
 
-### 八、路线图
+- 著作权归 **异猫工作群（Mutantcat Working Group · mutantcat.org）** 所有，Copyright (C) 2026。
+- 本项目采用 **GNU General Public License v3.0（GPL-3.0）**，完整条款见仓库根目录 [LICENSE](LICENSE)。
+- 每个源文件顶部都有两行许可头：`Copyright (C) 2026 Mutantcat Working Group` 加 `SPDX-License-Identifier: GPL-3.0-only`，看单文件就能确认授权归属。
+- 使用、修改、二次分发都自由，但衍生作品必须以 GPL-3.0 同协议继续开源，并保留原版权与许可声明。
+- 分发二进制或安装包时，须同时提供对应的完整源码；本仓库的发布产物与源码始终一一对应。
+- `example/` 里的示例、随附脚本与本 README 同样适用本协议。
+- `.aip` / `.aipr` 数据格式、内置工具的命名与主循环结构都是本仓库自己的取舍，不含受第三方协议约束的代码。
 
-- Agent 会话（已落地）：会话、对话流、七个工具、`.aip` 读写、BYOM 配置
-- 工作台（已落地）：Auto / Chat / Ask 三档审批、画笔与橡皮、瓦片底图、帧条缩略图与播放预览、洋葱皮、帧的新建 / 复制 / 删除 / 挪位 / 停留时长、图层倒序列表与显隐 / 不透明度 / 排序、仅限直接编辑的撤销栈、配色范围（六种预设 + 一个任意颜色槽，透明格即擦）、GIF / 整条帧带 / 精灵表 / 当前帧 / Aseprite 导出
-- 批量工作台（已落地）：一个文件夹进、一个文件夹出的纯本机批处理，量化（位图到 `.aip`）与导出（`.aip` 到 PNG / GIF）两个方向，扫描先行、单文件失败不中断、回执带成败计数，独立 `batch-event` 通道
-- 批量配方簿（已落地）：参数组命名落盘 `recipes.json`，本机存取、覆盖、删除，批量面板开跑前一键回填
-- 配方随项目走（已落地）：`.aipr` 纯文本 JSON，单条或整本导出，手上这份没存过也能直接分享；导入时同名不覆盖而是加序号，坏条目单独跳过并在回执里逐条交代
-- 下一步：批量脚本化入口（CLI），让 recipe 能在 CI 里复跑
+本项目由异猫工作群（mutantcat.org）开发并发行，官方网站 [mutantcat.org](https://www.mutantcat.org/)，使用中遇到的问题欢迎到仓库提 Issue。
 
-### 发行商
+### 十、MCP 服务端模式：让外部 AI 驱动本程序
 
-- AIPixel 由 **异猫工作群（Mutantcat Working Group）** 开发并发行，官方网站 [mutantcat.org](https://www.mutantcat.org/)
-- 项目源码仓库：[github.com/Mutantcat-Working-Group/AIPixel](https://github.com/Mutantcat-Working-Group/AIPixel)
-- 发行版以 GPL-3.0 发布，二进制安装包与源码一一对应；使用中遇到的问题欢迎到仓库提 Issue
+除了「本程序去连别人的 MCP 服务器」，本程序自己也带一个 MCP 服务端，对外暴露完整的画布闭环——**创建 → 绘制 → 导出到指定路径**。用一个外部智能体（Claude Code、Cursor、自研 agent）加一个游戏引擎，就能让 AI 自己画素材、自己落盘、引擎直接加载，全程不用人盯着。
 
-### 开源协议
+开关在 **设置 → 模型与 Provider → MCP 工具服务器** 里，默认关闭。理由是它按调用方给的路径写文件，等于把落盘的能力递出去，得由人点头。监听地址固定为本机回环，只响应 `127.0.0.1`，不对外网开放；端口默认 `7815`，填 `0` 表示让内核挑一个空闲端口。
 
-- 著作权归 **异猫工作群（Mutantcat Working Group · mutantcat.org）** 所有，Copyright (C) 2026
-- 本项目采用 **GNU General Public License v3.0（GPL-3.0）**，完整条款见仓库根目录 [LICENSE](./LICENSE)
-- 每个源文件顶部都有两行许可头：`Copyright (C) 2026 Mutantcat Working Group` 加 `SPDX-License-Identifier: GPL-3.0-only`，看单文件就能确认授权归属
-- 使用、修改、二次分发都自由，但衍生作品必须以 GPL-3.0 同协议继续开源，并保留原版权与许可声明
-- 分发二进制或安装包时，须同时提供对应的完整源码；本仓库的发布产物与源码始终一一对应
-- `example/` 里的示例、随附脚本与本 README 同样适用本协议
-- `.aip` / `.aipr` 数据格式、七个内置工具的命名与主循环结构都是本仓库自己的取舍，不含受第三方协议约束的代码
+对外一共 17 个工具，分四类：
+
+- 画布会话：`list_sessions`、`create_canvas`、`drop_canvas`、`rename_canvas`、`get_canvas`、`canvas_preview`
+- 绘制：`paint_stroke`、`fill_region`、`apply_ops`（点 / 线 / 矩形 / 椭圆 / 填充的批量算子，要么全成要么整体回滚）、`resize_canvas`
+- 文件：`list_export_formats`、`export_canvas`（PNG / GIF / 精灵表 / 序列帧 / `.aseprite` / `.aip`，按调用方指定的路径写盘，深层目录自动创建）、`save_project`、`import_project`、`import_image`（外部位图降采样量化进画布）
+- 智能体：`prompt_agent`（让本程序内置的主智能体干活）、`interrupt_agent`
+
+`import_image` 是闭环的另一半入口：外部 AI 用自己的生图模型出一张图，`path` 给本地文件（或 `image_base64` 内联），程序做面积平均降采样 + 调色板量化后写进指定层/帧——和内部生图工作流同一套量化。少了它，外部智能体只能把像素一个个手传给 `apply_ops`，一帧 64x64 要背 4096 个坐标。
+
+传输是手写的 HTTP/1.1 + JSON-RPC 2.0，一条连接一次请求、`Connection: close`，带 CORS。`GET /` 回服务信息（人肉健康检查用），`OPTIONS` 回 204，坏 JSON 回 400 + `-32700`，未知方法回 `-32601`，未知工具回 `isError`，通知（没有 `id`）回 202。请求体上限 8MB。
+
+先用 curl 探一下活：
+
+```bash
+curl http://127.0.0.1:7815/
+```
+
+再列一遍现成画布、开一个 64x64 的新画布、画一笔、按绝对路径导成 PNG：
+
+```bash
+curl -X POST http://127.0.0.1:7815/ \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_sessions","arguments":{}}}'
+
+curl -X POST http://127.0.0.1:7815/ \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"create_canvas","arguments":{"width":64,"height":64,"name":"hero"}}}'
+
+curl -X POST http://127.0.0.1:7815/ \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"paint_stroke","arguments":{"id":"hero","from_x":8,"from_y":32,"to_x":56,"to_y":32,"color":"#e8823a","size":2}}}'
+
+curl -X POST http://127.0.0.1:7815/ \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"export_canvas","arguments":{"id":"hero","format":"png","path":"/tmp/AIPixel/hero.png"}}}'
+```
+
+`list_export_formats` 会把能导的格式 id 全摊出来：`gif` / `sheet` / `strip` / `frame` / `png`（`frame` 的别名）/ `aseprite` / `ase`，工程文件另有 `aip`。
+
+导成 Aseprite 文件也是同一个工具换个 `format`：
+
+```bash
+curl -X POST http://127.0.0.1:7815/ \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"export_canvas","arguments":{"id":"hero","format":"aseprite","path":"/tmp/AIPixel/hero.aseprite"}}}'
+```
+
+回头上枚位图也是同一个工具：外部 AI 用自己的生图模型出一张 PNG，指定路径落进画布。
+
+```bash
+curl -X POST http://127.0.0.1:7815/ \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"import_image","arguments":{"id":"hero","path":"/tmp/AIPixel/hero-source.png"}}}'
+```
+
+Node 侧一次完整闭环——建画布、画一笔、存工程、导到游戏引擎的资源目录：
+
+```js
+const ENDPOINT = "http://127.0.0.1:7815/";
+let seq = 0;
+
+async function call(name, args) {
+  const res = await fetch(ENDPOINT, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: ++seq, method: "tools/call",
+                           params: { name, arguments: args } }),
+  });
+  const payload = await res.json();
+  if (payload.error) throw new Error(`${payload.error.code}: ${payload.error.message}`);
+  // 服务器自己的失败走的是 HTTP 200 + isError，得看 content，不能只看 error。
+  if (payload.result?.isError) throw new Error(payload.result.content[0].text);
+  return payload.result;
+}
+
+await call("create_canvas", { width: 64, height: 64, name: "hero" });
+await call("paint_stroke", { id: "hero", from_x: 8, from_y: 32, to_x: 56, to_y: 32,
+                             color: "#e8823a", size: 2 });
+await call("save_project", { id: "hero", path: "game/assets/hero.aip" });
+const out = await call("export_canvas", { id: "hero", format: "aseprite",
+                                          path: "game/assets/hero.aseprite" });
+console.log(out.content[0].text);
+```
+
+`prompt_agent` 是把整个主智能体交出去的那一个工具：外部 AI 描述需求，本程序的模型负责拆解、绘制、自检，回一串可读的过程记录。二者分工上，外部 AI 当导演，本程序当会画图的那只手。
+实现在 [src-tauri/src/mcp_server.rs](src-tauri/src/mcp_server.rs)，与用户自配的外部 MCP 服务器（`src-tauri/src/mcp.rs`）是两套独立机制，互不影响。

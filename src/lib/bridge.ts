@@ -26,6 +26,7 @@ import type {
   Message,
   McpServerConfig,
   McpServersView,
+  McpServerStatusView,
   ModelConfig,
   ModelsView,
   ModelRole,
@@ -154,6 +155,26 @@ export function connectMcpServer(name: string): Promise<McpServersView> {
 /** 断开但保留配置：它的工具从各会话消失，设置还留在簿子里。 */
 export function disconnectMcpServer(name: string): Promise<McpServersView> {
   return invoke<McpServersView>("mcp_disconnect", { name });
+}
+
+/** 本程序当 MCP 服务端的运行快照。没起来时 endpoint 为空串。 */
+export function mcpServerStatus(): Promise<McpServerStatusView> {
+  return invoke<McpServerStatusView>("mcp_server_status");
+}
+
+/** 开/关本程序的 MCP 服务端。端口能按调用方给的路径写文件，所以默认是关的。 */
+export function mcpServerSetEnabled(enabled: boolean): Promise<McpServerStatusView> {
+  return invoke<McpServerStatusView>("mcp_server_set_enabled", { enabled });
+}
+
+/** 换监听端口。0 = 让内核挑一个空闲的；回值里的 port 才是真正挑中的。 */
+export function mcpServerSetPort(port: number): Promise<McpServerStatusView> {
+  return invoke<McpServerStatusView>("mcp_server_set_port", { port });
+}
+
+/** 端口被占之类的僵局就用它：先停再按当前设置起，不改任何配置。 */
+export function mcpServerRestart(): Promise<McpServerStatusView> {
+  return invoke<McpServerStatusView>("mcp_server_restart");
 }
 
 export function createSession(

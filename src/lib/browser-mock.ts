@@ -23,6 +23,7 @@ import type {
   MigrateOrder,
   LoopLimits,
   McpServerView,
+  McpServerStatusView,
   McpServersView,
   NamedPalette,
   PixelizeParams,
@@ -1654,6 +1655,31 @@ function mcpList(): McpServersView {
   return { entries: [server] };
 }
 
+/** 服务端那块的预览态。真机上端口是内核挑的，浏览器里挑不了，
+ *  就钉一个固定值，只把开关、计数、错误这几条交互演出来。 */
+let MCP_SERVER: McpServerStatusView = {
+  enabled: false,
+  running: false,
+  port: 7815,
+  endpoint: "",
+  requests: 0,
+  last_error: null,
+};
+
+/** 关就是停，开就是起。起不来时回一条错误，供界面显示。 */
+function mcpServerApply(enabled: boolean): McpServerStatusView {
+  MCP_SERVER = enabled
+    ? {
+        ...MCP_SERVER,
+        enabled: true,
+        running: true,
+        endpoint: `http://127.0.0.1:${MCP_SERVER.port}/`,
+        last_error: null,
+      }
+    : { ...MCP_SERVER, enabled: false, running: false, endpoint: "", last_error: null };
+  return MCP_SERVER;
+}
+
 /** 一条工作流该找哪个角色要结果，和 Rust 的 `ModelRole::for_workflow` 对齐。 */
 const WORKFLOW_ROLE: Record<string, ModelRole> = {
   agent: "chat",
@@ -1946,6 +1972,30 @@ function handler(cmd: string, raw?: unknown): unknown {
       // 设置界面的反馈、以及「关了之后工具清单变不变」都指着这个值。
       MCP_ON = Boolean(payload.enabled);
       return MCP_ON;
+    case "mcp_server_status":
+      return mcpServerApply(MCP_SERVER.enabled);
+    case "mcp_server_set_enabled":
+      // 端口守卫：真机上允许给 0 让内核挑，浏览器里挑不了，
+      // 所以只把合法区间收一下，保持预览态别乱跳。
+      return mcpServerApply(Boolean(payload.enabled));
+    case "mcp_server_set_port":
+      // 端口单独存，重启时才跟着变。改完不像真机那样立刻重绑——
+      // 预览里没有 socket，只有跟着 enabled 状态走。
+      {
+        const raw = Number(payload.port);
+        const port = Number.isFinite(raw) ? Math.min(65535, Math.max(0, Math.floor(raw))) : 0;
+        MCP_SERVER = { ...MCP_SERVER, port };
+      }
+      return mcpServerApply(MCP_SERVER.enabled);
+    case "mcp_server_restart":
+      // 重启在预览里就是把请求计数归零再按当前开关起一遍，
+      // 够看清「停了能拉起来」这条反馈。
+      MCP_SERVER = {
+        ...MCP_SERVER,
+        requests: 0,
+        last_error: null,
+      };
+      return mcpServerApply(MCP_SERVER.enabled);
     case "agent_document":
       // 深拷一份再交出去：前端会把这份文档整份留在 state 里，也会把它当撤销
       // 快照压栈。递活引用的话，mock 这边一动笔，前端「改前快照」就地改写。
