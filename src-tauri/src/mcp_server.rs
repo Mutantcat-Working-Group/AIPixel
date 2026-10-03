@@ -175,7 +175,7 @@ pub fn start_if_enabled(state: &Arc<AppState>, app: &AppHandle) {
     if !settings.enabled {
         return;
     }
-    if let Err(e) = start(state, app, settings) {
+    if let Err(e) = start(state, Some(app), settings) {
         eprintln!("cannot start the MCP server: {e}");
         let mut runtime = state.mcp_server();
         let mut settings = runtime.settings();
@@ -189,22 +189,21 @@ pub fn start_if_enabled(state: &Arc<AppState>, app: &AppHandle) {
 /// 下次启动还试同一个（内核给的通常也还空着）。
 pub(crate) fn start(
     state: &Arc<AppState>,
-    app: &AppHandle,
+    // app 传 None 时任务照样跑：单测没有 Tauri 会话，事件总线是可选件。
+    app: Option<&AppHandle>,
     settings: McpServerSettings,
 ) -> Result<McpServerStatus, String> {
     // 先停旧的：改端口必须让旧监听让位，否则两个监听都活着，
     // 外部连进来的那一个永远不知道改过端口。
     stop(state);
     let addr = SocketAddr::from(([127, 0, 0, 1], settings.port));
-    // 走 std 的 bind 而不是 tokio 的：设置命令是同步函数（跑在 WebView 的
-    // IPC 回调线程上），那里没有运行时上下文可 await。
+    // bind 走 std 而不是 tokio 的：start 可能在设置页的同步命令里被调用，
+    // 那条 WebView IPC 回调线程上没有运行时上下文可 await。
     let listener = std::net::TcpListener::bind(addr)
         .map_err(|e| format!("cannot bind 127.0.0.1:{}: {e}", settings.port))?;
     listener
         .set_nonblocking(true)
         .map_err(|e| format!("cannot arm 127.0.0.1:{}: {e}", settings.port))?;
-    let listener = TcpListener::from_std(listener)
-        .map_err(|e| format!("cannot adopt 127.0.0.1:{}: {e}", settings.port))?;
     let bound = listener
         .local_addr()
         .map_err(|e| format!("cannot read back the bound port: {e}"))?
@@ -216,10 +215,17 @@ pub(crate) fn start(
         bound: Mutex::new(Some(bound)),
     });
     let (tx, rx) = oneshot::channel::<()>();
-    tauri::async_runtime::spawn(accept_loop(
+    // from_std 要把 socket 登记进 tokio 的 reactor，这一步拿不到运行时句柄就
+    // 直接 panic。别在 start 的调用线程上做：开开关的是设置页的同步命令
+    // （WebView 的 IPC 回调线程），开机自启来自 setup 的主线程，都没有上下文，
+    // 在那里 from_std 会把整个进程带走。所以接管 socket 整个搬进运行时里的
+    // 任务再做——std 端的错误上面都已经同步报完返回了，剩下的失败只在任务里
+    // 记一条错误状态：用户看到「没在跑」总比进程崩掉强。
+    tauri::async_runtime::spawn(adopt_and_serve(
         listener,
+        settings.port,
         state.clone(),
-        Some(app.clone()),
+        app.cloned(),
         counters.clone(),
         rx,
     ));
@@ -245,6 +251,35 @@ pub(crate) fn start(
     Ok(status)
 }
 
+/// 在运行时上下文里接管 std 监听并开始服务。见 `start` 里的说明：这一步
+/// 之所以单独放进任务，就因为 `TcpListener::from_std` 需要运行时句柄。
+async fn adopt_and_serve(
+    listener: std::net::TcpListener,
+    wanted_port: u16,
+    state: Arc<AppState>,
+    app: Option<AppHandle>,
+    counters: Arc<ServerCounters>,
+    shutdown: oneshot::Receiver<()>,
+) {
+    let listener = match TcpListener::from_std(listener) {
+        Ok(listener) => listener,
+        Err(e) => {
+            // 能走到这儿说明 bind 早就成功了，只剩登记 reactor 这一步。
+            // 真失败了也只是收摊、把开关拨回去，并留一条原因。落盘不管：
+            // 文件里那句「开着」留着，下次启动还会再试一次，端口被临时占着
+            // 的时候不该让用户重新点一遍开关。
+            counters.running.store(false, Ordering::SeqCst);
+            let mut runtime = state.mcp_server();
+            let mut settings = runtime.settings();
+            settings.enabled = false;
+            runtime.set_settings(settings);
+            runtime.set_last_error(Some(format!("cannot adopt 127.0.0.1:{wanted_port}: {e}")));
+            return;
+        }
+    };
+    accept_loop(listener, state, app, counters, shutdown).await;
+}
+
 /// 收摊。信号发出去才算完：监听线程要自己走完 accept 的那一轮才退。
 pub(crate) fn stop(state: &AppState) {
     let live = {
@@ -268,7 +303,7 @@ pub fn status(state: &AppState) -> McpServerStatus {
 /// 状态，用户会以为外部已经接得进来。
 pub fn set_enabled(
     state: &Arc<AppState>,
-    app: &AppHandle,
+    app: Option<&AppHandle>,
     enabled: bool,
 ) -> Result<McpServerStatus, String> {
     if !enabled {
@@ -310,7 +345,7 @@ pub fn set_enabled(
 /// 新端口才是唯一入口，这点必须让用户看见。
 pub fn set_port(
     state: &Arc<AppState>,
-    app: &AppHandle,
+    app: Option<&AppHandle>,
     port: u16,
 ) -> Result<McpServerStatus, String> {
     let settings = {
@@ -328,7 +363,7 @@ pub fn set_port(
 }
 
 /// 重启：设置没变也照样走一遍。排查「外部连不上」时，按一下比解释一段管用。
-pub fn restart(state: &Arc<AppState>, app: &AppHandle) -> Result<McpServerStatus, String> {
+pub fn restart(state: &Arc<AppState>, app: Option<&AppHandle>) -> Result<McpServerStatus, String> {
     let settings = {
         let runtime = state.mcp_server();
         runtime.settings()
@@ -364,7 +399,7 @@ pub fn mcp_server_set_enabled(
     state: State<'_, Arc<AppState>>,
     enabled: bool,
 ) -> Result<McpServerStatus, String> {
-    set_enabled(&state, &app, enabled)
+    set_enabled(&state, Some(&app), enabled)
 }
 
 #[tauri::command]
@@ -373,7 +408,7 @@ pub fn mcp_server_set_port(
     state: State<'_, Arc<AppState>>,
     port: u16,
 ) -> Result<McpServerStatus, String> {
-    set_port(&state, &app, port)
+    set_port(&state, Some(&app), port)
 }
 
 #[tauri::command]
@@ -381,7 +416,7 @@ pub fn mcp_server_restart(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<McpServerStatus, String> {
-    restart(&state, &app)
+    restart(&state, Some(&app))
 }
 
 // ---------- HTTP ----------
@@ -2615,6 +2650,65 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.contains("ghost.png"), "{err}");
+    }
+
+    /// 回归：设置页里打开「本程序当 MCP 端口」的开关，start 跑在 WebView 的
+    /// IPC 回调线程上，那条线程没有 tokio 运行时上下文。从前接管 socket 的
+    /// `TcpListener::from_std` 就写在那儿，`Handle::current` 一提不到运行时
+    /// 句柄直接 panic，整个进程跟着崩——用户看到的就是一打开开关应用消失。
+    /// 开机自启走 setup 的主线程，同样没有上下文，一条用例把两条路都罩住。
+    #[test]
+    fn starting_off_the_runtime_context_serves_instead_of_panicking() {
+        let state = Arc::new(state());
+        // 一条彻底的裸线程：没有任何 tokio 运行时上下文，跟出事的位置一样。
+        let started = std::thread::spawn({
+            let state = state.clone();
+            move || {
+                start(
+                    &state,
+                    None,
+                    McpServerSettings {
+                        enabled: true,
+                        // 端口 0：让内核挑个空闲的，别跟别的用例抢号。
+                        port: 0,
+                    },
+                )
+            }
+        });
+        let serving = started
+            .join()
+            .expect("start 不该在没有运行时上下文的线程上 panic")
+            .expect("端口要起得来");
+        assert!(serving.enabled);
+        assert!(serving.running, "起不来要说清楚：{:?}", serving.last_error);
+        assert_ne!(serving.port, 0, "端口要回报内核挑中的那一个");
+        assert!(serving.endpoint.starts_with("http://127.0.0.1:"));
+
+        // 任务里 from_std 走完之后要真的在听：连一下才算数。给收摊前的 accept
+        // 留一瞬时间——spawn 到真正开始 poll 之间隔着一次调度。
+        let mut connected = None;
+        for _ in 0..40 {
+            if let Ok(stream) = std::net::TcpStream::connect(("127.0.0.1", serving.port)) {
+                connected = Some(stream);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(connected.is_some(), "监听要真的接得进来");
+        drop(connected);
+
+        stop(&state);
+        assert!(!status(&state).running, "停机之后不能再算在跑");
+        // 端口要真的还给系统：旧的监听还占着的话，改端口和重启都是空话。
+        let mut freed = false;
+        for _ in 0..40 {
+            if std::net::TcpListener::bind(("127.0.0.1", serving.port)).is_ok() {
+                freed = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(freed, "停机之后端口还要让出来");
     }
 
     /// 真 socket 上跑一遍：手写 HTTP 有没有和真客户端对上。
