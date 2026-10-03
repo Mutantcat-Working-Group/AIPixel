@@ -28,6 +28,17 @@ pub const DEFAULT_LIMIT: usize = 4;
 /// 检查预算：条目正文注入系统提示词的字符上限，防某一轮把上下文吃干。
 pub const DEFAULT_BUDGET: usize = 2600;
 
+/// 行为准则三条：规格锁、收工自检、别画成程序化假图案。
+///
+/// 它们不是「提到这个词才给」的技法，是动笔的每一轮都要守住的护栏，所以不占
+/// 检索那 `DEFAULT_LIMIT` 个名额——让护栏插队的话，「画 5 帧奔跑」那一轮就
+/// 该拿不到步态相位表了。护栏自己一段下发，见 `discipline_section`。
+pub const DISCIPLINE_IDS: [&str; 3] = ["spec-lock", "quality-gate", "fake-patterns"];
+
+/// 行为准则单独一份字符预算。三条正文加起来约两千二百字符，2600 够整段带走，
+/// 又不至于把系统提示词顶到别处去。
+pub const DISCIPLINE_BUDGET: usize = 2600;
+
 /// 知识库。按「技法 -> 素材 -> 生物 -> 器物 -> 场景 -> 工具词」排，同组相邻，
 /// 模型扫起来快；检索同分时按这个顺序兜底，结果稳定可复现。
 /// 生物和器物两组的条目是「怎么把一样东西画对」的要点：用户说「画只猫」时，
@@ -113,6 +124,18 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         body: "Procedural beats hand-drawn: lay the base value with value noise, smooth it with cosine interpolation, then quantise hard into the ramp - anything freehand reads as decoration. Colour it by probability: about 70% of cells the base value, 15% one step lighter, 10% one step darker, and at most 5% sparse features (pebble, crack, tuft) with no single feature over 1% of the tile. Make every edge weld: fill two pixels in from each border with the wrap rule and hold edge contrast to within one ramp step so the seam disappears. Keep the tile strictly quantised - one stray value announces the grid. Never draw a black outline on a tile. Then verify: repeat the tile 2x2, 4x4 and 6x6 and read the result, and confirm the rotations and mirrors read as different tiles. Work on a cell grid of 8, 16 or 32, keep ONE light direction and ONE ramp per material across the whole set, and author it at exactly 1x.",
     },
     KnowledgeEntry {
+        id: "fake-patterns",
+        title: "Patterns that make procedural work look fake",
+        keywords: &[
+            "太规律", "一看就假", "一看就是假", "太假", "很假", "假的明显", "有规律",
+            "几何图案", "四方格", "居中十字", "正弦波", "水平条纹",
+            "对称装饰", "斜向裂缝", "噪点太碎", "雪花点", "规则感",
+            "fake pattern", "too regular", "looks fake", "geometric pattern", "centered cross",
+            "symmetric motif", "straight crack", "salt and pepper", "procedural",
+        ],
+        body: "Procedural terrain looks fake for exactly one reason: regularity the eye can predict. Forbidden in repeatable ground - a centred cross, star or plus, four equal quadrants, regular sine waves, horizontal stripe layers, symmetric corner motifs, straight diagonal cracks, and salt-and-pepper noise or evenly scattered bright dots. Replace each with its irregular cousin: off-centre single features, Voronoi cells of 8-15 uneven pieces, low-frequency value noise, diagonal or broken colour blobs, one asymmetric accent, short random-walk cracks that never cross the tile. Near-white is out on ground and underground unless asked for - use one step lighter, warm ochre or muted grey. A decorative tile built out of architecture (brick, floorboard, roof) may keep its geometry, because there the pattern IS the material.",
+    },
+    KnowledgeEntry {
         id: "tile-edges",
         title: "Tile edges and transition pieces",
         keywords: &[
@@ -137,7 +160,7 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         id: "outlines",
         title: "Outline strategy",
         keywords: &["勾线", "描边", "轮廓线", "线稿", "outline", "outlines", "line art", "hard edge"],
-        body: "Pick ONE strategy for the whole drawing and keep it consistent, and the default is a solid outline on every shape: users read an outlined sprite as finished and an un-outlined one as an unfinished fill. Hue-shift the outline toward the surface color instead of using pure black on a saturated body, or it eats the silhouette - take the local hue a few steps darker rather than inventing a black. Keep outlines 1px at 32px and above; below 16px skip them entirely, or drop them everywhere only when the user asked for no outline, fog or backlight.",
+        body: "Pick ONE strategy for the whole drawing and keep it consistent, and the default is a solid outline on every shape: users read an outlined sprite as finished and an un-outlined one as an unfinished fill. Hue-shift the outline toward the surface color instead of using pure black on a saturated body, or it eats the silhouette - take the local hue a few steps darker rather than inventing a black. Keep outlines 1px at 32px and above; below 16px skip them entirely, or drop them everywhere only when the user asked for no outline, fog or backlight. The eight styles worth naming, drawn from one mushroom: single-pixel black (the animation-safe default), double-pixel, a dark shade of the surface colour, the region's own colour, an outline lit by the light direction, sel-out (AA only on the shadow side), broken or dashed, and none at all. Pick one per drawing and hold it on every frame.",
     },
     KnowledgeEntry {
         id: "pixel-discipline",
@@ -150,6 +173,40 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         body: "What breaks a pixel drawing is mostly habit carried over from vector art: anti-aliasing on the silhouette, sub-pixel placement, gradient fills, local transparency, blur, bezier handles, and any colour outside the palette. Fix the light direction once for the whole project - default top-left - and never flip it halfway. The colour budget is per image, not per shape: 3 for minimalist, 4-6 under 32px, 3 per sprite plus transparent on NES, 15 for SNES-style, 31 for a modern look, 47 for a dense illustration. Sizes that stay clean: 8, 16, 24, 32, 48, 64, 96, 128, 256. Draw at exactly 1x - resampling afterwards turns clusters into mush.",
     },
     KnowledgeEntry {
+        id: "style-tiers",
+        title: "Console and house style tiers",
+        keywords: &[
+            "风格分级", "画风分级", "哪种风格", "8位机", "八位机", "8位风格", "八位风格",
+            "红白机", "FC风格", "16位机", "16位风格", "超任", "sfc", "掌机风格", "独立游戏风",
+            "极简风格", "高密度", "影视级", "印刷级", "大尺寸像素", "高分辨率像素", "风格定级",
+            "style tier", "nes style", "snes style", "modern pixel", "minimalist style",
+            "dense detail", "high-res pixel", "cinematic pixel", "console style", "which style",
+        ],
+        body: "Name the tier before the first pixel and it fixes size, colour budget and shading tier at once. NES CLASSIC: 16x16, up to 32x32 for large sprites, 4-8 colours per sprite, flat or 2-tone shading, hard edges. SNES RETRO: 32x32-64x64, 8-16 colours, 3-tone. MODERN PIXEL: 32x32-64x64, 16-32 colours, full ramps, dithering allowed. MINIMALIST: 8x8-16x16, 2-4 colours, flat only. DENSE DETAIL: 64x64-128x128, 24-48 colours, 4-5 ramp steps per material. HIGH-RES PIXEL: 256x256 and up, 64-96 colours. CINEMATIC PIXEL: 1024x1024 and up, 128-256 colours, print quality. The shading tier follows the tier, never personal taste: flat for minimalist, 2-tone at NES, 3-tone at SNES, dithered when the palette forces it, selective outline throughout. Read the tier off the words used - 红白机 or fc means NES, 超任 or 16位机 means SNES, 独立游戏 means Modern Pixel, 大头像 or 海报 means the top tiers.",
+    },
+    KnowledgeEntry {
+        id: "spec-lock",
+        title: "Lock the spec before drawing",
+        keywords: &[
+            "先定规格", "规格锁", "先把尺寸和配色定下来", "别改设定", "统一规范", "执行纪律",
+            "别跳步", "不要臆测", "别提前画", "每件都重读规格", "规格", "做到一半",
+            "改设定", "不要跳步", "别跑偏",
+            "spec lock", "locked spec", "execution discipline", "stay in spec", "spec drift",
+            "lock the spec", "no speculative",
+        ],
+        body: "Write the lock once, then draw only inside it. The lock is five lines: canvas size in pixels, the palette as literal hex values, the art style, the target platform, and the animation list with frame counts. Put it in writing before the first pixel and re-read it before every asset - a fresh generation pass remembers none of the earlier lines, so a colour invented on frame three and a size that drifts on frame five are the two failures that show up in every review. Never widen the lock mid-run: if a colour or a size is missing, add it to the lock first, then draw. Never pre-draw what a later step will need, never bundle two assets into one pass, and finish each asset completely before starting the next.",
+    },
+    KnowledgeEntry {
+        id: "quality-gate",
+        title: "Self-check before calling anything done",
+        keywords: &[
+            "自检", "交付前检查", "检查清单", "验收", "核对一下", "检查一遍", "别跳过检查",
+            "quality check", "checklist", "validate", "validation", "self check", "pre-delivery",
+            "before shipping",
+        ],
+        body: "Before declaring an asset finished, read the canvas back and check it against the lock: every colour inside the palette, no anti-aliasing and no sub-pixel edge, every frame the same size, frame counts matching the declared list, transparency set, and nothing stray outside the declared boundary. Then read the frames themselves - a tool result shows the active frame only, so a limb that wandered out of the body on frame three stays invisible until they are opened. Failing a check means fixing it in place; never ship a failed asset and never skip a check because the drawing looked fine on screen. Quantise, then clean stray pixels, then validate, then pack, then export - in that order, and no step is optional.",
+    },
+    KnowledgeEntry {
         id: "asset-classes",
         title: "Asset classes and deliverables",
         keywords: &[
@@ -160,10 +217,30 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         body: "Six deliverable classes, each with its own contract. CHARACTERS: 32-64px, side or three-quarter view, a pose readable in four frames. TILES: follow the tilemap and tile-edge rules. ITEMS: centred with a one or two pixel margin, silhouette readable at a glance, no cast shadow. UI: nine-slice the frame - corners keep their exact size, edges repeat, centre stretches - 1px hard borders and a 2px minimum hit area. EFFECTS: 4-8 frames, transparent background, no outline, brightest at the start and dissolved by the end. BACKGROUNDS: 96-160px, far planes take less contrast, no single focal subject. Decide the class from the user's words first: a well-drawn thing in the wrong class is unusable.",
     },
     KnowledgeEntry {
+        id: "set-consistency",
+        title: "One set, one scale, one style",
+        keywords: &[
+            "成套素材", "一套素材", "素材组", "同一组", "放在一起", "拼在一起", "整套",
+            "比例不统一", "尺寸混了", "硬贴上去", "同一种画风", "风格统一", "统一画风",
+            "asset set", "one set", "consistent set", "same scale", "style consistency",
+            "cohesive", "matching set", "set of assets",
+        ],
+        body: "Assets that appear together must share one scale, one style and one outline rule - the wizard stays 32x32 because it belongs beside other 32x32 pieces, and mixing sizes into one screen reads as something pasted on afterwards. Two habits keep a set cohesive: re-draw a subject rather than rescale it (auto-shrinking loses the eyes, breaks the outline and turns the beard into mush), and make the style choices on purpose, then hold them on every piece - a deliberate choice repeated twenty times reads as authored, while the same drawing made four different ways reads as assembled. Before drawing the second item of a set, ask what the first one established and repeat it, and record the shared canvas size, shared palette and shared outline rule in the lock so a later pass cannot drift from them.",
+    },
+    KnowledgeEntry {
         id: "pixel-clusters",
         title: "Pixel clusters and curve rhythm",
         keywords: &["像素簇", "孤立像素", "锯齿", "毛刺", "阶梯", "pixel cluster", "single pixel", "jaggies", "curve rhythm"],
         body: "Details read as 2x2-plus clusters; one stray pixel reads as dirt. The fix is a regular step rhythm, not an extra color: 45 degrees = one pixel per row, about 22.6 = 2-pixel runs, about 30 = evenly spaced. When a curve looks lumpy, re-space the runs instead of smoothing them.",
+    },
+    KnowledgeEntry {
+        id: "line-quality",
+        title: "Line weight: doubles, jaggies and step rhythm",
+        keywords: &[
+            "双像素", "像素拐角", "线条粗细", "台阶长度", "线条不干净", "断线", "锯齿", "阶梯",
+            "doubles", "double pixel", "line weight", "step rhythm", "line quality", "jaggies",
+        ],
+        body: "Two pixels forming an L at a corner make a DOUBLE, and that corner reads thicker, darker and harder than the rest of the line - for a uniform 1px outline, delete the extra corner pixel. JAGGIES come from uneven step lengths: a clean straight line runs 2-2-2-2 while a lumpy one runs 1-3-2-1-4. Fix a curve by making its runs grow and shrink in a rhythm (5-3-2-1-1-2-3-5) rather than by adding colour. Doubles are not automatically a defect - running the entire outline in doubles is a bold style of its own, and one deliberately broken line can model a brow ridge.",
     },
     KnowledgeEntry {
         id: "smooth-curves",
@@ -174,6 +251,15 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "anti-alias", "anti-aliased", "soft edge", "feather",
         ],
         body: "A hard-edged helper rounds geometry to whole cells, so a 46 degree diagonal breaks into steps and an r=5 circle only has six directions to go. Draw the detail layer with the aa* family - same coordinates, real coverage per cell: aaline/aaseg for one segment, aacurve (aaquad) for a quadratic through a control point, aacubic (aabez) for a cubic, aapoly/aapath and aapolyfill/aafill for a point table (a triangle is three points), aacircle, aaellipse, aarect, and blend(x,y,c,a) for one already-placed pixel. Lay the flat base passes with the hard-edged fills first and curve over them: an aa* stroke blends with what is underneath instead of punching a hole. Keep aa* off sprites under 32px and off outlines, where the hard edge reads better; on a palette-locked layer every blended colour snaps back into the range, so use dither(x,y,c,a) when a soft edge must stay inside a tiny range.",
+    },
+    KnowledgeEntry {
+        id: "aa",
+        title: "Anti-aliasing discipline",
+        keywords: &[
+            "抗锯齿", "柔化", "外部抗锯齿", "内部抗锯齿", "过渡像素", "中间色像素", "阶梯柔化", "加多了",
+            "anti-aliasing", "antialiasing", "aa pixel", "external aa", "internal aa", "soft pixel",
+        ],
+        body: "AA puts a pixel whose value sits between a shape and its neighbour on every step of an edge. Three rules carry it: add it SELECTIVELY - one or two pixels where a curve meets a contrasting background; NEVER let it change the shape, because extra pixels in the corners quietly redraw the outline; and judge it at real size, never at 8x zoom. Inner AA lives inside the shape, outer AA lives on the background and dies the moment that background changes. Value is the only thing that has to be right, so an AA pixel's hue is free to pick. Most sprites need no AA at all, and where it is used as a style choice the beard and the hair are the places that earn it.",
     },
     KnowledgeEntry {
         id: "circles",
@@ -198,10 +284,42 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         body: "A curated palette often beats an invented one: PICO-8 (16), DB32 (32), Endesga 32, Sweetie 16, Nuclear Blaze 8, Mushi 8, Resurrect 64, Ink 5. Pick by feel: DB32 or Resurrect for general game art, Endesga for a colourful youthful look, PICO-8 for retro jams, Nuclear Blaze or Mushi for tight two-tone noir, Sweetie for cute palettes, Ink for a single-colour mono look. A locked palette is a constraint that buys discipline: no colour outside the set, and the light and dark steps come from neighbouring entries in the palette rather than from a hue shift. Recommend a named palette when the user asked for a house style but described no colours of their own, and record the palette name in the deliverable manifest.",
     },
     KnowledgeEntry {
+        id: "style-recipes",
+        title: "House styles with the hex already settled",
+        keywords: &[
+            "卡哇伊", "可爱风", "粉彩", "8位", "八位", "万圣节", "暗黑风", "乡村风", "单色方案",
+            "色调配方", "现成配色", "风格配方", "配色速查", "8位配色", "八位配色", "配色配方",
+            "粉彩配色", "可爱配色", "万圣配色", "暗黑配色", "乡村配色", "给一套现成",
+            "来一套配色", "给个配色方案",
+            "pastel", "kawaii", "cute palette", "8-bit", "halloween", "cottage",
+            "nes palette", "style recipe", "house style", "monochrome palette",
+        ],
+        body: "Ready-made recipes, hex included, so a whole set stays consistent. PASTEL/KAWAII (5): peach #ffb7b2, mint #b5ead7, sky #c7ceea, cream #fff1e6, blush #ffd3b6, plus outline ink #2d3142. NES 8-BIT (4 of the console's 56): red #b0030a, blue #0078f8, yellow #fcbc3c, white #fcfcfc, plus black for outlines. COTTAGE (6): sage #b7c9a8, terracotta #d4825a, dusty rose #d8a7a1, butter #f5e1a4, soft brown #8b6f47, cream #fff8e7. HALLOWEEN DARK (5): near-black #0f0f0f, pumpkin #ff7518, wizard purple #5a3fff, blood #8b0000, candle yellow #ffd700. MONO (2): black and white, which forces confident silhouette decisions and is superb at 8x8 and 16x16. Carrying one recipe across every frame of a sheet is what makes the set look authored rather than assembled.",
+    },
+    KnowledgeEntry {
+        id: "physical-media",
+        title: "Beads, cross-stitch and diamond painting",
+        keywords: &[
+            "拼豆", "豆子", "拼豆板", "十字绣", "刺绣", "钻石画", "针织", "手工", "实体媒介", "图纸",
+            "bead", "beads", "perler", "cross stitch", "embroidery", "diamond painting", "handcraft",
+        ],
+        body: "One bead, one stitch, one diamond holds one colour, so pixel art already IS the pattern - every rule above carries over with three changes. The palette becomes the beads or threads you can actually buy, so pick that set first and draw into it instead of treating a limited palette as optional. The bead board decides the size: a large square board is 29x29, so a 16x16 sprite sits comfortably while 32x32 needs four boards. Viewing distance does the dithering for you - a checkerboard reads as a mid tone from across the room, and one wrong bead still looks like a speck. Anti-aliasing converts worst of all and usually wants a clean step in an available colour. Hand-drawn sheets beat converted photos every time, and the finished deliverable carries a per-colour bead count: export the manifest and read its `palette.pixels` array, which lists each colour's cell count in palette order beside `palette.transparent`, so the shopping list is a read rather than a recount.",
+    },
+    KnowledgeEntry {
         id: "lighting",
         title: "One light source",
         keywords: &["光源", "光照", "受光", "背光", "阴影", "投影", "cast shadow", "light source", "lighting"],
-        body: "Fix ONE light direction and honour it on every object in the scene. When the user named no direction, no lamp, no hour of day, do not invent one: read tops a half step lighter and undersides a half step darker off the viewer's angle, and pool the cast shadow on the ground beneath the form instead of leaning it toward an assumed source. The lit side takes the highlight, the shadow side a darker ramp step, and the darkest core shadow sits just past where the form turns away. Cast shadows must agree with that same direction in both length and lean.",
+        body: "Fix ONE light direction and honour it on every object in the scene. When the user named no direction, no lamp, no hour of day, do not invent one: read tops a half step lighter and undersides a half step darker off the viewer's angle, and pool the cast shadow on the ground beneath the form instead of leaning it toward an assumed source. The lit side takes the highlight, the shadow side a darker ramp step, and the darkest core shadow sits just past where the form turns away. Cast shadows must agree with that same direction in both length and lean. A small canvas rarely needs all seven parts of the basic model (highlight, midtone, terminator, shadow, bounce, occlusion, cast shadow) - pick by size and style. Material decides the read as much as direction does: matte spreads light evenly with no highlight at all, glossy takes a small sharp one, and metal takes strong contrast and reflects its surroundings.",
+    },
+    KnowledgeEntry {
+        id: "pillow-shading",
+        title: "Pillow shading and banding",
+        keywords: &[
+            "枕形阴影", "枕头阴影", "枕头", "一圈圈加暗", "一圈圈", "往里加", "向内加",
+            "贴着轮廓", "由外向内", "平行条纹", "明暗层", "条纹感", "色带感", "显平", "显噪",
+            "pillow shading", "pillow", "banding", "rings of dark", "parallel bands",
+        ],
+        body: "Pillow shading darkens inward from the outline in concentric rings, ignoring both form and light: the result reads flat and puffed, like a cushion. Same four colours, completely different object - the fix is to light from the real direction instead: highlight on the lit side, shadow past the turn, core shadow where the form turns away, and step widths that follow the surface rather than the border. BANDING is its cousin: a shade layer or AA band of constant width hugging the whole outline so every step lines up, which flattens the picture or makes it noisy. Break banding by varying band length and offsetting the steps from one another.",
     },
     KnowledgeEntry {
         id: "silhouette",
@@ -246,7 +364,7 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         id: "specular",
         title: "Speculars and highlights",
         keywords: &[
-            "高光", "反光", "镜面", "光泽", "亮部", "刺眼",
+            "高光", "反光", "镜面", "光泽", "亮部", "金属", "刺眼",
             "specular", "highlight", "gloss", "shiny", "reflective", "sheen",
         ],
         body: "A specular belongs to the LIGHT, not the surface: it stays where the light is even when the object turns. Keep it one to two pixels at 32px and place it on the lit side just inside the terminator, never centred on the lit face. Hardness is the material - metal is a sharp band with an angular tail, wet surfaces and glass a tight bright core, glazed ceramic and plastic a broad blob, cloth, fur and skin nothing at all. Tie it to one value brighter than anything else in the drawing, and never let two speculars compete inside one silhouette.",
@@ -318,7 +436,7 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         id: "contrast",
         title: "Contrast and visual hierarchy",
         keywords: &["对比", "主次", "焦点", "突出", "醒目", "contrast", "hierarchy", "focal point", "emphasis"],
-        body: "Decide the one focal point and give it the strongest value contrast; push everything else one or two steps flatter. Reserve the darkest dark and lightest light for that spot. If everything is crisp, nothing reads first.",
+        body: "Decide the one focal point and give it the strongest value contrast; push everything else one or two steps flatter. Reserve the darkest dark and lightest light for that spot. If everything is crisp, nothing reads first. Saturation is seasoning, not the main course: keep most of the canvas quiet and let full saturation live only where the eye should land - a drawing that is saturated everywhere reads as noise. Value outranks hue every single time, so check it the cheap way - put a black layer over the finished drawing with its blend mode set to Colour: the greyscale version still has to read, or the picture is being carried by colour alone.",
     },
     KnowledgeEntry {
         id: "symmetry",
@@ -349,6 +467,16 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         title: "Noise, scanlines and retro texture",
         keywords: &["噪点", "颗粒", "肌理", "老电视", "扫描线", "做旧", "noise", "grain", "scanline", "texture", "dirty"],
         body: "Texture is a threshold pattern, not random smearing: noise(x,y,scale) with a low scale gives long streaks, a high scale gives speckle. Add texture last and at low density (10-20% of pixels) so the underlying form survives; never let it cross a ramp boundary.",
+    },
+    KnowledgeEntry {
+        id: "crt-screen",
+        title: "The CRT screen: what the blur was hiding",
+        keywords: &[
+            "老显示器", "老式屏幕", "老屏幕", "老主机", "老机子", "复古屏幕", "显像管", "糊屏",
+            "屏幕模糊", "糊掉", "糊一点", "模糊的边", "大屁股电视", "显示器糊", "模拟信号",
+            "crt", "crt screen", "screen blur", "retro screen", "blurred pixels", "analog screen",
+        ],
+        body: "Retro games were drawn for CRT sets that smeared neighbouring pixels together: a waterfall of blue-white stripes and a checkerboard-dithered sky came out of the television as flowing water and a smooth gradient. Two consequences. Collecting references, remember that the clean screenshots online show pixels nobody ever saw - stripes, jaggies and hard dithering were normal on the hardware, and some artists designed straight into that blur. And drawing, borrow the trick rather than the artefact: a dither pattern can stand in for a mid tone the hardware was going to soften anyway. Not every retro game was authored this way, so it is a choice, not a rule.",
     },
     KnowledgeEntry {
         id: "ui-kit",
@@ -397,6 +525,17 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         body: "A refinement request means add to what is already on the canvas, never redraw it from scratch. Read the current grid first, keep the approved silhouette and pose, and never open a refinement script with clear(). Add information inside the existing structures: sub-divide a ramp step with a dither band, add a rim light on the shadow side, deepen contact shadows, tighten the cluster rhythm. Keep the palette the same unless the user asks for more colors, and end by reading the canvas back - a script that changes nothing is skipped as a replay, so change the script or finish.",
     },
     KnowledgeEntry {
+        id: "drawing-process",
+        title: "The four passes: silhouette, line art, flat colour, refine",
+        keywords: &[
+            "分几遍", "四遍", "起稿", "铺剪影", "勾线稿", "平涂", "先画什么", "从哪儿开始",
+            "绘画流程", "作画流程", "第一步", "上色步骤",
+            "drawing process", "four pass", "passes", "block in", "blocking in",
+            "where do i start", "how do i start",
+        ],
+        body: "Work in four passes and finish each before the next starts. 1 SILHOUETTE: one flat colour, nothing but the outer shape - if it does not read as one blob, stop and restate the proportions rather than shading it. 2 LINE ART: cut that shape into its major regions (brim, face, beard, staff) at one consistent weight. 3 FLAT COLOUR: one local colour per region, ignoring light entirely. 4 REFINE: shading, highlight and the small details last. The silhouette barely changes between pass one and pass four, and that stability is the whole point of drawing it first. Other starts are legitimate too - construction lines for proportion, rough colour blocks for atmosphere, drawing big and shrinking for detail - but whatever you pick, the first pass stays about the big shape only, and there is no single correct order.",
+    },
+    KnowledgeEntry {
         id: "realism",
         title: "Realism inside a pixel grid",
         keywords: &[
@@ -425,6 +564,18 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         body: "Pick the hue relationship before the first pixel: analogous (a 30-60 degree band) reads calm and unified, complementary (opposite hues) reads punchy but needs one side clearly dominant, and a triad reads busy unless two thirds of the canvas is neutral. Warm hues advance and cool hues recede, so spend the warm accent on the focal point and keep the cool hues in the background. One hue family should own more than half the canvas.",
     },
     KnowledgeEntry {
+        id: "temperature",
+        title: "Temperature is relative, and the environment rewrites colour",
+        keywords: &[
+            "冷暖", "冷色", "暖色", "环境色", "色温", "反射上来的颜色", "桌面颜色", "旁边的影响",
+            "相对冷暖", "同一种颜色不同感觉", "反光", "底部带红", "带上周围", "受环境影响",
+            "红色桌面上", "光从哪来", "光源色",
+            "warm and cool", "colour temperature", "color temperature", "relative warmth",
+            "environment tint", "environmental colour", "bounced tint",
+        ],
+        body: "Warm and cool are relative, not properties of a hue: the same grey looks cool beside red and warm beside blue, and the same red is the warm half against one neighbour and the cool half against another. Judge temperature by comparison, never in isolation. The surroundings rewrite colour far harder than most people expect - a yellow ball resting on a red table picks red up into its underside, because light bounces off the table into the shadow. So tint the shadow side toward the environment and let that bounced hue be the warmest note in the shadow. The light source changes it again: white, warm and cold light give three different readings of one object.",
+    },
+    KnowledgeEntry {
         id: "canvas-scale",
         title: "Matching the drawing to the canvas size",
         keywords: &[
@@ -438,7 +589,18 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "grid size",
             "how big",
         ],
-        body: "Read width and height from the canvas context and derive EVERY coordinate from them - a script with literal constants tuned for 64px blasts off the edge of a 24px canvas. Under 16 pixels the silhouette is the whole picture and outlines hurt; at 32-64 spend it on two or three signature details plus a 3-step ramp; at 96 and above loops and math pay for themselves and you can carry 4-5 ramp steps per material. Use canvas.scale(k) for a 64px-design constant, canvas.grid(cols, rows) for a cell grid, and canvas.cx / canvas.cy instead of a hand-computed centre. Colour budget follows the canvas: 4 at 8x8, 8 at 16x16, 16 at 24 and 32, 24 at 48x48, 32 at 64x64, 48 at 128x128, 64 at 256, 96 at 512, 128 at 1024, 256 at 2048 - more colours on a small canvas buys noise, not detail.",
+        body: "Read width and height from the canvas context and derive EVERY coordinate from them - a script with literal constants tuned for 64px blasts off the edge of a 24px canvas. Under 16 pixels the silhouette is the whole picture and outlines hurt; at 32-64 spend it on two or three signature details plus a 3-step ramp; at 96 and above loops and math pay for themselves and you can carry 4-5 ramp steps per material. Use canvas.scale(k) for a 64px-design constant, canvas.grid(cols, rows) for a cell grid, and canvas.cx / canvas.cy instead of a hand-computed centre. Colour budget follows the canvas: 4 at 8x8, 8 at 16x16, 16 at 24 and 32, 24 at 48x48, 32 at 64x64, 48 at 128x128, 64 at 256, 96 at 512, 128 at 1024, 256 at 2048 - more colours on a small canvas buys noise, not detail. Standard sizes worth knowing by use: 8x8 for icons and small props, 16x16 for classic-game props and small characters, 32x32 for a character whose face has to read, 64x64 for portraits and detail-heavy characters, 29x29 for one large square bead board, 128 and up for scenes. One project keeps ONE ratio: mixing sizes looks like assets pasted together from different games.",
+    },
+    KnowledgeEntry {
+        id: "starter-subjects",
+        title: "First subjects with size and colour count settled",
+        keywords: &[
+            "入门", "新手", "练习", "练手", "画什么", "题材", "创意", "点子", "灵感", "想画",
+            "心形", "笑脸", "披萨", "机器人", "骑士", "巫师", "第一个作品",
+            "beginner", "starter", "practice", "ideas", "idea", "what to draw",
+            "first sprite", "heart", "smiley", "pizza", "robot", "knight", "wizard",
+        ],
+        body: "Subjects whose size and colour count are already settled - a first piece should be a decision, not a blank page: heart 11x11 in 2 colours, smiley 15x15 in 3, apple and ghost at 4, robot face 8x8 in 3, walking knight 16x16 in 5, wizard 24x32 in 7, dragon 32x32 in 8, pizza 24x24 in 6. Three habits carry every one of them: exaggerate the single most recognisable feature, mirror half the canvas when the subject is genuinely symmetric, and keep one flat backing colour across a sticker-style set. Small canvases are the training ground - at 10x10 a couple of pixels is a whole expression change, and that weight is easy to miss on a big sheet.",
     },
     KnowledgeEntry {
         id: "quadruped",
@@ -876,6 +1038,16 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         ],
         body: "A vehicle is a chassis mass plus a propulsion mass plus one or two wheels or a hull line, and its wheels and windows share one line across the body. A ship reads from the hull silhouette plus a mast or smokestack plus a flag; a cart reads from two wheels plus a bed plus a shaft. Shade the chassis in two long planes rather than per-part, and keep any text or emblem level with the body, not rotated.",
     },
+    KnowledgeEntry {
+        id: "spreadsheet-index",
+        title: "Index grids: spreadsheets and numbered cells",
+        keywords: &[
+            "电子表格", "表格", "编号", "索引色", "数字编码", "网格编号", "填格子", "色号表",
+            "spreadsheet", "excel", "sheets", "numbered grid", "index numbers", "csv",
+            "grid of numbers",
+        ],
+        body: "A pixel sheet also works as a grid of INDEX numbers instead of colours, and that buys three things: recolouring the whole image is one conditional-format rule per colour, the per-colour pixel count comes from a single COUNTIF (which is also the bead and embroidery bill), and a mirror is `=H1` dragged sideways. Four ways to fill the grid: by hand, with a number palette plus rules, by pasting an image, or by importing a pattern CSV. Keep one cell per pixel, one row of cells per canvas row, and always deliver a numbered grid with a legend - a legend-free number sheet is unreadable.",
+    },
 ];
 
 /// 检出这一轮用得上的知识条目。明文命中加权：词越长越算数，
@@ -940,14 +1112,42 @@ pub fn section_from_ids(ids: &[String], budget: usize) -> String {
     render(hits, budget)
 }
 
+/// 动笔那一轮的行为准则段。规格锁、收工自检、别画成程序化假图案三条全数下发：
+/// 用户提不提醒都改成它们的形状——「别画成程序化假图案」这种话没人会主动说，
+/// 可它恰恰是程序化瓦片一眼假的全部原因。
+///
+/// 纯问答轮次不要这一段：三轮护栏压在一句「你好」上面，只会把闲聊也变成施工队。
+/// 所以调用方判「这一轮会不会动笔」，判据在 `plan::TurnPlan::draws`。
+pub fn discipline_section() -> String {
+    let ids: Vec<String> = DISCIPLINE_IDS.iter().map(|id| (*id).to_string()).collect();
+    let hits = ids
+        .iter()
+        .filter_map(|id| ENTRIES.iter().find(|entry| entry.id == id))
+        .collect();
+    render_titled(
+        hits,
+        DISCIPLINE_BUDGET,
+        "Working discipline for every drawing in this project (binding whether or not this \
+         sentence mentions it):\n",
+    )
+}
+
 fn render(hits: Vec<&'static KnowledgeEntry>, budget: usize) -> String {
+    render_titled(
+        hits,
+        budget,
+        "Relevant craft notes for this request (retrieved from the built-in knowledge base; \
+         apply the parts that fit and ignore the rest):\n",
+    )
+}
+
+/// 摆条目：标题一行，一条一行。`budget` 按字符数封顶，够几条就几条，
+/// 装不下的整条舍弃而不是截半——半条规矩比没给更容易被模型照错那一半执行。
+fn render_titled(hits: Vec<&'static KnowledgeEntry>, budget: usize, title: &str) -> String {
     if hits.is_empty() {
         return String::new();
     }
-    let mut out = String::from(
-        "Relevant craft notes for this request (retrieved from the built-in knowledge base; \
-         apply the parts that fit and ignore the rest):\n",
-    );
+    let mut out = String::from(title);
     for entry in hits {
         let block = format!("- {}: {}\n", entry.title, entry.body);
         if out.chars().count() + block.chars().count() > budget {
@@ -1005,6 +1205,37 @@ mod tests {
     fn nothing_relevant_returns_nothing() {
         assert!(retrieve("你好", 4).is_empty());
         assert!(prompt_section("你好", 4, DEFAULT_BUDGET).is_empty());
+    }
+
+    /// 行为准则三条是动笔才有的护栏：整段在，而且和检索条目各走各的预算。
+    /// 互不挤占才有意义——护栏插队的话，「画 5 帧奔跑」那一轮就带不上步态相位表，
+    /// 而不是反过来多一条护栏。
+    #[test]
+    fn the_discipline_trio_rides_its_own_budget() {
+        let section = discipline_section();
+        for title in [
+            "Lock the spec before drawing",
+            "Self-check before calling anything done",
+            "Patterns that make procedural work look fake",
+        ] {
+            assert!(section.contains(title), "准则段少了「{title}」：{section}");
+        }
+        // 三条 id 都在库里：改坏了名字，护栏会静悄悄地整段消失，
+        // 而消失的护栏不报错，只是在成品里露出马脚。
+        for id in DISCIPLINE_IDS {
+            assert!(
+                ENTRIES.iter().any(|entry| entry.id == id),
+                "知识库里没有 {id}"
+            );
+        }
+        assert!(
+            section.chars().count() <= DISCIPLINE_BUDGET,
+            "准则段超预算了"
+        );
+        // 检索那一路照旧满员：护栏不占名额，这一条是这段设计成立的前提。
+        assert!(retrieve("画5帧橘猫奔跑", DEFAULT_LIMIT)
+            .iter()
+            .any(|e| e.id == "locomotion"));
     }
 
     #[test]
@@ -1255,5 +1486,108 @@ mod tests {
             "{}",
             text.chars().count()
         );
+    }
+
+    /// MakeBead 教程吸进来的那几条要真能被原话捞出来。用户嘴上说的是
+    /// 「怎么开始画」「加抗锯齿加多了」「像枕头一样」这种口语，
+    /// 捞不到就等于教程只活在了源码里。
+    #[test]
+    fn the_craft_process_entries_surface() {
+        for (query, id) in [
+            ("新手入门不知道从哪儿开始画", "drawing-process"),
+            ("先画剪影再平涂最后细化，分几遍比较好", "drawing-process"),
+            ("阴影一圈圈往里加，看起来像个枕头", "pillow-shading"),
+            ("抗锯齿加多了，形状都被改变了", "aa"),
+            ("线条拐角有双像素，粗细不均匀", "line-quality"),
+            ("这条曲线画在老屏幕上会不会糊掉", "crt-screen"),
+            ("16位风格参考图，原版当年是 CRT 显示的", "crt-screen"),
+            ("画一个拼豆图纸，要统计每种颜色的数量", "physical-media"),
+            ("用十字绣的方式做一个像素图", "physical-media"),
+            ("卡哇伊风格的配色，给一套现成的", "style-recipes"),
+            ("万圣节暗黑配色，五个颜色", "style-recipes"),
+            ("第一次画像素画，练手画点什么好", "starter-subjects"),
+            ("在电子表格里用编号填格子", "spreadsheet-index"),
+        ] {
+            let hits = retrieve(query, 4);
+            assert!(
+                hits.iter().any(|e| e.id == id),
+                "'{query}' 没捞出 {id}：{:?}",
+                hits.iter().map(|e| e.id).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// 行为准则那几条要真能被原话捞出来，还不能抢走配色库的主场：
+    /// 「红白机风格」该定到 NES 分级，「8位配色」却还是该去 style-recipes
+    /// 取现成 hex。这两句只差两个字，混一条就把配方冲没了。
+    #[test]
+    fn the_discipline_entries_surface_and_stay_in_their_lane() {
+        for (query, id) in [
+            ("红白机风格，角色 16x16", "style-tiers"),
+            ("16位机风格来一套", "style-tiers"),
+            ("先把尺寸和配色定下来再画", "spec-lock"),
+            ("规格别做到一半又改", "spec-lock"),
+            ("画个草地瓦片，别一看就是假的", "fake-patterns"),
+            ("程序化生成的石头路太规律了", "fake-patterns"),
+            ("交付前自己检查一遍", "quality-gate"),
+            ("冷暖到底怎么判断", "temperature"),
+            ("放在红桌面上球的底部带红色", "temperature"),
+        ] {
+            let hits = retrieve(query, 4);
+            assert!(
+                hits.iter().any(|e| e.id == id),
+                "'{query}' 没捞出 {id}：{:?}",
+                hits.iter().map(|e| e.id).collect::<Vec<_>>()
+            );
+        }
+        // 分级只管尺寸和色数，hex 配方还是 style-recipes 的主场。
+        for (query, preferred) in [
+            ("8位配色", "style-recipes"),
+            ("粉彩配色，给一套现成的", "style-recipes"),
+            ("用 db32 的配色画一个角色", "palette-library"),
+            ("优化一下细节", "refine"),
+            ("画一个 app 图标，注意色数", "pixel-discipline"),
+        ] {
+            assert_eq!(retrieve(query, 4)[0].id, preferred, "{query}");
+        }
+    }
+
+    /// 这些新条目的触发词最容易踩两种坑：抢走老条目的主场，或者被
+    /// 常见英文词的半截误命中。前者会让「优化一下细节」这种高频追问
+    /// 丢掉 refine，后者会把一段枕形阴影规矩塞进一句闲聊。
+    #[test]
+    fn the_craft_process_entries_stay_in_their_lane() {
+        // refine、form-shading、specular、smooth-curves 的主场一个字都没提。
+        for (query, preferred) in [
+            ("优化一下细节", "refine"),
+            ("细节再写实一点", "refine"),
+            ("立体感不够，明暗交界太生硬", "form-shading"),
+            ("金属高光再亮一点", "specular"),
+            ("尾巴画条平滑的抗锯齿曲线", "smooth-curves"),
+        ] {
+            assert_eq!(retrieve(query, 4)[0].id, preferred, "{query}");
+        }
+        // 术语新条目不许把「画一只猫」这种安静提问带偏。
+        let named: Vec<&str> = retrieve("画一只坐着的小猫", 4)
+            .iter()
+            .map(|e| e.id)
+            .collect();
+        for wrong in [
+            "starter-subjects",
+            "style-recipes",
+            "crt-screen",
+            "physical-media",
+        ] {
+            assert!(
+                !named.contains(&wrong),
+                "'画一只坐着的小猫' 误命中 {wrong}：{named:?}"
+            );
+        }
+        // 拉丁触发词整词算：lifestyle 里的 style 不该把配方条目拖进来。
+        let styled: Vec<&str> = retrieve("a lifestyle scene", 4)
+            .iter()
+            .map(|e| e.id)
+            .collect();
+        assert!(!styled.contains(&"style-recipes"), "{styled:?}");
     }
 }

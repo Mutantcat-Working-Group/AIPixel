@@ -11,6 +11,7 @@
 //! 定性的位置仍然在 Rust：模型把预算全花在思考、一个工具都不调的场面真实存在，
 //! 那时候约束必须已经在路上，不能等它开口。
 
+use super::craft;
 use super::models::ToolSpec;
 use super::presets;
 use super::{
@@ -262,6 +263,13 @@ impl TurnPlan {
     /// 本轮用户原话。供颜色名表 / 术语表按需裁剪，见 `prompt::PromptExtras::query`。
     pub fn prompt_query(&self) -> &str {
         &self.query
+    }
+
+    /// 这一轮会不会往画布上动笔。判据和 `craft::required` 同源：要图、改画、
+    /// 成品意图已定都算，纯问答不算——护栏跟着动笔走，不跟着触发词走。
+    /// 用在行为准则三条的下发上，见 `knowledge::discipline_section`。
+    pub fn draws(&self) -> bool {
+        craft::required(self.editing, self.intent, self.art_requested)
     }
 
     /// 有参照图才发分流节点。纯快照的一轮不发：节点是给参照定性看的，
@@ -725,6 +733,8 @@ mod tests {
     fn a_plain_chat_line_still_routes_nothing() {
         let plan = TurnPlan::from_text("画一只猫", &[], true);
         assert!(plan.intent.is_none());
+        // 要图就算动笔：行为准则三条跟着它走，见 `draws`。
+        assert!(plan.draws());
         // 「画一只猫」一个类别词都没中，可它确实在要一张成品：成品段由
         // 兜底接手，不再是空段。这正是「行走图」没进触发词之前那批请求
         // 的真实处境——不补这一段，模型拿不到任何成品约束。
@@ -732,7 +742,22 @@ mod tests {
 
         let plan = TurnPlan::from_text("这段配色什么意思", &[], true);
         assert!(!plan.art_requested);
+        assert!(!plan.draws(), "纯问答轮次不该带上三轮护栏");
         assert!(plan.prompt_sections().is_empty(), "没定出东西就别占标题");
+    }
+
+    /// 护栏跟着动笔走，不跟着触发词走。「别画成程序化假图案」这种话没人会
+    /// 主动说，等触发词命中就等于永远不发——所以改画那一轮也照样下发。
+    #[test]
+    fn guardrails_follow_the_brush_not_the_trigger_words() {
+        assert!(
+            TurnPlan::from_text("优化一下细节", &[], true).draws(),
+            "改画也算动笔：规格锁和收工自检对改画同样要紧"
+        );
+        assert!(
+            TurnPlan::from_text("画5帧橘猫奔跑", &[], false).draws(),
+            "要图那一轮更该带上规格锁"
+        );
     }
 
     #[test]

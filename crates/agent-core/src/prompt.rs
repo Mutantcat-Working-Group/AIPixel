@@ -99,6 +99,10 @@ pub struct PromptExtras<'a> {
     pub roles: &'a str,
     /// 提示词清单段：正向 / 逆向提示词等生图前的固定步骤。
     pub craft: &'a str,
+    /// 行为准则段：规格锁、收工自检、别画成程序化假图案三条。
+    /// 与 `craft_notes` 分开是有意的：一条按需检索，一条动笔就发，
+    /// 挤在同一份预算里必然有一个被另一个顶掉。
+    pub discipline: &'a str,
     /// 命中的知识条目：本轮检索到的美术术语解释。
     pub craft_notes: &'a str,
     /// 用户原话。两张对照表靠它按需裁剪：不带着它，一百多条色名和五六十条术语
@@ -107,7 +111,7 @@ pub struct PromptExtras<'a> {
 }
 
 /// 组装完整系统提示词：静态规则 + 本轮分流 + 两张对照表 + 命中的知识 + 实时
-/// canvas 上下文（RLE + 图例 + 目录 + 激活项）。
+/// canvas 上下文（RLE + 图例 + 目录 + 激活项），外加动笔那一轮的行为准则。
 ///
 /// 顺序是排过的：静态规则讲「像素画怎么画」，本轮分流紧跟其后讲「这一轮要什么」，
 /// 对照表和知识条目回答「用户说的那个词是什么意思、该怎么落地」，
@@ -127,6 +131,14 @@ pub fn build_system_prompt(
     if !extras.routing.is_empty() {
         out.push('\n');
         out.push_str(extras.routing);
+    }
+    // 行为准则紧跟分流：分流讲「这一轮要什么」，准则讲「每一步怎么守住」。
+    // 规格锁里那张五行锁表和分流段里的尺寸 / 画风 / 平台是同一件事的两面，
+    // 隔太远模型就把它们当成两份要求各写各的。它另走一份预算，所以出现在
+    // 这里不会挤掉下面那几条按需检索的技法。
+    if !extras.discipline.is_empty() {
+        out.push('\n');
+        out.push_str(extras.discipline);
     }
     // 分工段紧跟分流：分流讲「这一轮要什么」，分工讲「这一轮谁来做哪一段」。
     // 放在清单前面，模型才会先认清哪些阶段该自己动手、哪些该交给专职引擎。
@@ -204,6 +216,7 @@ mod tests {
             4000,
             PromptExtras {
                 routing: "TURN ROUTING: the user asked for a tile map, style 16-bit platformer",
+                discipline: "WORKING DISCIPLINE - lock the spec before the first pixel",
                 roles: "MODEL ROLES - who runs which stage: image_gen is a separate model",
                 craft_notes: "CRAFT NOTES - color ramp: build 3-5 steps per material",
                 craft: "PROMPT CRAFT - mandatory before any drawing tool this turn",
@@ -229,14 +242,23 @@ mod tests {
         // 本轮分流与知识条目。
         assert!(prompt.contains("TURN ROUTING"));
         assert!(prompt.contains("CRAFT NOTES"));
+        // 行为准则三条：规格锁、收工自检、别画成程序化假图案。
+        assert!(prompt.contains("WORKING DISCIPLINE"), "缺行为准则段");
         // 模型分工段：紧跟分流、压在清单之前，模型才先认清谁干哪一段。
         assert!(prompt.contains("MODEL ROLES"), "缺模型分工段");
         let role_at = prompt.find("MODEL ROLES").expect("分工段没进组装结果");
         let routing_at = prompt.find("TURN ROUTING").expect("分流段没进组装结果");
         let craft_at = prompt.find("PROMPT CRAFT").expect("清单段没进组装结果");
+        let discipline_at = prompt
+            .find("WORKING DISCIPLINE")
+            .expect("准则段没进组装结果");
         assert!(
             routing_at < role_at && role_at < craft_at,
             "分工段必须夹在分流与清单之间"
+        );
+        assert!(
+            routing_at < discipline_at && discipline_at < role_at,
+            "行为准则必须夹在分流与分工之间：规格锁和分流段里的尺寸/画风是同一件事"
         );
         // 两张对照表：颜色名（中英 + hex）和美术术语。
         assert!(prompt.contains("COLOR NAMES"));

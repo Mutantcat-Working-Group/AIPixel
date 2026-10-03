@@ -2438,10 +2438,10 @@ impl AgentSession {
             .engine
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // 本轮分流和知识条目按当前 plan 现算：模型中途纠正过，
+        // 本轮分流、知识条目和行为准则按当前 plan 现算：模型中途纠正过，
         // 下一发请求就该带着新结论上路，缓存会把纠正吃掉。
         // 锁顺序固定 document -> active -> engine -> plan。
-        let (routing, craft_notes, query) = {
+        let (routing, craft_notes, discipline, query) = {
             let plan = self
                 .plan
                 .lock()
@@ -2452,6 +2452,12 @@ impl AgentSession {
                 // 硬塞进列表，重检会把它又挤掉，而它偏偏是唯一一条讲
                 // 「保留已有像素」的条目。
                 knowledge::section_from_ids(&plan.knowledge_ids, knowledge::DEFAULT_BUDGET),
+                // 行为准则三条另走一份预算：检索那 4 个名额是给技法留的，
+                // 让护栏插队的话，「画 5 帧奔跑」那一轮就带不上步态相位表。
+                // 纯问答轮次不发，见 `TurnPlan::draws`。
+                plan.draws()
+                    .then(knowledge::discipline_section)
+                    .unwrap_or_default(),
                 // 原话单独带出来：两张对照表要按它裁剪，见 colornames::prompt_table_for。
                 plan.prompt_query().to_string(),
             )
@@ -2467,6 +2473,7 @@ impl AgentSession {
                     routing: &routing,
                     roles: &roles_section,
                     craft: &craft_section,
+                    discipline: &discipline,
                     craft_notes: &craft_notes,
                     query: &query,
                 },
@@ -6324,5 +6331,65 @@ mod tests {
             plain.contains("default quality tier"),
             "没叠预设的下一句照旧只挂默认档：{plain}"
         );
+    }
+
+    /// 行为准则三条必须真出现在发出去的系统提示词里，而且要跟着动笔走。
+    /// 前半截查「要图那轮一条不少」，后半截查「纯问答那轮一条不带」——
+    /// 少了后半截，一句「你好」也会收到三轮施工规矩，模型会把闲聊也当施工队。
+    /// 中间那条查护栏没把技法挤掉：两者各走一份预算，这才是这段设计的全部意义。
+    #[test]
+    fn the_discipline_trio_reaches_the_request_and_only_on_drawing_turns() {
+        let s = session();
+        let cfg = s.runner_config();
+        let trio = [
+            "Lock the spec before drawing",
+            "Self-check before calling anything done",
+            "Patterns that make procedural work look fake",
+        ];
+
+        *s.plan
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            TurnPlan::from_text("画5帧橘猫奔跑", &[], false);
+        let drawing = s.chat_request(&cfg, None, false, false);
+        for title in trio {
+            assert!(
+                drawing.system.contains(title),
+                "要图那轮少了准则「{title}」"
+            );
+        }
+        // 步态相位表是这一轮真正该带的技法，护栏不许把它顶掉。
+        assert!(
+            drawing
+                .system
+                .contains("Gaits: walk, trot, canter, gallop, flight"),
+            "护栏挤掉了技法条目：两条线各走各的预算失效了"
+        );
+        // 落点：护栏夹在分流与对照表之间，不能漂到画布上下文后面去。
+        let routing_at = drawing.system.find("TURN ROUTING").expect("分流段没进请求");
+        let discipline_at = drawing
+            .system
+            .find("Working discipline for every drawing")
+            .expect("准则段没进请求");
+        let tables_at = drawing
+            .system
+            .find("COLOR NAMES")
+            .expect("颜色名表没进请求");
+        assert!(
+            routing_at < discipline_at && discipline_at < tables_at,
+            "准则段该夹在分流与对照表之间"
+        );
+
+        *s.plan
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            TurnPlan::from_text("这段配色什么意思", &[], true);
+        let chat = s.chat_request(&cfg, None, false, false);
+        for title in trio {
+            assert!(
+                !chat.system.contains(title),
+                "纯问答轮次不该带准则「{title}」"
+            );
+        }
     }
 }

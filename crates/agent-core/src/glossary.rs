@@ -56,10 +56,28 @@ pub const GLOSSARY: &[GlossaryEntry] = &[
         note: "低分辨率下斜线呈阶梯的缺陷；靠固定步长节奏而不是多加色来解决。",
     },
     GlossaryEntry {
+        en: "doubles",
+        zh: "双像素",
+        aliases: &["双格", "成对像素", "双像素线"],
+        note: "同一段边上并排两个像素，让线条多占一倍面积；该用来校准粗细，不是把轮廓整体拉粗。",
+    },
+    GlossaryEntry {
         en: "pixel cluster",
         zh: "像素簇",
         aliases: &["簇", "成组像素"],
         note: "单个像素读不出形状，2x2 以上的簇才有存在感；细节按簇摆，别撒孤点。",
+    },
+    GlossaryEntry {
+        en: "orphan pixel",
+        zh: "孤立像素",
+        aliases: &["孤点", "散点", "噪音点"],
+        note: "四周都是别的内容的单个像素，只读成脏点；删掉，或者并进相邻的像素簇。",
+    },
+    GlossaryEntry {
+        en: "crt screen",
+        zh: "老显示器",
+        aliases: &["CRT", "显像管", "老电视", "模拟信号"],
+        note: "老电视会把相邻像素糊在一起；网上那些干净截图不等于当年主机上的样子。",
     },
     GlossaryEntry {
         en: "bezier curve",
@@ -78,6 +96,12 @@ pub const GLOSSARY: &[GlossaryEntry] = &[
         zh: "色带",
         aliases: &["色带断层", "条纹"],
         note: "渐变跨色阶时出现的硬边条；用抖动接两个色阶而不是补一个中间色。",
+    },
+    GlossaryEntry {
+        en: "pillow shading",
+        zh: "枕形阴影",
+        aliases: &["枕头阴影", "一圈圈加暗", "平行条纹阴影"],
+        note: "从轮廓往外一圈圈往里加暗的坏习惯：看着鼓胀发平；阴影该跟着形体和真实光源走。",
     },
     GlossaryEntry {
         en: "cel shading",
@@ -116,6 +140,36 @@ pub const GLOSSARY: &[GlossaryEntry] = &[
         note: "颜色鲜艳程度；远小画面降一点饱和更像实物，全高饱容易糖分超标。",
     },
     GlossaryEntry {
+        en: "hsv",
+        zh: "HSV 色彩模型",
+        aliases: &["色相饱和度明度", "HSB", "hsv()", "色相饱和明度"],
+        note: "色相定是什么颜色、饱和定多艳、明度定多亮；写脚本调色时拧明度做色阶、微调色相做冷暖，别拿十六进制硬抠。",
+    },
+    GlossaryEntry {
+        en: "contrast",
+        zh: "对比",
+        aliases: &["明暗对比", "对比度", "反差", "高反差"],
+        note: "相邻区域亮暗与色相的差距；把最强的一档对比放在主体上，视线自己就会跑过去。",
+    },
+    GlossaryEntry {
+        en: "colour temperature",
+        zh: "色温与冷暖",
+        aliases: &["冷暖", "暖色", "冷色", "环境色"],
+        note: "冷暖是比较出来的，同一块灰挨着红发冷、挨着蓝发暖；桌面地面会把自身的颜色反弹到物体的接触面上。",
+    },
+    GlossaryEntry {
+        en: "bead count",
+        zh: "每色用珠数",
+        aliases: &["色号统计", "用豆量", "配线量"],
+        note: "拼豆、刺绣、钻石画这类实体媒介的交付清单：每种颜色各需多少颗，照着备料才不会中途断色。",
+    },
+    GlossaryEntry {
+        en: "lightness check",
+        zh: "明度检查",
+        aliases: &["黑白检查", "灰度检查", "去色检查", "desaturate"],
+        note: "把整幅图去成灰色看一眼：只剩明度还读得出形体，才算立得住。",
+    },
+    GlossaryEntry {
         en: "core shadow",
         zh: "核心阴影",
         aliases: &["明暗交界线", "闭塞阴影"],
@@ -146,6 +200,12 @@ pub const GLOSSARY: &[GlossaryEntry] = &[
         note: "物体接触面缝隙里进不去光的那一层；只放在贴得最紧的地方。",
     },
     GlossaryEntry {
+        en: "bounce light",
+        zh: "环境反光",
+        aliases: &["反弹光", "二次光", "bounced light"],
+        note: "光打在周围物体上再弹回来的那一层；阴影里最暖最亮的一条，别让它变成新光源。",
+    },
+    GlossaryEntry {
         en: "rim light",
         zh: "轮廓光",
         aliases: &["边缘光", "反光"],
@@ -162,6 +222,24 @@ pub const GLOSSARY: &[GlossaryEntry] = &[
         zh: "中间调",
         aliases: &["固有色层"],
         note: "固有色所在的层；整幅画信息量最大的一层，别让暗部吃掉它。",
+    },
+    GlossaryEntry {
+        en: "matte",
+        zh: "哑光材质",
+        aliases: &["哑光", "无光泽", "漫反射材质", "matte surface"],
+        note: "只吃漫反射、完全没有镜面的材质（布、土、石头、皮肤）；靠核心阴影和接触阴影出成果，别加高光。",
+    },
+    GlossaryEntry {
+        en: "glossy",
+        zh: "光泽材质",
+        aliases: &["光泽", "半光", "光滑面", "glossy surface"],
+        note: "镜面弱而散的材质，一段亮带加一条渐变尾巴；釉面、塑料、湿表面都算。",
+    },
+    GlossaryEntry {
+        en: "metal",
+        zh: "金属材质",
+        aliases: &["金属", "镜面金属", "metallic"],
+        note: "镜面又硬又窄、核心阴影几乎压到最暗的材质；亮带贴着光源转，尾迹带折角。",
     },
     GlossaryEntry {
         en: "outline",

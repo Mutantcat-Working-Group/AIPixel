@@ -91,6 +91,13 @@ Core value:
 - Tool steps per turn, continuation rounds and result bytes are all configurable; repeated identical failures back off automatically.
 - Interrupt at any time during streaming. Interruption settles immediately and never wedges the rest of the turn.
 
+#### Built-in art knowledge base
+
+- Three blocks go into the prompt on demand: **92 entries of pixel-art knowledge** (animation and tiles, colour and outlines, light and form, animal and object descriptions, set consistency and process), **73 art terms in both Chinese and English with aliases** ("value ramp" for ramp, "outline" for outline), and a **common colour names table in Chinese and English** grouped by hue, so a model can name a colour instead of guessing a hex value.
+- Retrieval is plain-text matching: whichever trigger words appear in the user's sentence, those entries are weighted by word length and sent with the prompt. Entries nobody mentioned are simply left out - a prompt stuffed with concepts dilutes the part that actually matters.
+- Three discipline notes ride along with every pass that touches the canvas - new artwork and edits alike, never a pure chat turn. The guardrails follow the brush, not the trigger words: nobody ever types "never let procedural work read as a fake pattern", so waiting for a keyword hit would mean never sending it. They also carry their own character budget instead of taking a slot from the four retrieved entries, so "draw a 5-frame run" keeps its gait phase table.
+- The entries a turn pulled are shown on the plan node in the conversation, so users can see which ones were referenced rather than wonder.
+
 ### 3. Install and Download
 
 Desktop builds are on [Releases](https://github.com/Mutantcat-Working-Group/AIPixel/releases). Version numbers look like `1.0.20261009` (minor version plus build date):
@@ -212,6 +219,17 @@ Pushing a `v*` tag (for example `v1.0.20261009`) triggers `.github/workflows/rel
 - The `.aip` / `.aipr` data formats, the naming of built-in tools and the structure of the main loop are this repository's own choices and contain no code bound by third-party licenses.
 
 This project is developed and published by Mutantcat Working Group (mutantcat.org), official site [mutantcat.org](https://www.mutantcat.org/). Issues are welcome in the repository.
+
+#### Thanks and Knowledge Sources
+
+The built-in art knowledge base was not written from impression. These public tutorials and reference sets gave it its spine:
+
+- [MakeBead Pixel Art Tutorial](https://makebead.com/zh-Hans/how-to-make-pixel-art/): a Chinese-language pixel art tutorial. Hue shifting, physical media such as beads and cross-stitch, the numbered-grid spreadsheet method, and a graded practice list for beginners all come from it. It is a rewrite based on Saultoons' "The Ultimate Pixel Art Tutorial".
+- [MakeBead Pixel Art Ideas and Style List](https://makebead.com/zh-Hans/pixel-art-ideas/): a style and subject list with ready-made hex values, which the built-in style presets mirror.
+- [MakeBead Spreadsheet Pixel Art](https://makebead.com/zh-Hans/spreadsheet-pixel-art/): the full method of filling a pixel drawing as a numbered table, matching the spreadsheet entry in the knowledge base.
+- [pixel-asset-master-skills](https://github.com/424431185/pixel-asset-master-skills): a pixel-art execution skill. The "get it right before you get it good" discipline - lock the spec, self-check before delivery, re-read the spec before every asset - comes from it.
+- Lospec: the reference for how named palettes are catalogued, how many colours they carry, and what they suit (DB32, Endesga, Resurrect and the rest).
+- Aseprite and PixTXT: reference points for `.aseprite` layer and frame semantics, and for the "index grid plus a palette" intermediate-file idea.
 
 ### 10. MCP Server Mode: Letting External AI Drive AIPixel
 

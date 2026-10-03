@@ -1428,7 +1428,7 @@ fn tool_list_export_formats() -> Result<ToolOutcome, String> {
         { "id": "gpl", "extension": ".gpl", "description": "GIMP Palette 调色板文件，跨工具最广" },
         { "id": "pal", "extension": ".pal", "description": "JASC PAL 调色板文件，Aseprite / Photoshop 认" },
         { "id": "act", "extension": ".act", "description": "Adobe Color Table，恒 256 槽，Autodesk / Maya / Substance 认" },
-        { "id": "manifest", "extension": ".json", "description": "交付清单：尺寸、色数、图层配色范围、帧时长" },
+        { "id": "manifest", "extension": ".json", "description": "交付清单：尺寸、每色像素数（拼豆备料）、图层配色范围、帧时长" },
     ]);
     let structured = json!({
         "formats": formats,

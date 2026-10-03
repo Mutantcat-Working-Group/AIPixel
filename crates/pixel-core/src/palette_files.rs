@@ -152,12 +152,15 @@ pub fn manifest(doc: &Document) -> Value {
 /// 色板视图：主调色板的数量与 hex 列表，外加文档里的全部配色范围。
 fn palette_view(doc: &Document) -> Value {
     let (_, colors) = export_palette(doc);
+    let (pixels, transparent) = pixel_counts(doc);
     json!({
         "count": colors.len(),
+        "transparent": transparent,
         "colors": colors
             .iter()
             .map(|(r, g, b)| format!("#{r:02x}{g:02x}{b:02x}"))
             .collect::<Vec<_>>(),
+        "pixels": pixels,
         "ranges": doc.palettes.iter().map(|palette| json!({
             "id": palette.id,
             "name": palette.name,
@@ -166,6 +169,31 @@ fn palette_view(doc: &Document) -> Value {
             "colors": palette.colors.iter().map(|c| c.to_hex()).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
     })
+}
+
+/// 每种颜色在画布上占多少格，外加透明格的总数。
+/// 拼豆、刺绣、钻石画这类实体媒介要按「每色多少颗」备料，清单就得给这个数；
+/// 备了却没画上的色报 0，本身也是要交付的信息。
+///
+/// cel 索引 0 恒为透明且不占调色板位置，所以调色板第 i 色对应索引 i+1：
+/// 这里按这个偏移装箱。调色板为空时（画布这时也必然是空的）全给 0。
+fn pixel_counts(doc: &Document) -> (Vec<u64>, u64) {
+    let (_, colors) = export_palette(doc);
+    let mut pixels = vec![0u64; colors.len()];
+    let mut transparent = 0u64;
+    for cel in doc.cels.values().flat_map(|frames| frames.values()) {
+        for &index in &cel.indices {
+            match index {
+                0 => transparent += 1,
+                index if (index as usize) <= pixels.len() => {
+                    pixels[index as usize - 1] += 1;
+                }
+                // 指向盘外的索引是坏数据，不进统计。
+                _ => {}
+            }
+        }
+    }
+    (pixels, transparent)
 }
 
 /// 帧时长表。文档没有「动画」这个一等公民，所以清单老实汇报默认播放段，
@@ -338,5 +366,52 @@ mod tests {
         );
         assert_eq!(value["animations"]["loop"]["loop"], true);
         assert_eq!(value["frames"][1]["duration_ms"], 120);
+    }
+
+    /// 拼豆那类实体媒介要的「每色多少颗」：按索引偏移装箱，透明格单列。
+    #[test]
+    fn the_manifest_counts_each_color_so_beads_can_be_ordered() {
+        use super::super::ops::{apply_batch, PixelCell, PixelOperation};
+
+        let mut doc = Document::new("beads", 4, 2).unwrap();
+        doc.palette = vec![
+            Rgba {
+                r: 1,
+                g: 2,
+                b: 3,
+                a: 255,
+            },
+            Rgba {
+                r: 4,
+                g: 5,
+                b: 6,
+                a: 255,
+            },
+        ];
+        // 3 格第一色、1 格第二色、剩下 4 格透明 —— 4x2 一共 8 格。
+        apply_batch(
+            &mut doc,
+            &[PixelOperation::SetPixels {
+                layer: "L0".into(),
+                frame: "F0".into(),
+                cells: (0..3)
+                    .map(|y| PixelCell {
+                        x: y,
+                        y: 0,
+                        color: "#010203".into(),
+                    })
+                    .chain([PixelCell {
+                        x: 0,
+                        y: 1,
+                        color: "#040506".into(),
+                    }])
+                    .collect(),
+            }],
+        )
+        .unwrap();
+
+        let palette = manifest(&doc)["palette"].clone();
+        assert_eq!(palette["pixels"], json!([3, 1]), "两种色各占多少格");
+        assert_eq!(palette["transparent"], 4, "盘里没画上的那几格");
     }
 }

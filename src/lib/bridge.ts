@@ -332,7 +332,7 @@ export type ExportFormat =
  * - `frame` / `png` 单帧 PNG；`strip` 所有帧横向铺成一张 PNG
  * - `ase` / `aseprite` Aseprite 文件，图层与帧语义原样保留
  * - `gpl` / `pal` / `act` 三套调色板文件（GIMP / JASC / Adobe）
- * - `manifest` JSON 交付清单：尺寸、色数、图层配色范围、帧时长
+ * - `manifest` JSON 交付清单：尺寸、每色像素数（拼豆备料）、图层配色范围、帧时长
  */
 export function documentExport(
   id: string,
