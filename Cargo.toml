@@ -3,7 +3,7 @@ members = ["crates/pixel-core", "crates/agent-core", "src-tauri"]
 resolver = "2"
 
 [workspace.package]
-version = "1.0.20261012"
+version = "1.0.20261013"
 edition = "2021"
 license = "GPL-3.0"
 repository = "https://github.com/Mutantcat-Working-Group/AIPixel"
