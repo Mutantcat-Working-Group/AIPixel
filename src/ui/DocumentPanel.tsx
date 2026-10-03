@@ -701,6 +701,23 @@ export default function DocumentPanel() {
     });
   }
 
+  /**
+   * 抄一份内置预设：内置的一个色都动不得，可「复制一份再改」原来只藏在
+   * 「往里加色时顺带 fork」里，用户想改个名字、删个色都没处下手。
+   * 走 create_palette + from：副本带上当前层的引用，像素按就近色归队。
+   */
+  async function copyScope() {
+    if (!scope || !scopeLayer) return;
+    const name = `${scope.name}${copySuffix}`;
+    // 一条命令跑完：文档是异步事件推回来的，拆成 create + rename 两条，
+    // 第二条要先回读才知道副本 id 是谁，那一下回读可能还没到。
+    const revision = await useStore.getState().runEditorOps([
+      { op: "create_palette", name, from: scope.id, layer: scopeLayer.id },
+    ]);
+    if (revision === null) return;
+    useStore.getState().noteKey("palette.copied", { name });
+  }
+
   /** 往范围里加色。内置预设改不得：复制一份副本再往里加，副本顺带接到这一层上。 */
   async function addScopeColor(hex: string) {
     const layer = scopeLayer;
@@ -1564,7 +1581,21 @@ export default function DocumentPanel() {
                 ),
               }))}
             />
-            {scope && !scope.builtin ? (
+            {/* 右边这几颗只做「这一套本身能怎么摆弄」：自建的能改名能删，
+                内置的一律改成「复制一份」。原来这里摆的是一枚「内置」小牌，
+                跟收起的选择器里那个标签说的是同一句话，白占一行宽度；
+                换成复制键，tooltip 里承诺的「点一下就复制一份再改」才算有处落地。 */}
+            {scope?.builtin ? (
+              <Tooltip title={t("palette.scope_hint")}>
+                <Button
+                  size="small"
+                  type="text"
+                  aria-label={t("palette.copy")}
+                  icon={<Copy size={13} />}
+                  onClick={() => void copyScope()}
+                />
+              </Tooltip>
+            ) : scope ? (
               <>
                 <Tooltip title={t("palette.rename")}>
                   <Button
@@ -1586,11 +1617,7 @@ export default function DocumentPanel() {
                   />
                 </Tooltip>
               </>
-            ) : (
-              <Tooltip title={t("palette.scope_hint")}>
-                <span className="scope-state">{t("palette.builtin_tag")}</span>
-              </Tooltip>
-            )}
+            ) : null}
           </div>
           {scopeEditing !== null ? (
             <Input

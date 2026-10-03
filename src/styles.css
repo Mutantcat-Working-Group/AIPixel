@@ -26,6 +26,34 @@
 }
 
 /*
+ * 滚动条统一收到 8px 细条：深色工具里系统默认那根又粗又亮，每块面板边缘
+ * 都像贴了一条灰带。通配符的优先级最低，.hstrip-scroll 那几条
+ * 「原生滚动条连皮带骨收掉」照样压得住，横条仍然只有 HStrip 画的那一根。
+ */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-faint);
+}
+
+/*
  * 桌面工具的指针手势是「选像素」，不是「选字」。顶栏、侧栏、状态条、帧条、
  * 图层行、调色板这些界面零件一律不许划选——深色 UI 上拖过一排按钮就是一片
  * 蓝色高亮，很脏，拖到边界还会把滚动条带出来。
@@ -193,6 +221,16 @@ body {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+/* 顶栏里各组之间的发丝线：模型选择器、审批档位、文件操作挤在同一行，
+   没有一条竖杠划开「这是状态」和「这是操作」，看上去就是一锅粥。
+   发丝线只说「到这儿换了一摊事」，比再套一个边框或底色都安静。 */
+.topbar-divider {
+  width: 1px;
+  height: 18px;
+  flex: none;
+  background: var(--border-strong);
 }
 
 .app-body {
@@ -2357,8 +2395,12 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
+  /* 左侧一条色条：横幅从顶栏底下冒出来，一眼扫过去只当它是第三条正文。
+   有了这道 2px 的边，「这是通知」才在扫视里立得住；红色那条尤其明显，
+   因为失败通知往往只有一行小字。 */
+  border-left: 2px solid var(--accent);
   /* 压得比正文矮一截：它是顶栏的延伸，不该被看成新的一条栏。 */
-  padding: 2px 12px;
+  padding: 2px 10px 2px 8px;
   min-height: 24px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-panel-2);
@@ -2369,6 +2411,7 @@ body {
 
 .notice-bar.error {
   color: var(--danger);
+  border-left-color: var(--danger);
 }
 
 .notice-bar .grow {

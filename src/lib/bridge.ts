@@ -313,9 +313,27 @@ export function readImageContext(path: string): Promise<Attachment> {
 }
 
 /** 导出格式：Rust 侧 document_export 认领的这几种；aseprite 是 ase 的别名。 */
-export type ExportFormat = "gif" | "sheet" | "ase" | "aseprite" | "frame" | "strip";
+export type ExportFormat =
+  | "gif"
+  | "sheet"
+  | "ase"
+  | "aseprite"
+  | "frame"
+  | "strip"
+  | "gpl"
+  | "pal"
+  | "act"
+  | "manifest";
 
-/** 导出：gif 是无限循环动画，sheet 是 PNG spritesheet（columns 0 = 排成一行）。 */
+/**
+ * 导出到磁盘。
+ *
+ * - `gif` 无限循环动画；`sheet` PNG spritesheet（columns 0 = 排成一行）
+ * - `frame` / `png` 单帧 PNG；`strip` 所有帧横向铺成一张 PNG
+ * - `ase` / `aseprite` Aseprite 文件，图层与帧语义原样保留
+ * - `gpl` / `pal` / `act` 三套调色板文件（GIMP / JASC / Adobe）
+ * - `manifest` JSON 交付清单：尺寸、色数、图层配色范围、帧时长
+ */
 export function documentExport(
   id: string,
   format: ExportFormat,

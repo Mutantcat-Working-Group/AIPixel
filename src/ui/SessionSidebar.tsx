@@ -8,7 +8,6 @@ import { useStore } from "../lib/store";
 import type { SessionInfo } from "../lib/types";
 import { useT } from "../lib/t";
 import { openContextMenu } from "./ContextMenu";
-import CanvasSizeModal from "./CanvasSizeModal";
 
 const REPO_URL = "https://github.com/Mutantcat-Working-Group/AIPixel";
 
@@ -16,19 +15,15 @@ export default function SessionSidebar() {
   const t = useT();
   const sessions = useStore((s) => s.sessions);
   const activeId = useStore((s) => s.activeId);
-  const createSession = useStore((s) => s.createSession);
+  // 新建走 openCreatePrompt：弹窗挂在 App 上，开机空会话那次自己会弹。
+  const openCreatePrompt = useStore((s) => s.openCreatePrompt);
   const removeSession = useStore((s) => s.removeSession);
   const renameSession = useStore((s) => s.renameSession);
   const reorderSessions = useStore((s) => s.reorderSessions);
 
-  const [sizedOpen, setSizedOpen] = useState(false);
   // 待确认删除的会话。存整条而不是只存 id：确认弹窗要把名字和画布尺寸一并
   // 摆给用户看（「删的到底是哪一张」是这类确认唯一有意义的信息）。
   const [pendingDrop, setPendingDrop] = useState<SessionInfo | null>(null);
-  const [width, setWidth] = useState(64);
-  const [height, setHeight] = useState(64);
-  // 会话名草稿：新建时才填，可留空（留空走 Rust 默认编号 s1、s2……）。
-  const [newName, setNewName] = useState("");
   // 正在改名的会话与草稿。ref 是权威值：失焦提交时 Input 已卸载，
   // 闭包里读 state 会拿到已经清空的旧值，所以以 ref 为准（图层改名同款打法）。
   const [renamingId, setRenamingId] = useState<string | null>(null);
@@ -80,7 +75,7 @@ export default function SessionSidebar() {
             size="small"
             type="text"
             icon={<Plus size={14} />}
-            onClick={() => setSizedOpen(true)}
+            onClick={openCreatePrompt}
             aria-label={t("sidebar.new")}
           />
         </Tooltip>
@@ -258,35 +253,6 @@ export default function SessionSidebar() {
         ) : null}
       </Modal>
 
-      <CanvasSizeModal
-        open={sizedOpen}
-        width={width}
-        height={height}
-        title={t("sidebar.modal_title")}
-        okText={t("sidebar.modal_ok")}
-        cancelText={t("sidebar.modal_cancel")}
-        widthLabel={t("sidebar.width")}
-        heightLabel={t("sidebar.height")}
-        presetsLabel={t("sidebar.presets")}
-        readout={t("sidebar.size_readout", { width, height, cells: width * height })}
-        hint={t("sidebar.size_hint")}
-        nameLabel={t("sidebar.name_label")}
-        namePlaceholder={t("sidebar.name_placeholder")}
-        name={newName}
-        onNameChange={setNewName}
-        onChange={(w, h) => {
-          setWidth(w);
-          setHeight(h);
-        }}
-        onOk={async () => {
-          setSizedOpen(false);
-          const chosen = newName.trim();
-          await createSession(width, height, chosen === "" ? undefined : chosen);
-          // 草稿要清：留着的话下一个新会话会顶上一个的名字。
-          setNewName("");
-        }}
-        onCancel={() => setSizedOpen(false)}
-      />
     </aside>
   );
 }

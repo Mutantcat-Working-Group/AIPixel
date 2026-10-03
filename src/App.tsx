@@ -7,6 +7,7 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 
 import ChatPanel from "./ui/ChatPanel";
 import CloseGuardModal from "./ui/CloseGuardModal";
+import CreateSessionModal from "./ui/CreateSessionModal";
 import DocumentPanel from "./ui/DocumentPanel";
 import BatchPanel from "./ui/BatchPanel";
 import ModelSettingsModal from "./ui/ModelSettingsModal";
@@ -154,6 +155,34 @@ export default function App() {
       filter: t("dialog.aseprite"),
       suffix: "",
     },
+    {
+      format: "gpl",
+      label: t("topbar.export_gpl"),
+      extension: "gpl",
+      filter: t("dialog.gpl"),
+      suffix: "-palette",
+    },
+    {
+      format: "pal",
+      label: t("topbar.export_pal"),
+      extension: "pal",
+      filter: t("dialog.pal"),
+      suffix: "-palette",
+    },
+    {
+      format: "act",
+      label: t("topbar.export_act"),
+      extension: "act",
+      filter: t("dialog.act"),
+      suffix: "-palette",
+    },
+    {
+      format: "manifest",
+      label: t("topbar.export_manifest"),
+      extension: "json",
+      filter: t("dialog.json"),
+      suffix: "-manifest",
+    },
   ];
 
   async function exportAs(entry: (typeof exportEntries)[number]) {
@@ -185,6 +214,8 @@ export default function App() {
 
         <div className="topbar-spacer" />
 
+        {/* 一条竖杠划开「模型与档位」和「文件操作」：两摊事挨在一起时，
+            用户的眼睛得替你去猜哪个按钮改的是哪一摊。 */}
         <div className="topbar-group">
           <Tooltip title={t("topbar.model")}>
             <Select
@@ -233,6 +264,8 @@ export default function App() {
             />
           </Tooltip>
         </div>
+
+        <span className="topbar-divider" aria-hidden />
 
         <div className="topbar-group">
           <Tooltip title={t("topbar.open_aip")}>
@@ -347,6 +380,7 @@ export default function App() {
 
       <ModelSettingsModal />
       <CloseGuardModal />
+      <CreateSessionModal />
       <ContextMenuHost />
     </div>
   );

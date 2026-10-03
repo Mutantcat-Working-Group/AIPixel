@@ -337,7 +337,6 @@ export default function ModelSettingsModal() {
     { key: "vision", label: t("settings.cap.vision"), hint: t("settings.cap.vision.hint") },
     { key: "image_gen", label: t("settings.cap.image_gen"), hint: t("settings.cap.image_gen.hint") },
     { key: "video", label: t("settings.cap.video"), hint: t("settings.cap.video.hint") },
-    { key: "reasoning", label: t("settings.cap.reasoning"), hint: t("settings.cap.reasoning.hint") },
   ];
 
   // 只在开关时决定选中项；保存后不抢焦点，避免选中项跳回激活模型。
@@ -466,8 +465,8 @@ export default function ModelSettingsModal() {
       max_tokens: values.max_tokens ?? null,
       temperature: values.temperature ?? null,
       // 勾上 = Some(true)（每轮都关）；不勾 = null（交给 runner 的自动翻盘）。
-      // Some(false) 没有对应控件：那等于「明知它光想不动笔也要让它想」，
-      // 想看思考过程的人留着「会思考」勾选就够了。
+      // 这里也不该出现 Some(false)：那等于「明知它光想不动笔也要让它想」。
+      // 关不关思考由 runner 按这一轮有没有工具调用来定，不劳用户每次都惦记。
       disable_thinking: values.disable_thinking ? true : null,
       capabilities: values.capabilities ?? { ...NO_CAPABILITIES },
     };
@@ -475,8 +474,13 @@ export default function ModelSettingsModal() {
       await upsertModel(config);
       selectModel(id);
       if (!useStore.getState().models.active_id) await activateModel(id);
+      // 保存必须给个响：静默成功用户只会怀疑自己刚才那下点没点上，
+      // 于是再点一遍，多存一份。notice 用的是全局通知条，弹窗挡着也看得见。
+      useStore.getState().noteKey("settings.saved", { label: config.label });
     } catch (cause) {
       setError(String(cause));
+      // 弹窗里的红字在表单上方，表单一长就会被顶出视野；通知条是全局的，挡不住。
+      useStore.getState().warnKey("settings.save_failed", { reason: String(cause) });
     } finally {
       setSubmitting(false);
     }

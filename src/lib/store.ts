@@ -221,9 +221,11 @@ interface StoreState extends DocumentSnapshot, WorkflowState, BatchState {
    *  能叠几条（上限 `presets.ts` 的 MAX_STACKED_PRESETS）：细节这件事是乘法，
    *  「写实渲染」管整张图按什么规矩收尾，「微细结构」管最后一两个像素放哪里，
    *  两条一起才凑得成一张写实的图。 */
-  presetOverrides: string[];
+ presetOverrides: string[];
+  /** 新建会话弹窗开着。开机一条会话都没有时弹一次，用户关掉就再不自动弹。 */
+  createPromptOpen: boolean;
   /** 工具块展开状态，按工具调用 id 记。跨会话重载也不丢：用户摊开的 JSON 不该
-   * 因为切走再回来就自己合上。 */
+  * 因为切走再回来就自己合上。 */
   /** 当前会话的 .aip 落盘路径。null = 还没存过，关窗时要给用户一个「存哪儿」。 */
   projectPath: string | null;
   /** 当前会话有没有没存进 .aip 的改动。关窗问的就是这一笔账。 */
@@ -259,6 +261,9 @@ export interface StoreActions {
   /** 取消某个角色的单独绑定，让它回落去用会话主模型。 */
   clearSessionRole: (role: ModelRole) => Promise<void>;
   setPermissionMode: (mode: PermissionMode) => Promise<void>;
+  /** 摊开 / 收起新建会话弹窗。空会话状态下这个弹窗就是新建的唯一入口。 */
+  openCreatePrompt: () => void;
+  closeCreatePrompt: () => void;
   send: (text: string) => Promise<void>;
   /** 重发刚才没跑完的那句。没有可重试的就什么都不做。 */
   retry: () => Promise<void>;
@@ -444,6 +449,27 @@ function storedLang(): Lang {
     return raw === "en" || raw === "zh" ? raw : "zh";
   } catch {
     return "zh";
+  }
+}
+
+/** 「新建会话」弹窗的免打扰标记。关过一次就再也不自动弹：用户读过一遍了，
+ * 每回开机都问一遍不是贴心，是骚扰。空会话下侧栏那个 + 永远在那儿。 */
+const CREATE_PROMPT_KEY = "aipixel.create_prompt_dismissed";
+
+function readCreatePromptDismissed(): boolean {
+  try {
+    return globalThis.localStorage?.getItem(CREATE_PROMPT_KEY) === "1";
+  } catch {
+    // 存不了就当关过：宁可少弹一次，也不能每回开机都糊一脸。
+    return true;
+  }
+}
+
+function writeCreatePromptDismissed(): void {
+  try {
+    globalThis.localStorage?.setItem(CREATE_PROMPT_KEY, "1");
+  } catch {
+    // 隐身模式下写不进去，这次会话不弹就是了，别让它把界面卡住。
   }
 }
 
@@ -1185,6 +1211,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     settingsTab: "models",
     styleOverride: null,
     presetOverrides: [],
+    createPromptOpen: false,
     toolOpen: {},
     recipe: DEFAULT_BATCH_RECIPE,
     scan: null,
@@ -1243,13 +1270,18 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         sessions = sortSessions(sessions);
         const first = sessions[sessions.length - 1];
         if (first) {
-          setState({ sessions, activeId: first.id });
-          await loadDocument(first.id);
-        } else {
-          // 一条都没有就空着。「当前没有会话，您可以创建」是个正常状态，
-          // 开机悄悄补一个的话，侧栏里永远躺着个没打开过的 s1。
-          setState({ sessions: [], activeId: null, document: null });
+        setState({ sessions, activeId: first.id });
+        await loadDocument(first.id);
+      } else {
+        // 一条都没有就空着。「当前没有会话，您可以创建」是个正常状态，
+        // 开机悄悄补一个的话，侧栏里永远躺着个没打开过的 s1。
+        setState({ sessions: [], activeId: null, document: null });
+        // 但空状态下也别让用户自己发现「原来得点那个 +」：开机头一回
+        // 主动把新建弹窗递上去。关过一次就把这个标记关掉，之后再不打扰。
+        if (!readCreatePromptDismissed()) {
+          setState({ createPromptOpen: true });
         }
+      }
         setState({ booted: true });
       })();
       booting = attempt;
@@ -1297,6 +1329,9 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         lastQuery: null,
         attachments: [],
         frameIndex: 0,
+        // 不管弹窗是开机自动递上来的还是用户自己点 + 开的，建成了都该收掉：
+        // 留着窗子挡着新画布，跟用户对着干。
+        createPromptOpen: false,
     });
       await loadDocument(info.id, true);
       // 新工程从没存过：账本里划一笔「待存」，关窗时才问得到用户。
@@ -1389,6 +1424,19 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       setState({ permission: mode });
       if (!id) return;
       await bridge.setPermission(id, mode);
+    },
+
+    openCreatePrompt: () => {
+      // 空会话状态下这个弹窗就是新建的唯一入口，所以它随时可能被 + 唤起来；
+      // 主动打开不算「被骚扰」，不清免打扰标记。
+      setState({ createPromptOpen: true });
+    },
+
+    closeCreatePrompt: () => {
+      // 关窗 = 免打扰。不是「这回想再缓缓」，而是「以后别再问」。
+      // 空会话下侧栏那个 + 一直都在，想建随时建得到。
+      writeCreatePromptDismissed();
+      setState({ createPromptOpen: false });
     },
 
     send: async (text) => {
