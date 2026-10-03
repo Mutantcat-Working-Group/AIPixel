@@ -49,8 +49,9 @@ PIXEL ART CRAFT - apply whenever you draw:
 - Simplify to the canvas resolution: keep the silhouette plus at most a few signature details; tiny canvases (<32px) need fewer colors (2-4) and bolder features.
 - SMALL CANVASES: below 32px the silhouette IS the picture, so settle the whole silhouette first out of filled shapes (overlapping circles plus a rect to flatten a bottom is the normal way), then shade by REWRITING pixels that pass a pget test (if pget(x,y)==body then pset(x,y,dark) end). The deadly order is drawing a detail and then dropping a bigger filled shape over it - the new fill erases the detail and it is gone for good. Filled shapes may only ever extend the silhouette; once the silhouette is final, every further edit is pset / line / rect on pixels you picked yourself.
 - Keep diagonals and curves clean with a regular step rhythm (45 degrees = one pixel per row; ~22.6 = 2-pixel runs; ~30 degrees = even spacing; isometric scenes stay on one grid angle). No irregular bumps, no stray single pixels; details read as 2x2+ clusters, never lone pixels. A silhouette curve keeps that rhythm; a small detail curve - a tail, a lock of hair, a rounded paw - may instead be drawn with aacurve or aapoly so the line is genuinely smooth.
-- One light source (default top-left): flat base first, a darker ramp step on the shadow side, darkest at the core shadow just past the terminator, a subtle highlight on the lit side, and a cast shadow consistent with the light.
-- Build 3-5 step light-to-dark ramps per material, hue-shifted (cooler shadows, warmer highlights); generate them with hsv()/mix() instead of guessing hex.
+- One light source, and unless the user named one it is a WARM KEY FROM THE TOP-LEFT against a COOL ambient fill: a single key light plus the sky/room colour bounced back in. Neutral flat light is the usual reason a generated sprite reads as plastic, so the split temperature is the default, not a flourish. Lay the flat base first, then a darker ramp step on the shadow side, darkest at the core shadow just past the terminator, and a cast shadow consistent with the light.
+- Build 3-5 step light-to-dark ramps per material, hue-shifted: cool the shadow toward '#2a1f3d' (violet-blue, the cool side of the key) and warm the highlight toward '#ffd9a8' - never toward '#000000' or '#FFFFFF', which read as dirt and as plastic respectively. Generate them with hsv()/mix() instead of guessing hex, keep the material's own hue in the middle steps, cap the shadow near v 0.35 and the highlight near v 0.85, and use the SAME light and ambient hues across every material in one drawing so the whole picture sits in one room.
+- HIGHLIGHTS ARE PLACED, NOT SPRINKLED: the specular is the one band where the contour actually turns to face the key light, the rim light runs along the top-left silhouette where the background shows through, and the ambient bounce lifts the underside facing the fill half a step of that fill's colour. At 64px a body carries one or two highlight pixels, a metal surface one band plus an angular tail, glass and wet eyes one sharp dot; anything beyond that is noise. They belong to the material's own ramp - never a new colour invented just for them, and never a pure white pixel. Different from translucency: a specular is one bright band on an opaque surface, while a translucent surface (see MEMBRANES AND WINGS) glows across its whole thin area, so a wing lit from behind is brightest in its middle, not along one edge.
 - Keep the palette tight: reuse existing palette colors; for large smooth transitions prefer ordered dithering between two ramp steps (checkerboard or a noise() threshold) over piling up in-between colors.
 - Outline deliberately: one strategy per drawing - solid dark outline, darker selective outline on shadowed edges only, or none - kept consistent; hue-shifted outlines read softer than pure black.
 PIXELS ARE PLACED, NOT APPROXIMATED - the rules that separate a finished sprite from a smudge:
@@ -59,11 +60,12 @@ PIXELS ARE PLACED, NOT APPROXIMATED - the rules that separate a finished sprite 
 - SHADE BY RE-WRITING, NOT BY OVERPAINTING: after a filled shape is final, pass over it again with a pget test (if pget(x,y)==body then pset(x,y,dark) end) for rim, shadow and contact bands. Overpainting with a second filled shape deletes the first one's detail.
 - 5-STEP LIGHTING: one base, one highlight, one mid shadow, one core shadow, one rim light. Compute the band per pixel from the form (the dy of the ellipse, a distance from the light, a dot with a normal) instead of blanket-filling a shape in one value.
 - SHADING RECIPE: the pixel_run_shader description carries TWO copyable ramp-and-band functions for exactly this - FORM SHADING RECIPE, which reads its normal off the pixels row by row and so works on ANY contour (a torso, a trunk, a tile, a tail), and SHADING RECIPE, the round-body original. Both build the ramp with hue-shifted mix(), lay ONE flat base pass in the middle step, then re-shade the body pixel by pixel from its own form normal with a pget test. Copy the one that matches the form and scale it to your canvas rather than re-deriving the arithmetic. The row-scanning one only re-writes the base-colour pixels, so stripes, eyes and whiskers already layered on top survive, and a wide body reads as one ball stretched sideways - which is what a torso is.
-- MATERIAL LIGHT RESPONSE: the material decides how light lands on it, and getting it wrong is why a drawing reads as plastic. Metal takes a 1px specular band with an angular tail and a very dark core shadow; skin and fur take the widest diffuse and glow warm where the form is thin; cloth takes no specular at all and dithers its deepest creases; stone is matte with occlusion darkening every pit and one bright top edge per facet; leather takes a broad mid highlight and a worn edge; glass is transmission plus a dark line at the liquid surface and a bright rim on the far side; foliage glows where thin leaves are backlit. Give each material its own ramp, and shade a form made of two materials as two separate passes.
+- MATERIAL LIGHT RESPONSE: the material decides how light lands on it, and getting it wrong is why a drawing reads as plastic. Metal takes a 1px specular band with an angular tail and a very dark core shadow; skin and fur take the widest diffuse and glow warm where the form is thin; cloth takes no specular at all and dithers its deepest creases; stone is matte with occlusion darkening every pit and one bright top edge per facet; leather takes a broad mid highlight and a worn edge; glass is transmission plus a dark line at the liquid surface and a bright rim on the far side; foliage glows where thin leaves are backlit; membrane - bat and insect wings, fins, sails, horn ears - is translucent, so it glows a half step toward the light wherever it is thin, keeps its bone structure readable through it, and casts the light's colour onto whatever is behind it. Give each material its own ramp, and shade a form made of two materials as two separate passes.
+- MEMBRANES, WINGS AND THIN STRETCHED FORMS - the form that most often comes back as stacked stripes, and a bat is exactly it: never band a wing with a few parallel fills. Lay ONE flat base pass over the whole wing, then band it panel by panel from its own normal (the dy across the panel, the distance from the shoulder joint, a dot with the panel normal) the same way you band a body, so the wing reads as ONE surface that stretches and turns. Then its bones: two to four structural lines from the shoulder out to the finger tips, each with a one-pixel occlusion band on its shadow side, and the membrane between two bones takes one step darker toward the crease. Thin membrane with the light behind it glows - mix half a step of the light colour back in there. The edge between two fingers is scalloped or torn, never a clean diagonal, and every finger keeps the same taper. Symmetry is a loop, not a rewrite: build ONE wing and mirror it (for d = 0, canvas.cx do local c = pget(cx + d, y); if c ~= nil then pset(cx - d, y, c) end end) because two hand-written halves drift apart by a pixel and the drift reads as an error. Paint the far wing first, the body next, the near wing last.
 - OCCLUSION AND BOUNCE: wherever two forms meet - under a chin, where a leg meets the belly, inside an armpit, along a ground contact - darken one step past the ramp, and where a form sits on a bright surface, mix a half step of that surface colour back into its underside. Occlusion is what makes a drawing feel solid and bounce is what stops it reading as flat paper cut-outs; a shadow that never gets light back is the most common reason a sprite looks pasted on.
 - FEATHER AN ANTI-ALIASED EDGE: where a curve meets a contrasting background, draw it with aaline / aacurve, or soften the one already-placed pixel with blend(x,y,c,a), and let the partial coverage fall out on its own - never a jagged step and never a third ramp color. Skip it on sprites under 32px and along any outline.
 - CONTACT SHADOW grounds a subject on the floor: a tight 1-2px dark band where the feet touch, then a wider dithered falloff that thins to nothing. Keep it on its own pass so the outline never eats it.
-- THE SIGNATURE DETAILS ARE THE PICTURE: eyes take a 2x2 pupil with a one-pixel highlight on the lit side; ears get a pink inner ear; paws get a lighter pad; a tail is 6-12 points along a curve, tapering, with rings based on the arc position. Two or three of these read as craft; ten read as noise.
+- THE SIGNATURE DETAILS ARE THE PICTURE: eyes take a 2x2 pupil with a one-pixel highlight on the lit side; ears get a pink inner ear; paws get a lighter pad; a tail is 6-12 points along a curve, tapering, with rings based on the arc position; a wing takes its bone lines, scalloped finger edges and the translucency between them. Two or three of these read as craft; ten read as noise.
 - A DRAWING IS NOT DONE WHEN THE SHAPES ARE FILLED: close each frame with one polish pass that adds only what the form already implies - a contact band where the subject meets the ground, half a step of the ground colour bounced into every lifted underside, the rim light along the lit contour, and the signature details last. Never open a new ramp step to pay for polish, and never polish a second time after the frame already reads at 1x: the pass is a closing sweep, not a redraw.
 PIXEL ANIMATION CRAFT - apply whenever the artwork animates:
 - Timing: default to ~12 FPS (about 83ms per frame via set_frame_duration; new frames start at 100ms) unless the user asks otherwise. Keep frame counts lean: 2-4 idle, 4-8 walk, 6-12 run, 3-6 attack. Stutter means too few frames or timing too fast; mushy motion means too many similar frames - sharpen the key poses.
@@ -411,5 +413,58 @@ mod tests {
         assert!(prompt.contains("long-side ratio"), "没说 scale 按长边折算");
         // 瓦片与九宫格这两个场景得挂着这个工具说出来，否则等于白写。
         assert!(prompt.contains("nine-slice panel"), "没说格子中心该怎么求");
+    }
+
+    /// 光照的默认值和膜材那套画法必须钉在系统提示词里。
+    /// 前者是「暖主光 + 冷环境光」这个默认拆分：不写出来，模型默认给中性平光，
+    /// 画面就读成塑料；后者是翅膀这类薄膜的唯一正解，缺了它模型只会拿几条平行
+    /// 色带铺翅膀——蝙蝠就是这么变成一堆横道的。断言摆在这儿，缺口再合上能立刻发现。
+    #[test]
+    fn the_default_light_and_membrane_rules_are_stated() {
+        let doc = pixel_core::Document::new("t", 64, 64).unwrap();
+        let prompt = build_system_prompt(&doc, "L0", "F0", None, 4000, PromptExtras::default());
+        // 温度拆分：暖主光、冷补光，两侧都不能只剩形容词。
+        assert!(
+            prompt.contains("WARM KEY FROM THE TOP-LEFT"),
+            "缺默认主光方向与色温"
+        );
+        assert!(prompt.contains("COOL ambient fill"), "缺冷环境光这一半");
+        // 冷暖的具体落点：往哪个色偏、上限在哪。只写「冷暖对比」等于没写。
+        assert!(prompt.contains("#2a1f3d"), "没说阴影往哪个冷色偏");
+        assert!(prompt.contains("#ffd9a8"), "没说高光往哪个暖色偏");
+        assert!(
+            prompt.contains("never toward '#000000' or '#FFFFFF'"),
+            "缺纯黑纯白禁令，暗部还是会糊成脏块"
+        );
+        // 高光三条各自的落点：从形体推，不是撒上去的装饰。
+        for rule in [
+            "HIGHLIGHTS ARE PLACED, NOT SPRINKLED",
+            "the rim light runs along the top-left silhouette",
+            "ambient bounce",
+        ] {
+            assert!(prompt.contains(rule), "缺高光规则 {rule}");
+        }
+        // 膜材：整段画法 + 半透明自发光 + 对称镜像。
+        assert!(
+            prompt.contains("MEMBRANES, WINGS AND THIN STRETCHED FORMS"),
+            "缺膜材/翅膀画法段"
+        );
+        assert!(
+            prompt.contains("never band a wing with a few parallel fills"),
+            "没有禁掉平行色带铺翅膀"
+        );
+        assert!(
+            prompt.contains("scalloped or torn"),
+            "没说指间边缘该长什么样"
+        );
+        assert!(
+            prompt.contains("pset(cx - d, y, c)"),
+            "没给镜像循环，两侧翅膀还是会各写一遍然后跑偏"
+        );
+        // 材质表里也得有膜材，否则整套规矩落不到具体材质上。
+        assert!(
+            prompt.contains("membrane - bat and insect wings"),
+            "材质表里没有膜材"
+        );
     }
 }
