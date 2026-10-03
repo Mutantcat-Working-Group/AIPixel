@@ -1,7 +1,7 @@
 {
   "name": "aipixel",
   "private": true,
-  "version": "1.0.20261010",
+  "version": "1.0.20261011",
   "type": "module",
   "license": "GPL-3.0",
   "scripts": {
