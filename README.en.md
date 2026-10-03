@@ -34,6 +34,7 @@ Core value:
 - Every frame in the frame strip is a thumbnail rendered the same way the export will be, so what you see is what you get. Under each thumbnail sit the frame index and its hold duration; click a frame to jump to it.
 - Create, duplicate, delete and reorder frames. Playback runs a lightweight local loop instead of hitting the backend per frame. Onion skin lays the previous frame under the current one at 24% opacity so frame-by-frame registration has a reference.
 - A tile-backdrop mode tiles the canvas 1x1 / 2x2 / 3x3 so seams are obvious at a glance; only the center cell takes the pointer, the rest are echoes of the same drawing.
+- RPG Maker character-sheet support: pick one of the fixed grids 144x192 (MV/MZ), 96x128 (VX/Ace), 128x128 (XP) or 72x128 when creating a canvas, because engines cut the sheet strictly by row and column - one wrong cell and the exported art lands a row off. Tick "lay a paper-doll base" at creation time (or hit the little person icon in the toolbar any time later) and the geometry itself draws the figure: four facings by 3 or 4 columns of silhouette, grey-ramped per part region - hair, face, clothes, trousers, far limbs, shoes and features - where the regions are exactly the boundaries a later recolour must respect. One undo brings the canvas back.
 
 #### Layers
 
@@ -93,7 +94,7 @@ Core value:
 
 #### Built-in art knowledge base
 
-- Three blocks go into the prompt on demand: **92 entries of pixel-art knowledge** (animation and tiles, colour and outlines, light and form, animal and object descriptions, set consistency and process), **73 art terms in both Chinese and English with aliases** ("value ramp" for ramp, "outline" for outline), and a **common colour names table in Chinese and English** grouped by hue, so a model can name a colour instead of guessing a hex value.
+- Three blocks go into the prompt on demand: **94 entries of pixel-art knowledge** (animation and tiles, colour and outlines, light and form, animal and object descriptions, set consistency and process), **73 art terms in both Chinese and English with aliases** ("value ramp" for ramp, "outline" for outline), and a **common colour names table in Chinese and English** grouped by hue, so a model can name a colour instead of guessing a hex value.
 - Retrieval is plain-text matching: whichever trigger words appear in the user's sentence, those entries are weighted by word length and sent with the prompt. Entries nobody mentioned are simply left out - a prompt stuffed with concepts dilutes the part that actually matters.
 - Three discipline notes ride along with every pass that touches the canvas - new artwork and edits alike, never a pure chat turn. The guardrails follow the brush, not the trigger words: nobody ever types "never let procedural work read as a fake pattern", so waiting for a keyword hit would mean never sending it. They also carry their own character budget instead of taking a slot from the four retrieved entries, so "draw a 5-frame run" keeps its gait phase table.
 - The entries a turn pulled are shown on the plan node in the conversation, so users can see which ones were referenced rather than wonder.
@@ -229,6 +230,7 @@ The built-in art knowledge base was not written from impression. These public tu
 - [MakeBead Spreadsheet Pixel Art](https://makebead.com/zh-Hans/spreadsheet-pixel-art/): the full method of filling a pixel drawing as a numbered table, matching the spreadsheet entry in the knowledge base.
 - [pixel-asset-master-skills](https://github.com/424431185/pixel-asset-master-skills): a pixel-art execution skill. The "get it right before you get it good" discipline - lock the spec, self-check before delivery, re-read the spec before every asset - comes from it.
 - Lospec: the reference for how named palettes are catalogued, how many colours they carry, and what they suit (DB32, Endesga, Resurrect and the rest).
+- [IPaperDoll](https://github.com/Mutantcat-Working-Group/IPaperDoll): the Mutantcat Working Group's paper-doll walk-cycle builder, and the reference for the "lay the blank base first, split it into part regions, recolour around fixed anchors" approach together with the character-grid spec.
 - Aseprite and PixTXT: reference points for `.aseprite` layer and frame semantics, and for the "index grid plus a palette" intermediate-file idea.
 
 ### 10. MCP Server Mode: Letting External AI Drive AIPixel
@@ -237,10 +239,10 @@ Besides "AIPixel connecting to someone else's MCP server", AIPixel also ships it
 
 The switch lives in **Settings -> Models & Provider -> MCP tool server**, off by default. The reason: it writes files at whatever path the caller gives, which means handing off disk write capability, and that deserves an explicit human nod. It listens on the local loopback only and answers `127.0.0.1` exclusively, never a public interface. The port defaults to `7815`; `0` asks the kernel to pick a free one.
 
-There are 17 tools in four groups:
+There are 18 tools in four groups:
 
 - Canvas sessions: `list_sessions`, `create_canvas`, `drop_canvas`, `rename_canvas`, `get_canvas`, `canvas_preview`
-- Drawing: `paint_stroke`, `fill_region`, `apply_ops` (batched point / line / rect / ellipse / fill operators, all or nothing with a rollback), `resize_canvas`
+- Drawing: `paint_stroke`, `fill_region`, `apply_ops` (batched point / line / rect / ellipse / fill operators, all or nothing with a rollback), `resize_canvas`, `lay_paperdoll_base` (lay a paper-doll base on a 4-row character-sheet grid, then colour by region)
 - Files: `list_export_formats`, `export_canvas` (PNG / GIF / sprite sheet / frame strip / `.aseprite` / `.aip`, written to the caller's path, nested directories created automatically), `save_project`, `import_project`, `import_image` (external bitmap downsampled and quantized onto the canvas)
 - Agent: `prompt_agent` (let the built-in main agent do the work), `interrupt_agent`
 

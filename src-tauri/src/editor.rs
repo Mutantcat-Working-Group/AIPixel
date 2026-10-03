@@ -12,6 +12,7 @@
 
 use pixel_core::document::{Document, Rgba};
 use pixel_core::ops::{self, PixelOperation};
+use pixel_core::paperdoll;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 
@@ -254,6 +255,43 @@ pub fn editor_resize_canvas(
     let revision = session.with_document_mut(|doc| apply_resize(doc, width, height))?;
     session.note_edit(format!(
         "canvas resized from {old_width}x{old_height} to {width}x{height}"
+    ));
+    emit_document(&app, &session);
+    // 一笔一画都要落盘：用户的笔触不能因为一次关机就没。
+    state.note_sessions_dirty();
+    Ok(revision)
+}
+
+/// 铺纸娃娃白膜（纯函数，可单测）。
+///
+/// 只认 4 行的角色行走图网格，列数按格子宽高比猜 3 或 4——猜错的代价是
+/// 整张图被引擎错位切一行，所以宁可不铺也不硬铺：尺寸不对就原样报错。
+pub fn apply_paperdoll_base(doc: &mut Document, layer_id: &str) -> Result<u64, String> {
+    let before = doc.clone();
+    let result = paperdoll::lay_base(doc, layer_id).and_then(|_| {
+        // 铺完自查一遍限额：12 格人形不涨格子数，但白膜会往调色板里加色，
+        // 满 256 色时 intern_or_nearest 已经兜过底，这里查的是总格数。
+        doc.check_limits().map_err(|e| e.to_string())?;
+        Ok(doc.revision)
+    });
+    keep_or_restore(doc, &before, result)
+}
+
+/// 在指定图层铺一版 RPG Maker 白膜，广播新文档。
+/// 走编辑器而不是模型路径：这是给用户的底稿按钮，MCP 里另有同名工具。
+#[tauri::command]
+pub fn editor_paperdoll_base(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    layer: String,
+) -> Result<u64, String> {
+    let session = state.session(&id)?;
+    let before = session.document();
+    let (width, height) = (before.width, before.height);
+    let revision = session.with_document_mut(|doc| apply_paperdoll_base(doc, &layer))?;
+    session.note_edit(format!(
+        "paper-doll base laid on layer {layer} ({width}x{height}, 4-row character sheet)"
     ));
     emit_document(&app, &session);
     // 一笔一画都要落盘：用户的笔触不能因为一次关机就没。

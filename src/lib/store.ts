@@ -409,6 +409,8 @@ export interface StoreActions {
   redoEdit: () => Promise<void>;
   /** 改画布宽高：左上角锚定，原有像素留住，新区域透明。 */
   resizeCanvas: (width: number, height: number) => Promise<void>;
+  /** 铺纸娃娃白膜：整列帧按部件分区画人形剪影，落撤销栈，一步 undo 回来。 */
+  layPaperdollBase: (layer?: string) => Promise<void>;
   /** 换批量种类。旧扫描立马作废：素材类型和语义都变了，留着只会误导。 */
   setBatchKind: (kind: BatchKind) => void;
   /** 改 recipe。换了输入目录同样作废旧扫描。 */
@@ -2506,6 +2508,25 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         await getState().refreshSessions();
       } catch (error) {
         flagKey("store.resize_failed", { error: String(error) });
+      }
+    },
+
+    layPaperdollBase: async (layer) => {
+      const id = getState().activeId;
+      const document = getState().document;
+      if (!id || !document) return;
+      // 没点名就铺当前层：白膜是底稿，落在用户此刻盯着的那层上最顺。
+      const target = layer ?? getState().active.layer;
+      if (!target) return;
+      try {
+        // 和编辑器 op 走同一条账：改前文档进撤销栈。白膜整层覆盖，
+        // 是可撤销的编辑动作，所以不用 confirm-guard 里那种确认弹窗。
+        await withCanvasUndo(document, () => bridge.layPaperdollBase(id, target));
+        await loadDocument(id);
+      } catch (error) {
+        // 尺寸不是角色行走图网格时 Rust 会带原因拒掉：原样转述给用户，
+        // 「画布必须是 144x192 这类 4 行网格」这句话只有后端说得准。
+        flagKey("store.paperdoll_failed", { error: String(error) });
       }
     },
 

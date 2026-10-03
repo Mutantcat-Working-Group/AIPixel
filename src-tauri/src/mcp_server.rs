@@ -38,7 +38,9 @@ use tokio::sync::oneshot;
 use crate::commands::{
     export_canvas_bytes, read_image_context, run_turn, session_info, sized_document, SessionInfo,
 };
-use crate::editor::{apply_fill, apply_resize, apply_stroke, StrokeCell, StrokeRequest};
+use crate::editor::{
+    apply_fill, apply_paperdoll_base, apply_resize, apply_stroke, StrokeCell, StrokeRequest,
+};
 use crate::state::AppState;
 use crate::workflow;
 
@@ -884,6 +886,15 @@ fn tool_specs() -> Vec<Value> {
             &["id", "width", "height"],
         ),
         spec(
+            "lay_paperdoll_base",
+            "在指定图层铺一版 RPG Maker 角色行走图白膜：4 行（下/左/右/上）x 3 或 4 列的人形剪影，按部件分区给浅灰，七级灰各自独立，方便之后按区换色。画布必须是 4 行网格（如 144x192、96x128、128x128、72x128），否则报错不铺。",
+            json!({
+                "id": { "type": "string", "description": "会话 id" },
+                "layer": { "type": "string", "description": "图层 id 或图层名，可选，缺省当前活跃层" },
+            }),
+            &["id"],
+        ),
+        spec(
             "list_export_formats",
             "列出支持的导出格式（gif / spritesheet / strip / 单帧 PNG / Aseprite）与各自含义。",
             json!({}),
@@ -1002,6 +1013,7 @@ async fn dispatch(
         "fill_region" => tool_fill_region(state, app, args),
         "apply_ops" => tool_apply_ops(state, app, args),
         "resize_canvas" => tool_resize_canvas(state, app, args),
+        "lay_paperdoll_base" => tool_lay_paperdoll_base(state, app, args),
         "list_export_formats" => tool_list_export_formats(),
         "export_canvas" => tool_export_canvas(state, args),
         "save_project" => tool_save_project(state, args),
@@ -1416,6 +1428,53 @@ fn tool_resize_canvas(
     ))
 }
 
+fn tool_lay_paperdoll_base(
+    state: &AppState,
+    app: Option<&AppHandle>,
+    args: &Value,
+) -> Result<ToolOutcome, String> {
+    let id = arg_str(args, "id")?;
+    let session = state.session(&id)?;
+    let (layer, before) = {
+        let doc = session.document();
+        (
+            resolve_layer(&session, &doc, arg_opt_str(args, "layer").as_deref())?,
+            doc.clone(),
+        )
+    };
+    // 尺寸对不上就别铺：4 行网格是引擎的契约，硬铺出来的图被整行错位切开，
+    // 比没有底稿更难发现。报错里把当前尺寸说清楚，调用方好自己调 resize_canvas。
+    if pixel_core::paperdoll::detect(before.width, before.height).is_none() {
+        return Err(format!(
+            "canvas {}x{} is not a 4-row character sheet grid; resize it to one of \
+             144x192, 96x128, 128x128 or 72x128 first",
+            before.width, before.height
+        ));
+    }
+    let revision = session.with_document_mut(|doc| apply_paperdoll_base(doc, &layer))?;
+    session.note_edit(format!(
+        "lay_paperdoll_base: layer {layer} on {}x{}",
+        before.width, before.height
+    ));
+    emit_change(app, &session);
+    // 外部进程改的画布也是用户的资产，一样要落盘。
+    state.note_sessions_dirty();
+    let structured = json!({
+        "id": id,
+        "revision": revision,
+        "layer": layer,
+        "width": before.width,
+        "height": before.height,
+        "hint": "白膜是平色剪影按部件分区（灰阶由浅到深：高光/脸/衣/发/裤/远侧肢体/五官），之后按区上色、换色轮廓都不会跑",
+    });
+    Ok(ToolOutcome::text_only(
+        format!(
+            "laid a paper-doll base on {id} {layer} ({}x{}, {} frames painted); revision is now {revision}",
+            before.width, before.height, before.frames.len()
+        ),
+        structured,
+    ))
+}
 fn tool_list_export_formats() -> Result<ToolOutcome, String> {
     let formats = json!([
         { "id": "gif", "extension": ".gif", "description": "无限循环的 GIF 动画，游戏原型里最省事" },
@@ -2119,6 +2178,7 @@ mod tests {
             "fill_region",
             "apply_ops",
             "resize_canvas",
+            "lay_paperdoll_base",
             "list_export_formats",
             "export_canvas",
             "save_project",
@@ -2222,7 +2282,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(reply["result"]["tools"].as_array().unwrap().len(), 17);
+        assert_eq!(reply["result"]["tools"].as_array().unwrap().len(), 18);
 
         // 未知方法是协议错。
         let reply = handle_jsonrpc(

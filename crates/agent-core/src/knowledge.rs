@@ -47,7 +47,10 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
     KnowledgeEntry {
         id: "walk-cycle",
         title: "Walk and run cycles",
-        keywords: &["行走", "走路", "步态", "奔跑", "跑动", "walk", "walking", "walk cycle", "run cycle", "gait"],
+        // 「行走图」必须在这里显式列一遍：它是用户最高频的原话，而
+        // `rpmaker-sheet` 也认这三个字。两边都命中时按词长加权打平，
+        // 由库内顺序兜底——本条目在前，所以纯步态提问仍归步态。
+        keywords: &["行走", "行走图", "走路", "步态", "奔跑", "跑动", "walk", "walking", "walk cycle", "run cycle", "gait"],
         body: "Drive every limb from ONE phase variable. A 4-beat walk spreads the four legs over 0 / 0.25 / 0.5 / 0.75; a trot uses two diagonal pairs a half cycle apart. Lift a foot only while it swings forward - lift = max(0, sin(2pi*phase)) - and keep it planted while it travels back. The body bobs at twice the step frequency and the head counter-bobs a little. Close the loop: the last frame has to flow back into the first.",
     },
     KnowledgeEntry {
@@ -105,7 +108,33 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "sheet layout", "layout template", "facing", "facings", "direction", "directions",
             "4-direction", "8-direction", "side view", "side only", "rows", "tile sheet", "ui sheet",
         ],
-        body: "Layout is a contract, not a look. Character facings: 4-direction for a top-down RPG (down/up/left/right, one row each), 8-direction for directional movers, side-only for a platformer (one row mirrored), single for a portrait or card. This tool holds ONE strip per canvas, so one action per session and each facing its own session - never stack two actions in one strip. Template rows: 4-direction, 4 rows of 3-4 frames; RPG, 5 rows of 4-6; platformer, 5 rows of 4-6. Tiles: one cell basic, a 3x3 nine-piece autotile or 5x3 (byte 47), animated N frames in a row. Items: one cell, or 4-8 frames for a pickup spin. UI: a 3-cell strip or a 3x3 nine-slice. Every cell the same size and the subject anchored in one shared box so only the moving parts shift.",
+        body: "Layout is a contract, not a look. Character facings: 4-direction for a top-down RPG (down/up/left/right, one row each), 8-direction for directional movers, side-only for a platformer (one row mirrored), single for a portrait or card. This tool holds ONE strip per canvas, so one action per session and each facing its own session - never stack two actions in one strip. Template rows: 4-direction, 4 rows of 3-4 frames; RPG Maker character sheet, 4 rows of 3 columns (VX/Ace/MV/MZ) or 4 rows of 4 columns (XP), one row per facing; RPG Maker battle charset, 5 rows of 4-6; platformer, 5 rows of 4-6. Tiles: one cell basic, a 3x3 nine-piece autotile or 5x3 (byte 47), animated N frames in a row. Items: one cell, or 4-8 frames for a pickup spin. UI: a 3-cell strip or a 3x3 nine-slice. Every cell the same size and the subject anchored in one shared box so only the moving parts shift.",
+    },
+    // RPG Maker 角色行走图。它和别的排版不一样的地方是：网格不是建议而是契约，
+    // 引擎按行列号直接切图，列数错了整张图错位一行。触发词里带上各代引擎的
+    // 简称——用户说的是「给 RM 用的」而不是「四行三列」。
+    KnowledgeEntry {
+        id: "rpmaker-sheet",
+        title: "RPG Maker character sheets: 4 rows of 3 or 4",
+        keywords: &[
+            "rpg maker", "rpgmaker", "rmmv", "rmmz", "rmvx", "vx ace", "vxace", "rmxp", "rm2k", "rm 2000",
+            "角色行走图", "人物行走图", "行走图素材", "四向行走图", "4行3列", "四行三列", "4行4列", "四行四列",
+            "3列4行", "三列四行", "纸娃娃", "白膜", "捏人", "换装", "单角色文件",
+            "character sheet", "walker", "walking sprite", "paper doll", "character generator", "charset",
+        ],
+        body: "An RPG Maker character sheet is a FIXED grid, not a strip: 4 rows top to bottom (down, left, right, up) and either 3 columns (VX Ace, MV, MZ) or 4 columns (XP). Cell size by generation: XP 32x32 so one character is 128x128; VX/Ace 32x32 so one character is 96x128; MV/MZ 48x48 so one character is 144x192, a full sheet is 576x384 holding 8 characters 4 across and 2 down, and a single-character file starts with $ and is just that 144x192 block. Frame roles inside a row are fixed: index 0 is the stand and must read as the exact middle between the two steps; a 3-column row uses index 1 and 2 as the step extremes and the engine plays 0-1-0-2, while a 4-column row cycles 0-1-2-3 with index 2 a real passing pose, never a copy of index 0. Every cell the same size, the feet on ONE ground line sitting 2-3 pixels above the cell bottom, the body centred left-right, and one pixel of transparent margin around every limb so neighbouring cells never fuse. The sheet shares ONE palette across all 8 characters because the engine has no per-character palette slot: quantise hard, dither instead of anti-aliasing, transparent background, and a 1-pixel dark outline is the only thing that keeps a 32 px character readable over a tile. The character walks in place - never scroll the ground under it.",
+    },
+    // 纸娃娃白膜。RGB（调色板）与描边都由用户或套装决定，这里管的是「先铺底稿」
+    // 这一整套做法：底稿的部件分区就是将来换色的边界，边界不定下来，
+    // 后面每一次上色都在赌轮廓会不会跑。
+    KnowledgeEntry {
+        id: "paperdoll-base",
+        title: "Paper-doll base (blank base) and swappable parts",
+        keywords: &[
+            "白膜", "纸娃娃", "纸人", "底稿", "底图", "部件", "分块", "分区", "换色区", "模板",
+            "paper doll", "base mesh", "underdrawing", "swappable parts", "dress up", "parts",
+        ],
+        body: "Lay the blank base BEFORE any colour: one flat mid-value silhouette per cell in the exact walk pose, with the part regions - hair, face, torso, front arm, back arm, front leg, back leg, shoes, weapon - laid down as separate flat fields. That is what every paper-doll generator does, and it is why their parts stay interchangeable: recolour inside a region and the outline never moves, and a base built on the same anchors accepts parts from any other base. Keep the SAME anchors across all cells - shoulder, hip, knee and foot placement - and move limbs by rotating around those anchors, never by redrawing the figure, so part boundaries run continuously from cell to cell and a swapped part leaves no seam. Hold one flat value per region until the base is complete, then shade; add light and shadow with the SAME part boundaries so a later recolour still lands inside its region. Leave one transparent pixel of margin around every limb so parts never fuse, and keep the base pose generous - a cramped stand pose leaves no room for the clothing the user will swap in later.",
     },
     KnowledgeEntry {
         id: "target-platform",
@@ -113,9 +142,10 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         keywords: &[
             "目标平台", "引擎", "游戏引擎", "平台限制", "导给",
             "engine", "platform", "console", "retro console", "unity", "godot", "rpg maker",
+            "rpgmaker", "rmmv", "rmmz", "rmvx", "vx ace", "rmxp", "rm2k",
             "gamemaker", "game maker", "gdevelop", "nes", "snes",
         ],
-        body: "Read the destination off the request and honour it. Unity: 32-128px, power-of-two sizes, clean alpha edges. Godot: 16-64px, the import filter set to Nearest. RPG Maker MV/MZ: 48x48 cells, characters as 1x4 strips per direction, tilesets A1-A5 by function. GameMaker: watch the sprite origin, usually bottom-centre for a character. Web: 8-64px, keep the file small and let the consumer slice the plain sheet. Retro console: three or four colours per sprite plus transparent, 16x16 or 32x32 cells, and attribute clashing decides the palette per 8 or 16 pixel row. When the user names no engine, deliver the plain sheet plus a manifest that records the size and palette, and let them slice it.",
+        body: "Read the destination off the request and honour it. Unity: 32-128px, power-of-two sizes, clean alpha edges. Godot: 16-64px, the import filter set to Nearest. RPG Maker: MV/MZ use 48x48 cells in a 4-row-by-3-column character sheet (144x192 per character, 8 to a 576x384 sheet); VX/Ace use 32x32 cells in the same 4x3 sheet at 96x128; XP uses 32x32 cells in a 4-row-by-4-column sheet at 128x128; keep tilesets A1-A5 grouped by function. GameMaker: watch the sprite origin, usually bottom-centre for a character. Web: 8-64px, keep the file small and let the consumer slice the plain sheet. Retro console: three or four colours per sprite plus transparent, 16x16 or 32x32 cells, and attribute clashing decides the palette per 8 or 16 pixel row. When the user names no engine, deliver the plain sheet plus a manifest that records the size and palette, and let them slice it.",
     },
     KnowledgeEntry {
         id: "tilemap",
@@ -1589,5 +1619,35 @@ mod tests {
             .map(|e| e.id)
             .collect();
         assert!(!styled.contains(&"style-recipes"), "{styled:?}");
+    }
+
+    /// RPG Maker 角色行走图和纸娃娃白膜这两条要真能被原话捞出来。
+    /// 「引擎按行列号直接切图」是这两张图的契约：列数错了整张图错位一行，
+    /// 所以「4行3列」这句话必须精确落到 rpmaker-sheet，而不是落进
+    /// sheet-layouts 拿到一段泛泛的排版规矩。
+    #[test]
+    fn the_rpmaker_and_paperdoll_entries_surface() {
+        // 「行走图」是 RPMaker 那一行的原话，得压过同认这两个字的 sheet-layouts。
+        let hits = retrieve("给 RPG Maker MV 做一个四向行走图，4行3列", 4);
+        let named: Vec<&str> = hits.iter().map(|e| e.id).collect();
+        assert!(named.contains(&"rpmaker-sheet"), "{named:?}");
+        // RPMaker 那张固定的行列网格必须排在泛泛的排版模板之前：
+        // 「按行列号切图」的契约错了，整张图错位一行，排版模板救不回来。
+        let sheet_rank = named.iter().position(|&id| id == "sheet-layouts");
+        assert!(
+            named.iter().position(|&id| id == "rpmaker-sheet") < sheet_rank,
+            "{named:?}"
+        );
+        // 纯步态提问还是归步态——「行走图」两个字两边都认，这条断言是门口的保安。
+        assert_eq!(retrieve("画一个八帧的行走图", 4)[0].id, "walk-cycle");
+        // 白膜要连着「底稿」「部件」才不被 RPMaker 那张网格抢走：白膜只是
+        // 铺底稿的做法之一，「先铺白膜底稿，部件分区」才是它的主场。
+        let base = retrieve("先铺白膜底稿，部件分区，再上色", 4);
+        let base_ids: Vec<&str> = base.iter().map(|e| e.id).collect();
+        assert_eq!(base[0].id, "paperdoll-base", "{base_ids:?}");
+        // 换装类提问也该带上来。
+        assert!(retrieve("做个能换装的纸娃娃角色", 4)
+            .iter()
+            .any(|e| e.id == "paperdoll-base"));
     }
 }

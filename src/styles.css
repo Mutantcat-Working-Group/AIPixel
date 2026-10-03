@@ -1858,6 +1858,29 @@ body {
   gap: 6px;
 }
 
+/* 两组预设（常用尺寸、角色行走图）各带一个标签，组内统一 6px 呼吸。 */
+.size-presets {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* 预设按钮上的代际脚注（MV/MZ、VX/Ace、XP）：同为某个尺寸，
+   落在不同代际引擎上就是两套网格，脚注就是拿来防这一手的。
+   颜色继承按钮文字再压暗，选中态（primary）上也看得清。 */
+.size-preset-note {
+  margin-left: 4px;
+  font-size: 10px;
+  font-style: normal;
+  opacity: 0.7;
+}
+
+/* 白膜勾选：Tooltip 要套一层持 ref 的元素，不然禁用态的Checkbox没有悬浮目标。 */
+.size-paperdoll {
+  display: block;
+  font-size: 12px;
+}
+
 /* 新建会话才有的会话名一栏：放在预览上面，和下面的宽高各占一行，
    高度就那么多，宁可窄一点也不和预览挤在一起。 */
 .size-name {

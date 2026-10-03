@@ -112,6 +112,7 @@ pub fn run() {
             editor::editor_fill,
             editor::editor_paint_stroke,
             editor::editor_resize_canvas,
+            editor::editor_paperdoll_base,
             // ---- 窗口：关窗前问一声，答复由前端递回来 ----
             close::app_close_guard,
             close::app_close_reply,

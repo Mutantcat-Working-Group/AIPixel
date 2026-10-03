@@ -51,6 +51,7 @@ import {
   Undo2,
   Redo2,
   X,
+  User,
 } from "lucide-react";
 
 import { useStore } from "../lib/store";
@@ -70,6 +71,7 @@ import FrameThumb from "./FrameThumb";
 import HStrip from "./HStrip";
 import { stripScrollFor, type StripEdges } from "./strip";
 import CanvasSizeModal from "./CanvasSizeModal";
+import { isSheetGrid } from "../lib/sheet";
 import { openContextMenu, type ContextMenuItem } from "./ContextMenu";
 import type {
   EditorTool,
@@ -1129,6 +1131,25 @@ export default function DocumentPanel() {
               onClick={() => setOnion((value) => !value)}
             />
           </Tooltip>
+          {/* 纸娃娃白膜：按 RPG Maker 角色表的固定网格，在当前图层每一帧上
+              铺一版按部件分区的人形剪影。底稿是可撤销的编辑动作，所以不设
+              确认弹窗；尺寸不是 4 行网格时按钮置灰，一句话说清要什么样的画布。 */}
+          <Tooltip
+            title={
+              document && isSheetGrid(document.width, document.height)
+                ? t("doc.paperdoll_tip")
+                : t("doc.paperdoll_need_sheet")
+            }
+          >
+            <Button
+              size="small"
+              type="text"
+              aria-label={t("doc.paperdoll")}
+              icon={<User size={14} />}
+              disabled={!document || !isSheetGrid(document.width, document.height)}
+              onClick={() => void useStore.getState().layPaperdollBase()}
+            />
+          </Tooltip>
           <span className="grow" />
           <Tooltip
             title={
@@ -1779,6 +1800,7 @@ export default function DocumentPanel() {
         widthLabel={t("sidebar.width")}
         heightLabel={t("sidebar.height")}
         presetsLabel={t("sidebar.presets")}
+        sheetPresetsLabel={t("sidebar.sheet_presets")}
         readout={t("sidebar.size_readout", {
           width: sizeDraft.width,
           height: sizeDraft.height,

@@ -25,12 +25,21 @@ export default function CreateSessionModal() {
   const [height, setHeight] = useState(64);
   // 留空交给 Rust 自动编号（s1、s2……）。
   const [name, setName] = useState("");
+  // 建完就铺一版纸娃娃白膜：只在角色行走图网格上有意义，勾选与否都行。
+  const [paperdoll, setPaperdoll] = useState(false);
 
   async function submit() {
     // 先关再建：建会话要等 Rust 落盘，窗子多开一瞬只是挡着新画布。
     const trimmed = name.trim();
     await createSession(width, height, trimmed === "" ? undefined : trimmed);
     setName("");
+    // 白膜要等文档落地之后再铺：layPaperdollBase 认的是当前活跃会话，
+    // 建会话的那一刻它还没切过去。铺失败 Rust 会带原因报出来，
+    // 由 store 转述——这里不静默吞掉。
+    if (paperdoll) {
+      await useStore.getState().layPaperdollBase();
+      setPaperdoll(false);
+    }
   }
 
   return (
@@ -44,6 +53,14 @@ export default function CreateSessionModal() {
       widthLabel={t("sidebar.width")}
       heightLabel={t("sidebar.height")}
       presetsLabel={t("sidebar.presets")}
+      sheetPresetsLabel={t("sidebar.sheet_presets")}
+      paperdollLabel={t("sidebar.paperdoll")}
+      // 勾选的悬浮说明与工具栏那颗小人图标共用一套文案：说的是同一件事，
+      // 拆成两套只会各自长歪。
+      paperdollTip={t("doc.paperdoll_tip")}
+      paperdollNeedSheet={t("doc.paperdoll_need_sheet")}
+      paperdoll={paperdoll}
+      onPaperdollChange={setPaperdoll}
       readout={t("sidebar.size_readout", { width, height, cells: width * height })}
       hint={t("sidebar.size_hint")}
       nameLabel={t("sidebar.name_label")}

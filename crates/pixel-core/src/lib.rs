@@ -19,6 +19,7 @@ pub mod document;
 pub mod ops;
 pub mod palette_files;
 pub mod palettes;
+pub mod paperdoll;
 pub mod patch;
 pub mod pixelize;
 pub mod png;

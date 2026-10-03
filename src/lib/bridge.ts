@@ -542,6 +542,12 @@ export function resizeCanvas(id: string, width: number, height: number): Promise
   return invoke<number>("editor_resize_canvas", { id, width, height });
 }
 
+/** 铺纸娃娃白膜：在指定图层的每一帧上按部件分区画人形剪影。返回新 revision。
+ *  画布不是 4 行角色行走图网格时 Rust 直接报错，不铺。 */
+export function layPaperdollBase(id: string, layer: string): Promise<number> {
+  return invoke<number>("editor_paperdoll_base", { id, layer });
+}
+
 /** 油漆桶：color 为 null 表示把整片区域浸回透明。返回新 revision。 */
 export function fillCells(
   id: string,

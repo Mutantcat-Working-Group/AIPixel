@@ -101,6 +101,15 @@ const TABLES: &[(Intent, &[&str])] = &[
             // 只有「行走图」。缺了这批词，成品分流整段空转——模型收不到
             // 「剪影先行、逐帧保持辨识度」的约束，画出来的每帧各画各的。
             // 中文按子串命中，所以「行走图」里自然带上「行走」。
+            // RPG Maker 行走图、纸娃娃这一串也得在这儿：它们是网格契约型成品，
+            // 用户的原话是「给 RM 用的四向行走图」「能换装的纸娃娃」，
+            // 一个「瓦片」都不带。漏了这批词，模型收不到「剪影先行、
+            // 逐帧保持辨识度」的约束，八项栏位就会被画成八个不一样的姿势。
+            "纸娃娃",
+            "白膜",
+            "rpg maker",
+            "rpgmaker",
+            "character sheet",
             "行走图",
             "行走循环",
             "行走",
@@ -436,6 +445,23 @@ mod tests {
     fn the_hit_word_comes_back_for_the_node() {
         let (_, hit) = classify_text("帮我做个无缝图案").unwrap();
         assert_eq!(hit, "无缝");
+    }
+
+    /// RPG Maker 行走图、纸娃娃这一类网格契约型成品要稳稳落到 Sprite。
+    /// 用户的原话里一个「角色」都没有，只有一个引擎名或者「白膜」，
+    /// 漏一批词就等于成品分流整段空转。
+    #[test]
+    fn grid_contract_character_work_routes_to_sprite() {
+        for text in [
+            "给 RPG Maker MV 做一个四向行走图，4行3列",
+            "画一个能换装的纸娃娃角色",
+            "先铺白膜再上色",
+            "an RPG Maker character sheet for MV",
+        ] {
+            let (intent, _) =
+                classify_text(text).unwrap_or_else(|| panic!("「{text}」没认出成品类型"));
+            assert_eq!(intent, Intent::Sprite, "{text}");
+        }
     }
 
     #[test]

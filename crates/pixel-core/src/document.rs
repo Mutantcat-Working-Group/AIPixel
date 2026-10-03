@@ -34,7 +34,8 @@ impl Rgba {
         a: 0,
     };
 
-    pub fn rgb(r: u8, g: u8, b: u8) -> Self {
+    /// const fn：让别的模块能在 const 里拼色（白膜灰阶、测试夹具都在用）。
+    pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
         Rgba { r, g, b, a: 255 }
     }
 
