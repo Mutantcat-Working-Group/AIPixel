@@ -1,6 +1,7 @@
 // Copyright (C) 2026 Mutantcat Working Group
 // SPDX-License-Identifier: GPL-3.0-only
 import {
+  memo,
   useCallback,
   useEffect,
   useRef,
@@ -186,7 +187,7 @@ function stagePixels(
   if (ctx) ctx.putImageData(new ImageData(pixels, width, height), 0, 0);
 }
 
-export default function DocumentPanel() {
+function DocumentPanel() {
   const t = useT();
   const document = useStore((s) => s.document);
   const pngUrl = useStore((s) => s.pngUrl);
@@ -1846,3 +1847,8 @@ export default function DocumentPanel() {
     </aside>
   );
 }
+
+/** Panel 本体没有 props，重画只可能来自订阅；memo 一层纯粹是把父组件的
+ *  连锁渲染挡在外面——App 现在只订阅顶栏那几项，父组件不重画，
+ *  这些面板就更没必要跟着抖。 */
+export default memo(DocumentPanel);

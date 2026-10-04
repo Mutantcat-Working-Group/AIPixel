@@ -1,6 +1,6 @@
 // Copyright (C) 2026 Mutantcat Working Group
 // SPDX-License-Identifier: GPL-3.0-only
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { memo, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Check } from "lucide-react";
 
 /** 一条菜单项。label 由调用处翻好译：菜单本身不认识任何业务。 */
@@ -39,7 +39,7 @@ export function openContextMenu(
 }
 
 /** 菜单宿主：整个应用只挂一个，所有位置共用它。 */
-export default function ContextMenuHost() {
+function ContextMenuHost() {
   const [request, setRequest] = useState<MenuRequest | null>(null);
   const [shift, setShift] = useState({ x: 0, y: 0 });
   const boxRef = useRef<HTMLDivElement>(null);
@@ -128,3 +128,6 @@ export default function ContextMenuHost() {
     </div>
   );
 }
+
+/** 右键菜单的宿主平时什么都不渲染，memo 一层挡掉父组件本不必要的连锁渲染。 */
+export default memo(ContextMenuHost);

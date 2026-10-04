@@ -36,10 +36,27 @@ import brandIcon from "./assets/brand-icon.png";
 const UNSET_MODEL = "__unset__";
 
 export default function App() {
-  const store = useStore();
   const [rail, setRail] = useState("canvas");
 
   const t = useT();
+
+  /** 动作拿取入口。单例里的 action 是稳定引用，按字段订阅只会白白订阅一份，
+   *  所以一律经 getState() 现取现用，不进渲染依赖。 */
+  const api = () => useStore.getState();
+
+  // 顶栏一场几发布：这里只订阅真正会画出来的几项。原来整口 subscribe，
+  //  MCP 每推一条画布补丁、唤醒后每补一条会话簿变更，整个 App（连带着侧栏、
+  //  对话、三个面板整棵树）都要重新提交一遍，界面就是一格一格地跳。
+  const booted = useStore((s) => s.booted);
+  const sessions = useStore((s) => s.sessions);
+  const activeId = useStore((s) => s.activeId);
+  const models = useStore((s) => s.models);
+  const hasDocument = useStore((s) => s.document !== null);
+  const documentName = useStore((s) => s.document?.name ?? "untitled");
+  const frameIndex = useStore((s) => s.frameIndex);
+  const permission = useStore((s) => s.permission);
+  const busy = useStore((s) => s.busy);
+  const notice = useStore((s) => s.notice);
 
   /** 右栏三个视图：画布看结果，工作流跑流程，批量跑文件夹。 */
   const railOptions = [
@@ -59,15 +76,13 @@ export default function App() {
   const imageFilter = [{ name: t("dialog.image"), extensions: ["png", "jpg", "jpeg", "webp", "gif"] }];
 
   useEffect(() => {
-    void store.boot();
-    // store 是模块级单例，只在挂载时启动一次
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    void api().boot();
   }, []);
 
   // 撤销 / 重做的键盘入口：画布改一步就能一键反悔，不依赖右上角那两个小方块。
   useEditShortcuts();
 
-  if (!store.booted) {
+  if (!booted) {
     return (
       <div className="gate">
         <Spin size="large" />
@@ -75,23 +90,22 @@ export default function App() {
     );
   }
 
-  const activeSession = store.sessions.find((s) => s.id === store.activeId) ?? null;
+  const activeSession = sessions.find((s) => s.id === activeId) ?? null;
   // 顶栏显示会话绑的模型；没有会话（允许的空态）或那个模型被删了，就落到全局激活模型。
   // 谁都不剩才是真的「未设置模型」——不能把「还没建会话」也算成没配模型。
   const boundModelId =
     resolveBoundModelId(
       activeSession?.model_id,
-      store.models.active_id,
-      store.models.entries.map((m) => m.id),
+      models.active_id,
+      models.entries.map((m) => m.id),
     ) ?? UNSET_MODEL;
-  const documentName = store.document?.name ?? "untitled";
   // 「没有可用模型」只在真的一个都没配时出现。空会话下配好了模型却挂这条横幅，
   // 是以前最误导人的一桩：用户照它点进设置，只会发现模型早就在那儿。
-  const unbound = needsModelBanner(store.models.entries.length);
+  const unbound = needsModelBanner(models.entries.length);
 
   async function pickAndOpenAip() {
     const picked = await open({ multiple: false, filters: aipFilter });
-    if (typeof picked === "string") await store.openAip(picked);
+    if (typeof picked === "string") await api().openAip(picked);
   }
 
   async function pickAndSaveAip() {
@@ -99,14 +113,14 @@ export default function App() {
       defaultPath: `${documentName}.aip`,
       filters: aipFilter,
     });
-    if (typeof target === "string") await store.saveAip(target);
+    if (typeof target === "string") await api().saveAip(target);
   }
 
   async function pickReferenceImages() {
     const picked = await open({ multiple: true, filters: imageFilter });
     if (!picked) return;
     const paths = Array.isArray(picked) ? picked : [picked];
-    await store.attachReferenceImages(paths);
+    await api().attachReferenceImages(paths);
   }
 
   /**
@@ -132,7 +146,7 @@ export default function App() {
       label: t("topbar.export_frame"),
       extension: "png",
       filter: t("dialog.png"),
-      suffix: `-f${store.frameIndex + 1}`,
+      suffix: `-f${frameIndex + 1}`,
     },
     {
       format: "strip",
@@ -191,9 +205,9 @@ export default function App() {
       filters: [{ name: entry.filter, extensions: [entry.extension] }],
     });
     if (typeof target !== "string") return;
-    await store.exportDocument(entry.format, target, {
+    await api().exportDocument(entry.format, target, {
       // 只有单帧导出认 frame；别的格式传了 Rust 也当没看见。
-      frame: entry.format === "frame" ? store.frameIndex : undefined,
+      frame: entry.format === "frame" ? frameIndex : undefined,
     });
   }
 
@@ -232,7 +246,7 @@ export default function App() {
                       },
                     ]
                   : []),
-                ...store.models.entries.map((m) => ({
+                ...models.entries.map((m) => ({
                   label: `${m.label} · ${m.model}`,
                   value: m.id,
                 })),
@@ -240,9 +254,9 @@ export default function App() {
               onChange={(value: string) => {
                 // 有会话只改这个会话的绑定；空会话时这句话无处可绑，改全局激活模型。
                 if (modelChangeTarget(activeSession !== null) === "session") {
-                  void store.bindSessionModel(value);
+                  void api().bindSessionModel(value);
                 } else {
-                  void store.activateModel(value);
+                  void api().activateModel(value);
                 }
               }}
               placeholder={t("topbar.select_model")}
@@ -252,14 +266,14 @@ export default function App() {
           <Tooltip title={t("perm.tooltip")}>
             <Segmented
               size="small"
-              value={store.permission}
+              value={permission}
               options={permissionOptions.map((o) => ({
                 label: o.label,
                 value: o.value,
                 title: o.title,
               }))}
               onChange={(value) =>
-                void store.setPermissionMode(value as PermissionMode)
+                void api().setPermissionMode(value as PermissionMode)
               }
             />
           </Tooltip>
@@ -309,7 +323,7 @@ export default function App() {
                 type="text"
                 aria-label={t("topbar.export")}
                 icon={<Download size={14} />}
-                disabled={!store.document || store.busy}
+                disabled={!hasDocument || busy}
               />
             </Dropdown>
           </Tooltip>
@@ -328,7 +342,7 @@ export default function App() {
               type="text"
               aria-label={t("topbar.settings")}
               icon={<Settings2 size={14} />}
-              onClick={store.openSettings}
+              onClick={() => api().openSettings()}
             />
           </Tooltip>
         </div>
@@ -340,21 +354,21 @@ export default function App() {
         {unbound ? (
           <div className="notice-bar">
             <span className="grow">{t("store.no_model")}</span>
-            <Button size="small" type="link" onClick={store.openSettings}>
+            <Button size="small" type="link" onClick={() => api().openSettings()}>
               {t("gate.add_first")}
             </Button>
           </div>
         ) : null}
 
-        {store.notice ? (
-          <div className={`notice-bar ${store.notice.isError ? "error" : ""}`}>
-            <span className="grow">{store.notice.text}</span>
+        {notice ? (
+          <div className={`notice-bar ${notice.isError ? "error" : ""}`}>
+            <span className="grow">{notice.text}</span>
             <Button
               size="small"
               type="text"
               aria-label={t("notice.dismiss")}
               icon={<X size={13} />}
-              onClick={store.clearNotice}
+              onClick={() => api().clearNotice()}
             />
           </div>
         ) : null}

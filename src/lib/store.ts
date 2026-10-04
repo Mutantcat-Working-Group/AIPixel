@@ -28,6 +28,7 @@ import type {
   BatchRecipeEntry,
   RecipeImportReport,
   BatchScan,
+  SessionListChanged,
   EditorOperation,
   DocPatch,
   DockKind,
@@ -77,6 +78,7 @@ import {
   scanMatchesKind,
   type BatchRun,
 } from "./batch";
+import { createCoalescer, type Coalescer } from "./coalesce";
 
 import { MAX_STACKED_PRESETS, normalizePresetStack, uniquePresetIds } from "./presets";
 
@@ -712,6 +714,12 @@ export const STALL_SECONDS = 1800;
 
 const STALL_MS = STALL_SECONDS * 1000;
 
+/**
+ * 离开多久再回来才算「睡了一觉」：短于这个时长（切了个窗口、看了一眼浏览器）
+ * 不碰静默表，只有真的离开过（休眠、长时间切走）才对齐各路计时。
+ */
+const WAKE_ABSENCE_MS = 60_000;
+
 let stallTimer: ReturnType<typeof setTimeout> | null = null;
 /**
  * 第几趟 loadDocument 了。同一时刻只认最后一次。
@@ -722,6 +730,23 @@ let stallTimer: ReturnType<typeof setTimeout> | null = null;
  * 的结果挡在门外，比在每个调用点加旗子可靠——调用点多，旗子一定会漏。
  */
 let loadSeq = 0;
+
+/**
+ * 会话簿通道的合并器。
+ *
+ * 外部 MCP 批量建画布、导入整包 .aip 时，session-event 一条接一条地来，每条
+ * 都要把整份列表拍进 store 顺带渲染一次侧栏。收进同一个任务再统一结算，整批
+ * 风暴只留一次渲染。语义不变：处理顺序还是到达顺序，最新一条说了算。
+ */
+let sessionCoalescer: Coalescer<SessionListChanged> | null = null;
+
+/** 预览图刷新合并：同一时刻只留一趟在飞的往返，途中再来的一律并成「补一发」。 */
+let pngBusy = false;
+let pngAgain = false;
+let pngTail: Promise<void> = Promise.resolve();
+
+/** 唤醒对齐只挂一次：重复挂等于每醒一次多做一遍无用功。 */
+let wakeSyncArmed = false;
 
 /** 文档快照栈统一往栈尾压一份，超限就丢最老的那份。 */
 function pushDocStack(stack: PixelDocument[], doc: PixelDocument): PixelDocument[] {
@@ -825,6 +850,67 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       stallTimer = null;
       if (getState().running) setState({ stalled: true });
     }, STALL_MS);
+  }
+
+  /**
+   * 预览图刷新：同一时刻只留一趟在飞的往返，途中又来的一律并成「回来补一发」。
+   *
+   * document_updated 一条笔一次广播，MCP 批量画图时一秒里就是几十条：每条都
+   * 发起一趟 document_png_url，后端得把整张画布重新栅格化几十遍，队列一堵，
+   * 预览反而迟迟不翻页。中间的截图根本来不及显示，把往返并成最新那一张，
+   * 省下的往返正是界面不卡的来源。用户主动的动作（撤销、切帧）照旧走
+   * refreshPng 原路，不在这个合并里。
+   */
+  function refreshPngSoon(): Promise<void> {
+    if (pngBusy) {
+      pngAgain = true;
+      return pngTail;
+    }
+    pngBusy = true;
+    // refreshPng 失败自己会招呼用户；这里接着链往下走，别让一次失败
+    // 把后面排队的补发一起噎死。
+    pngTail = getState().refreshPng().catch(() => {});
+    return pngTail.then(() => {
+      pngBusy = false;
+      // 处理这一趟的功夫又来了一批：按最新的 revision 补一发，而不是逐条补。
+      if (pngAgain) {
+        pngAgain = false;
+        return refreshPngSoon();
+      }
+    });
+  }
+
+  /**
+   * 休眠唤醒 / 长时间离开再回来的对齐。
+   *
+   * 系统睡过去期间 JS 定时器全冻着，醒来那一瞬间：过期的静默表、攒了一路的
+   * 会话簿事件、停在睡前读数的计时器一起扑上来，界面看到的就是「刚醒来卡
+   * 半秒，然后什么都跳一遍」。焦点一回来就把各路的表对齐——攒着的事件立刻
+   * 结算，静默表重新打表；睡过去的时长不算在「模型不回话」的账上。
+   */
+  function armWakeSync() {
+    if (wakeSyncArmed || typeof window === "undefined") return;
+    wakeSyncArmed = true;
+    let awayAt: number | null = null;
+    const thaw = () => {
+      // 离开过再回来才算「醒」：一直在前台的回合不碰这些表，
+      // 免得用户眨个眼回来看到自己没等过的红字。
+      const absence = awayAt === null ? 0 : Date.now() - awayAt;
+      awayAt = null;
+      if (absence < WAKE_ABSENCE_MS) return;
+      sessionCoalescer?.flush();
+      if (!getState().running) return;
+      clearStallWatch();
+      if (getState().stalled) setState({ stalled: false });
+      touchStallWatch();
+    };
+    window.addEventListener("blur", () => {
+      awayAt = Date.now();
+    });
+    window.addEventListener("focus", thaw);
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) thaw();
+    });
   }
 
   /** 等这一回合把占用交回来。
@@ -1015,7 +1101,8 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
    */
   async function ensureSessionListener() {
     if (sessionUnlisten) return;
-    sessionUnlisten = await bridge.listenSessionList((raw) => {
+    // 合并器只建一次：重复建会把先到的监听事件漏给上一个队列。
+    sessionCoalescer ??= createCoalescer<SessionListChanged>((raw) => {
       // 形状不对就当没这条：旧版本 Runtime 没这个通道，或者载荷被截断了。
       if (!raw || !Array.isArray(raw.sessions)) return;
       const sessions = sortSessions(raw.sessions);
@@ -1054,6 +1141,10 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
           void getState().selectSession(activeId);
         }
       }
+    });
+    sessionUnlisten = await bridge.listenSessionList((raw) => {
+      // 进队列，不在回调里当场结算：一整批会话簿变化合成一次渲染。
+      sessionCoalescer?.push(raw);
     });
   }
 
@@ -1155,7 +1246,9 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       const id = getState().activeId;
       if (id) syncActive(id, active);
     }
-    void getState().refreshPng();
+    // 一笔一次广播：把预览往返并成最新那一张，别让一次批量画布
+    // 把后端渲染排成人龙——那时的卡顿全淤在这一趟趟 IPC 上。
+    void refreshPngSoon();
   }
 
   /**
@@ -1465,6 +1558,8 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       const attempt = (async () => {
         // 配方簿和批量通道一样与会话无关：开机读回来，用户随时能从簿子里挑一条。
         await getState().loadRecipes();
+        // 唤醒对齐挂在开机这一次上：之后休眠唤醒、切窗口回来都靠它。
+        armWakeSync();
         await ensureListener();
         // 批量通道与会话无关，开机听上就行：用户随时可能从工作台起一趟。
         await ensureBatchListener();

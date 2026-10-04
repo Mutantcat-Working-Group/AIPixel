@@ -1,6 +1,6 @@
 // Copyright (C) 2026 Mutantcat Working Group
 // SPDX-License-Identifier: GPL-3.0-only
-import { useState } from "react";
+import { memo, useState } from "react";
 
 import CanvasSizeModal from "./CanvasSizeModal";
 import { useT } from "../lib/t";
@@ -14,7 +14,7 @@ import { useStore } from "../lib/store";
  * 状态留在本组件内而不是每次打开都重置：用户上一回选的 64×64 和会话名草稿
  * 都该留着，新建连环开才顺手。
  */
-export default function CreateSessionModal() {
+function CreateSessionModal() {
   const t = useT();
   const open = useStore((s) => s.createPromptOpen);
   const createSession = useStore((s) => s.createSession);
@@ -76,3 +76,6 @@ export default function CreateSessionModal() {
     />
   );
 }
+
+/** 弹窗只在用户点「新建」时才有内容，memo 一层挡掉父组件本不必要的连锁渲染。 */
+export default memo(CreateSessionModal);

@@ -5,6 +5,8 @@
 // 所以面板里没有任何模型控件：两个文件夹、一遍扫描、一个开始，就是全部。
 // 过程走 batch-event，逐文件折进行表；跑完的回执带成败计数，失败原因跟在自己那一行上。
 
+import { memo } from "react";
+
 import {
   Alert,
   Button,
@@ -79,7 +81,7 @@ function DirField({
   );
 }
 
-export default function BatchPanel() {
+function BatchPanel() {
   const t = useT();
   const recipe = useStore((s) => s.recipe);
   const scan = useStore((s) => s.scan);
@@ -469,3 +471,6 @@ export default function BatchPanel() {
     </section>
   );
 }
+
+/** 没有 props 的面板：memo 一层纯粹挡父组件的连锁渲染。 */
+export default memo(BatchPanel);

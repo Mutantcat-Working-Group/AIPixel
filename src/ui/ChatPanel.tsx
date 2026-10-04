@@ -1,6 +1,6 @@
 // Copyright (C) 2026 Mutantcat Working Group
 // SPDX-License-Identifier: GPL-3.0-only
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { memo, useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Button, Input, Select, Tooltip } from "antd";
 import {
   AlertTriangle,
@@ -72,11 +72,34 @@ function TurnTimer() {
   // 读墙钟，purity 规则判不纯（同一帧渲染两遍两个时刻）；effect 体里同步
   // setState 又踩 set-state-in-effect。两条都不沾的办法是干脆不拨——起步那
   // 一刻 now 还是上一圈的旧值，减出来是负数，下面 Math.max(0) 一夹就是
-  // 00:00，下一秒由定时器接上，读数不会残、也不会歪。
+  // 00:00，下一秒由自走表接上，读数不会残、也不会歪。
   useEffect(() => {
     if (!running || startedAt === null) return;
-    const timer = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(timer);
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout>;
+    // 对齐整秒边界的自走表：每一班都按墙钟算下一班的间隔。setInterval 是
+    // 「每 1000ms 一发」，任务一忙就整体后移，跑半小时能差出好几秒；自走表
+    // 不累积这个漂移。唤醒后定时器可能被浏览器推迟很久，下一班照样拨准。
+    const schedule = () => {
+      if (!alive) return;
+      const at = Date.now();
+      setNow(at);
+      timer = setTimeout(schedule, Math.max(50, 1000 - (at % 1000)));
+    };
+    timer = setTimeout(schedule, Math.max(50, 1000 - (Date.now() % 1000)));
+    // 休眠唤醒、切窗口回来：表还停在睡前的读数，先拨正再交给自走表。
+    // 没有这一步，醒来那一秒看到的是几分钟前的数，像计时器停了。
+    const resync = () => {
+      if (alive) setNow(Date.now());
+    };
+    window.addEventListener("focus", resync);
+    document.addEventListener("visibilitychange", resync);
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+      window.removeEventListener("focus", resync);
+      document.removeEventListener("visibilitychange", resync);
+    };
   }, [running, startedAt]);
 
   // 跑着就实时报；停下来就报上一圈冻住的总耗时。换会话之类的一来两头都空，那就不出声。
@@ -148,7 +171,9 @@ function PlanBody({ input }: { input: unknown }) {
   );
 }
 
-function ToolEntry({
+/** memo：流式期间只有最后一条会被替换成新对象，前面那些行原样不动。
+ *  不 memo 的话每来一个 token，整个对话流从头到尾重画一遍。 */
+const ToolEntry = memo(function ToolEntry({
   entry,
   expanded,
   onToggle,
@@ -195,7 +220,7 @@ function ToolEntry({
       {body}
     </div>
   );
-}
+});
 
 /** 审批卡：主循环停在一条工具调用上，只有这里能让它继续走。 */
 function ApprovalCard() {
@@ -245,10 +270,12 @@ function EntryRow({ entry }: { entry: TranscriptEntry }) {
     entry.kind === "tool" ? (s.toolOpen[entry.id] ?? autoOpen) : false,
   );
   const toggleTool = useStore((s) => s.toggleToolOpen);
-  const toggle = () => {
+  // 回调挂 useCallback：下面的 ToolEntry 是 memo 化的，每次渲染新造一个箭头
+  // 会让 memo 形同虚设，白省的那份 DOM diff 又回来了。
+  const toggle = useCallback(() => {
     if (entry.kind !== "tool") return;
     toggleTool(entry.id, autoOpen);
-  };
+  }, [autoOpen, entry, toggleTool]);
 
   if (entry.kind === "user") {
     return (
@@ -351,7 +378,11 @@ function EntryRow({ entry }: { entry: TranscriptEntry }) {
   );
 }
 
-export default function ChatPanel() {
+/** 行组件 memo 化：条目对象的引用不变就不重画。流式期间 reduceEvent 只替换
+ *  数组最后一条，前面那些 entry 原样不动，所以这一层能省掉整段重画。 */
+const MemoEntryRow = memo(EntryRow);
+
+function ChatPanel() {
   const t = useT();
   const entries = useStore((s) => s.entries);
   const running = useStore((s) => s.running);
@@ -428,7 +459,7 @@ export default function ChatPanel() {
             <p>{t("chat.empty")}</p>
           </div>
         ) : (
-          entries.map((entry) => <EntryRow key={entry.key} entry={entry} />)
+          entries.map((entry) => <MemoEntryRow key={entry.key} entry={entry} />)
         )}
       </div>
 
@@ -649,3 +680,9 @@ export default function ChatPanel() {
     </section>
   );
 }
+
+/**
+ * Panel 本体 memo 化：这里的 props 是空的，重画次数完全看订阅。
+ * 它只订阅下列几项，画布补丁、会话簿变更都不会顺着 App 传下来。
+ */
+export default memo(ChatPanel);

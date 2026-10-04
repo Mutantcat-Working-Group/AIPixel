@@ -1,6 +1,6 @@
 // Copyright (C) 2026 Mutantcat Working Group
 // SPDX-License-Identifier: GPL-3.0-only
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { Button, Input, Modal, Tooltip } from "antd";
 import { Github, Pencil, Plus, Trash2 } from "lucide-react";
 
@@ -11,7 +11,7 @@ import { openContextMenu } from "./ContextMenu";
 
 const REPO_URL = "https://github.com/Mutantcat-Working-Group/AIPixel";
 
-export default function SessionSidebar() {
+function SessionSidebar() {
   const t = useT();
   const sessions = useStore((s) => s.sessions);
   const activeId = useStore((s) => s.activeId);
@@ -289,3 +289,8 @@ export default function SessionSidebar() {
     </aside>
   );
 }
+
+/** Panel 本体没有 props，重画只可能来自订阅；memo 一层纯粹是把父组件的
+ *  连锁渲染挡在外面——App 现在只订阅顶栏那几项，父组件不重画，
+ *  这些面板就更没必要跟着抖。 */
+export default memo(SessionSidebar);

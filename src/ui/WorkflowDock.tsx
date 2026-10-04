@@ -6,7 +6,7 @@
 // quantize 不在能力目录里（它不需要模型），但确实是常用的一条，所以单独挂在末尾。
 // 抽帧同理：它和补帧一样全程在本机，没有读视频模型也该跑得动。
 
-import { useMemo, type ReactNode } from "react";
+import { memo, useMemo, type ReactNode } from "react";
 import { Alert, Button, Input, InputNumber, Segmented, Select, Slider, Switch, Tooltip } from "antd";
 import {
   ArrowRight,
@@ -221,7 +221,7 @@ function MotionBriefView({ brief }: { brief: VideoBrief }) {
 // ---------- 坞 ----------
 
 /** 坞的主体：条目列表 + 当前条目的表单 + 最近一次回执。 */
-export default function WorkflowDock() {
+function WorkflowDock() {
   const t = useT();
   const workflows = useStore((s) => s.workflows);
   const catalogReady = useStore((s) => s.catalogReady);
@@ -1091,3 +1091,8 @@ function QuantizePanel({ gated }: { gated: boolean }) {
     </>
   );
 }
+
+/** Panel 本体没有 props，重画只可能来自订阅；memo 一层纯粹是把父组件的
+ *  连锁渲染挡在外面——App 现在只订阅顶栏那几项，父组件不重画，
+ *  这些面板就更没必要跟着抖。 */
+export default memo(WorkflowDock);

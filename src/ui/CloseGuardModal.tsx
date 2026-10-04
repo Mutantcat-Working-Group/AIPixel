@@ -1,6 +1,6 @@
 // Copyright (C) 2026 Mutantcat Working Group
 // SPDX-License-Identifier: GPL-3.0-only
-import { useState } from "react";
+import { memo, useState } from "react";
 import { Button, Modal } from "antd";
 import { save } from "@tauri-apps/plugin-dialog";
 
@@ -22,7 +22,7 @@ function shortPath(path: string): string {
   return path.split(/[/\\]/).pop() || path;
 }
 
-export default function CloseGuardModal() {
+function CloseGuardModal() {
   const t = useT();
   const store = useStore();
   const [saving, setSaving] = useState(false);
@@ -93,3 +93,7 @@ export default function CloseGuardModal() {
     </Modal>
   );
 }
+
+/** 弹窗只在有未保存改动时才有内容，平时整棵树里最闲的就是它；
+ *  memo 一层挡掉父组件本不必要的连锁渲染。 */
+export default memo(CloseGuardModal);
