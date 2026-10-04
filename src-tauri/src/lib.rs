@@ -7,6 +7,7 @@
 //! 主循环、文档与导出、模型与能力、MCP、会话、工作流、编辑器、批量。
 //! 新增命令时归进既有分组，别往末尾一挂了事——清单本身就是索引。
 
+mod broadcast;
 mod close;
 mod commands;
 mod editor;

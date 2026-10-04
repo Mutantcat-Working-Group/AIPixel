@@ -696,7 +696,9 @@ async fn handle_single(state: &AppState, app: Option<&AppHandle>, payload: Value
     let outcome = match method.as_str() {
         "initialize" => Ok(initialize_result(&params)),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": tool_specs() })),
+        // 清单是静态的，却可能被客户端反复问：每次全量重建三十来个大段中文
+        // 描述的 JSON 纯属白干，还可能正好撞上一次批量工具调用。
+        "tools/list" => Ok(json!({ "tools": TOOL_SPECS.clone() })),
         "tools/call" => call_tool(state, app, &params).await,
         "" => Err((-32600, "invalid request: no method".into())),
         other => Err((-32601, format!("unknown method: {other}"))),
@@ -784,6 +786,11 @@ fn spec(name: &str, description: &str, properties: Value, required: &[&str]) -> 
         },
     })
 }
+
+/// 工具清单的缓存。`tools/list` 是被客户端随手调的：有的客户端每次重连、
+/// 每次换模型都要问一遍，而重建一次要把三十来个大段中文描述重新拼装序列化。
+/// 清单内容整个进程生命期内不变，所以算一次就够，命中时只是一次 clone。
+static TOOL_SPECS: std::sync::LazyLock<Vec<Value>> = std::sync::LazyLock::new(tool_specs);
 
 /// 16 个工具。名字一律动词开头，字段一律 snake_case 的英文：
 /// 读这份清单的是外部模型，字段名越接近日常英语，它填错的概率越低。
@@ -1814,7 +1821,10 @@ fn tool_interrupt_agent(state: &AppState, args: &Value) -> Result<ToolOutcome, S
 
 /// 外部改完画布也走同一条广播：前端只有一条刷新路径，
 /// 用户在界面上看到的和外部模型画出的是同一份文档。
-fn emit_change(app: Option<&AppHandle>, session: &AgentSession) {
+///
+/// 拿 Arc 而不是借用：emit_document 要把会话挪进合并窗口尾巴上的那个任务里，
+/// 借用活不到那时候。合并本身见 `broadcast::coalesced`。
+fn emit_change(app: Option<&AppHandle>, session: &Arc<AgentSession>) {
     if let Some(app) = app {
         workflow::emit_document(app, session);
     }

@@ -752,18 +752,32 @@ pub fn workflow_pixelize(
 
 /// 文档被工作流改过之后，把新文档推回前端。和主循环的 DocumentUpdated 同一个通道，
 /// 前端因此只有一条刷新路径，不需要区分「这次是谁改的」。
-pub(crate) fn emit_document(app: &AppHandle, session: &AgentSession) -> u64 {
-    // 走增量：整份文档序列化一次够把 47MB JSON 灌进 IPC，webview 直接卡死。
-    let patch = session.document_patch();
-    let revision = patch.revision;
-    let _ = app.emit(
-        "agent-event",
-        AgentEventEnvelope {
-            session_id: session.id().to_string(),
-            event: AgentEvent::DocumentUpdated { revision, patch },
-        },
-    );
-    revision
+///
+/// 走 `broadcast::coalesced` 而不是当场 emit：MCP 一个回合连发几十个工具时，
+/// 每个工具都推一份增量，webview 就要逐个醒几十回，WKWebView 的串行 IPC 一堵，
+/// 界面看着就是一格一格跳。合并后一个回合只剩「第一发 + 尾巴一发」，中间那些
+/// 改动由最后一发一并带上（patch 是相对上一次广播的增量，合并不丢东西）。
+/// 返回值仍是当前 revision：调用方拿它向模型汇报「画布到几号了」，而 revision
+/// 在改动落进文档的那一刻就已经涨过，跟广播什么时候发出去无关。
+pub(crate) fn emit_document(app: &AppHandle, session: &Arc<AgentSession>) -> u64 {
+    // 尾巴那一发要挪进异步任务里跑，而借用活不到那一刻：另起一个 Arc 挪进去，
+    // 借来的这个原封不动留到函数末尾读 revision。
+    let live = Arc::clone(session);
+    let app = app.clone();
+    crate::broadcast::coalesced(session.id(), move || {
+        // 走增量：整份文档序列化一次够把 47MB JSON 灌进 IPC，webview 直接卡死。
+        // 顺带在闭包里现算：合并的意义就在于此，最后一发得带着截至那一刻的改动。
+        let patch = live.document_patch();
+        let revision = patch.revision;
+        let _ = app.emit(
+            "agent-event",
+            AgentEventEnvelope {
+                session_id: live.id().to_string(),
+                event: AgentEvent::DocumentUpdated { revision, patch },
+            },
+        );
+    });
+    session.revision()
 }
 
 /// 发一条状态行。发送失败直接忽略：状态只是旁证，webview 不在场时

@@ -17,6 +17,7 @@ use pixel_core::document::Document;
 
 use crate::state::{default_document, AppState, ModelsView};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// 模型清单。api_key 一律不回传 webview，只给 has_api_key。
 #[tauri::command]
@@ -455,7 +456,64 @@ pub(crate) fn run_turn(
         // 同步命令跑在主线程（WebView 的 IPC 回调线程），那里没有 tokio 运行时上下文，
         // 直接 tokio::spawn 会 panic 并把整个进程带崩；必须走 Tauri 自己的异步运行时。
         tauri::async_runtime::spawn(async move {
-            while let Some(event) = rx.recv().await {
+            // 模型一条消息里可能连发好几个工具，每个工具后面都跟着一份
+            // document_updated。扣住最新那一发、等一小会儿再放行：中间几发
+            // 画布更新并成一发，webview 就少醒几回。token、工具回执、收尾
+            // 事件一个都不并，照原样按顺序走——所以扣着的那一发总是赶在它
+            // 后面任何事件之前发出去，相对顺序一点没变。
+            const DOC_COALESCE_MS: u64 = 40;
+            let mut held: Option<AgentEvent> = None;
+            loop {
+                let next = if held.is_some() {
+                    tokio::select! {
+                        // 新事件先看：来得越勤，并得越彻底。
+                        event = rx.recv() => event,
+                        () = tokio::time::sleep(Duration::from_millis(DOC_COALESCE_MS)) => {
+                            let pending = held
+                                .take()
+                                .expect("只有扣着事件时才会武装这个 sleep 分支");
+                            let _ = forwarder.emit(
+                                "agent-event",
+                                AgentEventEnvelope {
+                                    session_id: owner.clone(),
+                                    event: pending,
+                                },
+                            );
+                            continue;
+                        }
+                    }
+                } else {
+                    rx.recv().await
+                };
+                // 发送端断了（这一回合跑完）就把扣着的那最后一发放出去，
+                // 不然画布停在倒数第二版，用户看到的是缺一笔的成品。
+                let Some(event) = next else {
+                    if let Some(pending) = held.take() {
+                        let _ = forwarder.emit(
+                            "agent-event",
+                            AgentEventEnvelope {
+                                session_id: owner.clone(),
+                                event: pending,
+                            },
+                        );
+                    }
+                    break;
+                };
+                if matches!(event, AgentEvent::DocumentUpdated { .. }) {
+                    // 直接顶掉：patch 是相对上一次广播的增量，最新那一发
+                    // 自然带着被顶掉那几发的全部改动。
+                    held = Some(event);
+                    continue;
+                }
+                if let Some(pending) = held.take() {
+                    let _ = forwarder.emit(
+                        "agent-event",
+                        AgentEventEnvelope {
+                            session_id: owner.clone(),
+                            event: pending,
+                        },
+                    );
+                }
                 let _ = forwarder.emit(
                     "agent-event",
                     AgentEventEnvelope {

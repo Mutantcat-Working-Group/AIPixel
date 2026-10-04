@@ -847,6 +847,9 @@ impl AppState {
         if let Some(session) = removed {
             session.interrupt();
         }
+        // 广播闸门跟着会话一起收尸：留着的话，同名会话重建后会继承上一个的
+        // 合并窗口，第一发广播被无端压后一小会儿。
+        crate::broadcast::release(id);
     }
 }
 

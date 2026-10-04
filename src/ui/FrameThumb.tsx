@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import { useEffect, useRef } from "react";
 
+import { frameSignature } from "../lib/frame-signature";
 import { compositeFrame } from "../lib/render";
 import { useStore } from "../lib/store";
 import type { PixelDocument } from "../lib/types";
@@ -35,6 +36,8 @@ export default function FrameThumb({
   // 编辑器主画布的帧层 effect 早就有这层兜底，缩略图补上同一把钥匙。
   const revision = useStore((s) => s.revision);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  /** 上一次画的是哪一版内容。签名一样就说明这一帧的像素根本没动过。 */
+  const drawnRef = useRef<string | null>(null);
   const maxWidth = compact ? THUMB_COMPACT_WIDTH : THUMB_MAX_WIDTH;
   const maxHeight = compact ? THUMB_COMPACT_HEIGHT : THUMB_MAX_HEIGHT;
   const ratio = Math.min(maxWidth / doc.width, maxHeight / doc.height);
@@ -46,6 +49,12 @@ export default function FrameThumb({
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext("2d");
     if (!canvas || !ctx) return;
+    // 一回合几十条广播里，动的常常只有当前那一帧；帧条越长，其余帧每广播一次
+    // 就重合成一遍纯属白干。签名没变就直接收工，revision 仍是触发这一趟比较
+    // 的钥匙——它涨了才轮到我们判断「是不是真变了」。
+    const signature = frameSignature(doc, index);
+    if (drawnRef.current === signature) return;
+    drawnRef.current = signature;
     canvas.width = doc.width;
     canvas.height = doc.height;
     ctx.clearRect(0, 0, canvas.width, canvas.height);

@@ -740,10 +740,24 @@ let loadSeq = 0;
  */
 let sessionCoalescer: Coalescer<SessionListChanged> | null = null;
 
-/** 预览图刷新合并：同一时刻只留一趟在飞的往返，途中再来的一律并成「补一发」。 */
+/**
+ * 预览图刷新合并：同一时刻只留一趟在飞的往返，途中再来的一律并成「补一发」，
+ * 而且两趟之间至少隔 `PNG_MIN_INTERVAL_MS`。
+ *
+ * 光靠「在飞时不重发」还不够：后端一趟只要 20ms，模型一秒发六十条广播时，
+ * 每一趟刚落地就又接上新的一趟，预览往返照样连成一条不断的队。加个最小间隔，
+ * 让人眼来不及看的那几张（后端栅格化过、IPC 传过、webview 解码过，全白干）
+ * 直接在合并里消失，只留首尾两张。
+ */
+const PNG_MIN_INTERVAL_MS = 96;
+
 let pngBusy = false;
 let pngAgain = false;
 let pngTail: Promise<void> = Promise.resolve();
+/** 下一趟最早能出发的时刻（墙上毫秒）。 */
+let pngReadyAt = 0;
+/** 等最小间隔时挂的那个闹钟，同一时刻只挂一个。 */
+let pngTimer: ReturnType<typeof setTimeout> | null = null;
 
 /** 唤醒对齐只挂一次：重复挂等于每醒一次多做一遍无用功。 */
 let wakeSyncArmed = false;
@@ -862,11 +876,28 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
    * refreshPng 原路，不在这个合并里。
    */
   function refreshPngSoon(): Promise<void> {
+    // 离上一趟还不到最小间隔：先记一笔，等窗口到点再补发，不立刻扑上去。
+    const wait = pngReadyAt - Date.now();
+    if (wait > 0) {
+      pngAgain = true;
+      if (pngTimer === null) {
+        pngTimer = setTimeout(() => {
+          pngTimer = null;
+          void refreshPngSoon();
+        }, wait);
+      }
+      return pngTail;
+    }
     if (pngBusy) {
       pngAgain = true;
       return pngTail;
     }
     pngBusy = true;
+    // 这一趟把「途中攒的」一并算上：标记就此销账，等这一趟回来再看有没有新的。
+    pngAgain = false;
+    // 打的是出发时刻的记号，不是回来时刻：后端要是自己慢（大画布栅格化），
+    // 别把它的耗时又叠进间隔里，那会让预览明显迟钝。
+    pngReadyAt = Date.now() + PNG_MIN_INTERVAL_MS;
     // refreshPng 失败自己会招呼用户；这里接着链往下走，别让一次失败
     // 把后面排队的补发一起噎死。
     pngTail = getState().refreshPng().catch(() => {});
