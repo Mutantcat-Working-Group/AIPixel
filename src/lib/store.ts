@@ -37,6 +37,7 @@ import type {
   McpServerConfig,
   McpServersView,
   McpServerStatusView,
+  Message,
   NamedPalette,
   ModelConfig,
   ModelsView,
@@ -51,6 +52,7 @@ import type {
   RefinedPrompt,
   RefineTarget,
   SessionInfo,
+  SessionShadow,
   SettingsTab,
   TweenParams,
   VideoBrief,
@@ -221,9 +223,14 @@ interface StoreState extends DocumentSnapshot, WorkflowState, BatchState {
    *  能叠几条（上限 `presets.ts` 的 MAX_STACKED_PRESETS）：细节这件事是乘法，
    *  「写实渲染」管整张图按什么规矩收尾，「微细结构」管最后一两个像素放哪里，
    *  两条一起才凑得成一张写实的图。 */
- presetOverrides: string[];
-  /** 新建会话弹窗开着。开机一条会话都没有时弹一次，用户关掉就再不自动弹。 */
-  createPromptOpen: boolean;
+presetOverrides: string[];
+/** 切走后仍在跑的会话现场。键是会话 id，只在「后台确实有回合」时才存在。
+ *
+ * 会话之间在 Rust 是并发的，切走不打断；而进行中的 token 只活在事件流里，
+ * 主循环要等轮次收尾才整段落库。影子就是那一段的暂存区。 */
+sessionShadows: Record<string, SessionShadow>;
+/** 新建会话弹窗开着。开机一条会话都没有时弹一次，用户关掉就再不自动弹。 */
+createPromptOpen: boolean;
   /** 工具块展开状态，按工具调用 id 记。跨会话重载也不丢：用户摊开的 JSON 不该
   * 因为切走再回来就自己合上。 */
   /** 当前会话的 .aip 落盘路径。null = 还没存过，关窗时要给用户一个「存哪儿」。 */
@@ -849,6 +856,156 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     });
   }
 
+  /** 影子代次计数器。只为「异步种子是否还有效」服务，别当序列号读。 */
+  let shadowGen = 0;
+
+  /**
+   * 把台前这一回合的现场整份抄成后台影子。
+   *
+   * 没在跑也照抄：这一份就是用户眼前那串对话。缺了它，切回来只能读 Rust 历史，
+   * 而历史里那些「发出去但没能落库」的轮次（发送失败、中断在半路）会整段消失。
+   */
+  function stashShadow(id: string) {
+    const state = getState();
+    const shadow: SessionShadow = {
+      entries: state.entries,
+      running: state.running,
+      runStartedAt: state.runStartedAt,
+      runElapsedMs: state.runElapsedMs,
+      stalled: state.stalled,
+      usage: state.usage,
+      pendingApproval: state.pendingApproval,
+      lastEventAt: state.running ? Date.now() : null,
+      generation: 0,
+      sealed: !state.running,
+      seeded: true,
+    };
+    setState({ sessionShadows: { ...state.sessionShadows, [id]: shadow } });
+  }
+
+  /** 摘除某会话的影子并交出来；从来没有过就返回 null（这一条没在后台跑过）。 */
+  function takeShadow(id: string): SessionShadow | null {
+    const shadow = getState().sessionShadows[id] ?? null;
+    if (!shadow) return null;
+    const next = { ...getState().sessionShadows };
+    delete next[id];
+    setState({ sessionShadows: next });
+    return shadow;
+  }
+
+  /** 丢掉某会话的影子（删会话、切回前台之后不再需要它）。 */
+  function dropShadow(id: string) {
+    if (!getState().sessionShadows[id]) return;
+    const next = { ...getState().sessionShadows };
+    delete next[id];
+    setState({ sessionShadows: next });
+  }
+
+  /**
+   * 把一条后台会话的事件折进它的影子。
+   *
+   * 与前台路径同构，但一个字节都不碰台前状态：document_updated 在这里直接扔掉
+   * （它改的是后台那份画布，前台画的是另一幅），token / 工具块 / 收尾照单全收。
+   */
+  function foldBackgroundEvent(sessionId: string, raw: AgentEvent) {
+    const state = getState();
+    const shadow = state.sessionShadows[sessionId];
+    if (!shadow) {
+      // 头一回见到这条会话的事件：多半是 MCP 在外部起的一圈，台前从没握过它。
+      // 先把历史读来打底，这一条交给种子接住——直接折进空列表会丢掉开头。
+      void seedShadow(sessionId, raw);
+      return;
+    }
+    const now = Date.now();
+    const base: SessionShadow = { ...shadow, lastEventAt: now, stalled: false };
+    let next = base;
+    if (shadow.sealed && raw.kind !== "completed" && raw.kind !== "error" && raw.kind !== "interrupted") {
+      // 收过尾的会话又来事件：只可能是新开了一圈。把启动态重新点亮，
+      // 否则切回来会看见一个「明明还在画，却显示已停下」的界面。
+      next = { ...base, running: true, runStartedAt: now, runElapsedMs: null, sealed: false };
+    }
+    if (raw.kind === "completed" || raw.kind === "error" || raw.kind === "interrupted") {
+      const elapsed =
+        next.runStartedAt === null ? next.runElapsedMs : now - next.runStartedAt;
+      next = {
+        ...next,
+        entries: sealTranscript(reduceEvent(next.entries, raw, state.lang)),
+        running: false,
+        runStartedAt: null,
+        runElapsedMs: elapsed,
+        sealed: true,
+        // 一圈收尾，挂着没批的调用跟着作废——别让切回去时看见一张废票。
+        pendingApproval: null,
+      };
+    } else if (raw.kind === "usage") {
+      next = { ...next, usage: { input: raw.input_tokens, output: raw.output_tokens } };
+    } else if (raw.kind === "approval_request") {
+      next = {
+        ...next,
+        pendingApproval: { callId: raw.call_id, name: raw.name, input: raw.input },
+      };
+    } else if (raw.kind !== "document_updated") {
+      next = { ...next, entries: reduceEvent(next.entries, raw, state.lang) };
+    }
+    setState({ sessionShadows: { ...getState().sessionShadows, [sessionId]: next } });
+    // 后台这一圈收尾了，侧栏的模型名、耗时都可能变：照前台的样子刷新一次。
+    if (next.sealed && !shadow.sealed) void getState().refreshSessions();
+  }
+
+  /**
+   * 给一条从没在前台亮过相的会话打底：读 Rust 历史当前几条，再接住头一条事件。
+   *
+   * 历史要到 async 边界之后才回来，这期间新事件会陆续折进影子——它们属于还没落库
+   * 的这一圈，历史里没有，所以最后是「历史在前、折进来的在后」拼起来。
+   * 两种情况下不拼：影子被切回前台或会话被删（代次变了），以及这一圈已经在路上
+   * 跑完了（历史里已经有它，再拼一遍就是同一批消息显示两回）。
+   */
+  async function seedShadow(sessionId: string, firstEvent: AgentEvent) {
+    const generation = (shadowGen += 1);
+    const state = getState();
+    if (state.sessionShadows[sessionId]) return;
+    setState({
+      sessionShadows: {
+        ...getState().sessionShadows,
+        [sessionId]: {
+          entries: [],
+          running: true,
+          runStartedAt: null,
+          runElapsedMs: null,
+          stalled: false,
+          usage: null,
+          pendingApproval: null,
+          lastEventAt: Date.now(),
+          generation,
+          sealed: false,
+          seeded: false,
+        },
+      },
+    });
+    foldBackgroundEvent(sessionId, firstEvent);
+    let messages: Message[];
+    try {
+      messages = await bridge.agentHistory(sessionId);
+    } catch {
+      // 读不到就从这一圈开始，不硬撑：后台会话看不到更早的几句，也比没有强。
+      return;
+    }
+    // 形状不对（旧版本 Runtime、载荷被截断）就当没有历史：这一圈的对话还在，
+    // 别为一个不相干的历史把整份现场掀掉。
+    if (!Array.isArray(messages)) return;
+    const current = getState().sessionShadows[sessionId];
+    if (!current || current.generation !== generation) return;
+    const history = historyToTranscript(messages, getState().lang);
+    setState({
+      sessionShadows: {
+        ...getState().sessionShadows,
+        [sessionId]: current.sealed
+          ? { ...current, entries: history, seeded: true }
+          : { ...current, entries: [...history, ...current.entries], seeded: true },
+      },
+    });
+  }
+
   /**
    * session-event 路由：会话簿变了。补的是「外部改了，界面不动」这一整类问题。
    *
@@ -876,6 +1033,11 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         orphaned = true;
       }
       setState({ sessions, activeId });
+      // 死掉的会话（外部删的）影子一并收走：它的事件不会再来了，
+      // 留着就是一份永远停在「跑着」的假现场。
+      for (const stale of Object.keys(state.sessionShadows)) {
+        if (!alive.has(stale)) dropShadow(stale);
+      }
 
       // Rust 点名要我们看这个：外部新建/导入的画布。必须真的切过去，
       // 只在侧栏加一条的话，用户根本不知道新画布在哪儿。
@@ -1069,7 +1231,12 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       // 对话尾巴，document_updated 才不会把新画布盖成旧画面，收尾事件也不
       // 会替新回合封口。必须早于 touchStallWatch——旧事件照样算「链路活着」
       // 的话，新回合真卡死就被它掩盖过去了。
-      if (sessionId !== getState().activeId) return;
+      if (sessionId !== getState().activeId) {
+        // 但绝不是扔掉。会话之间是并发的：切走只是不给它镜头，不是给它判死刑。
+        // 折进影子，用户切回来时这一圈的 token、工具块、收尾一样都不少。
+        foldBackgroundEvent(sessionId, raw);
+        return;
+      }
       const state = getState();
       // 事件一到就说明链路活着：取消卡住提醒，并给静默计时重新打表。
       touchStallWatch();
@@ -1144,7 +1311,12 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
    * 只有「刚往后端灌过一份外来文档」时才为真（导入 .aip）：那份文档的 revision
    * 比本地旧，但它就是要取而代之。
    */
-  async function loadDocument(id: string, switching = false, authoritative = false) {
+  async function loadDocument(
+    id: string,
+    switching = false,
+    authoritative = false,
+    keepEntries = false,
+  ) {
    const seq = (loadSeq += 1);
     // 换会话就把工作流面板的中间产物倒掉：上一条会话的提示词不属于这一条。
     setState({
@@ -1178,7 +1350,9 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     try {
       const messages = await bridge.agentHistory(id);
       if (seq !== loadSeq) return;
-      setState({ entries: historyToTranscript(messages, getState().lang) });
+      // 影子里已经握着这一圈的现场就别盖：Rust 的历史只到上一轮收尾，
+      // 拿它盖上去，正在跑的那半段就整段消失了——用户看到的就是「说着话人呢」。
+      if (!keepEntries) setState({ entries: historyToTranscript(messages, getState().lang) });
     } catch {
       // 历史读不到就从空对话开始，不阻塞文档加载
     }
@@ -1221,6 +1395,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     pngFrame: -1,
     frameIndex: 0,
     entries: emptyTranscript(),
+    sessionShadows: {},
     running: false,
     runStartedAt: null,
     runElapsedMs: null,
@@ -1353,21 +1528,36 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     },
 
     selectSession: async (id) => {
-      if (getState().running) await getState().interrupt();
+      // 切会话不等于叫停。会话之间在 Rust 是并发的，把镜头让出去就行：上一回合
+      // 接着画，它的 token 折进影子，切回来时原样接上。以前这里是先 interrupt，
+      // 于是「切出去看一眼别的会话」就等于把这一笔作废——用户看到的正是
+      // 「消息记录缺了一半，而且再也没有然后了」。
+      const live = getState();
+      if (live.activeId && live.activeId !== id) stashShadow(live.activeId);
+      const shadow = takeShadow(id);
       setState({
         activeId: id,
-      entries: emptyTranscript(),
-      running: false,
-      runStartedAt: null,
-      runElapsedMs: null,
-      stalled: false,
-      usage: null,
-      lastQuery: null,
-      attachments: [],
-      frameIndex: 0,
+        // 有影子就用影子的现场：对话、跑没跑、计时器，一样都不许被 loadDocument
+        // 那份历史重放盖掉。没影子才是这一条真的从没跑过，照旧从空对话开始。
+        entries: shadow?.entries ?? emptyTranscript(),
+        running: shadow?.running ?? false,
+        runStartedAt: shadow?.runStartedAt ?? null,
+        runElapsedMs: shadow?.runElapsedMs ?? null,
+        stalled:
+          shadow?.running === true &&
+          shadow.lastEventAt !== null &&
+          Date.now() - shadow.lastEventAt > STALL_MS,
+        usage: shadow?.usage ?? null,
+        pendingApproval: shadow?.pendingApproval ?? null,
+        lastQuery: null,
+        attachments: [],
+        frameIndex: 0,
     });
-    await loadDocument(id, true);
-    await getState().refreshSessions();
+      // 后台这一圈还在跑：静默计时接着打表，别让切回来的人看到「已经停了」。
+      if (shadow?.running) touchStallWatch();
+      else clearStallWatch();
+      await loadDocument(id, true, false, Boolean(shadow));
+      await getState().refreshSessions();
   },
 
     createSession: async (width, height, title) => {
@@ -1443,6 +1633,9 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         clearStallWatch();
         }
       }
+      // 影子跟着会话一起走。放在最后：上面切走的那一步会把台前现场
+      // 暂存进影子表，早一步丢就会被它又写回来一份死会话的假现场。
+      dropShadow(id);
     },
 
     bindSessionModel: async (modelId) => {

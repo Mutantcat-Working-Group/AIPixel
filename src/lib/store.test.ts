@@ -1462,6 +1462,123 @@ describe("切走之后，上一个会话残着的事件不能落到这一轮", (
   });
 });
 
+describe("切会话不杀回合：现场进影子，切回来原样接上", () => {
+  /** 一条会话概览；两条会话是切换的最小阵容。 */
+  function sessionOf(id: string, order: number): SessionInfo {
+    return {
+      id,
+      model_id: "m1",
+      model_label: "一号模型",
+      roles: [],
+      width: 32,
+      height: 32,
+      revision: 0,
+      title: null,
+      order,
+    };
+  }
+
+  /** 两条会话都在册，切会话用的文档/历史/工作流一趟备齐。
+   *  mock 的 invoke 认不出 id，两份快照共用一份形状就够用：这条用例守的是
+   *  对话与运行态，不是画布内容。 */
+  function stubTwoSessions(doc: PixelDocument): void {
+    const a = sessionOf("doc-a", 1);
+    const b = sessionOf("doc-b", 2);
+    invokeResults["session_list"] = [a, b];
+    invokeResults["agent_history"] = [];
+    invokeResults["agent_document"] = { id: "doc-a", revision: doc.revision, document: doc };
+    invokeResults["workflow_catalog"] = [];
+    useStore.setState({ sessions: [a, b] });
+  }
+
+  function texts(): string {
+    return useStore
+      .getState()
+      .entries.flatMap((entry) => ("text" in entry ? [entry.text] : []))
+      .join("");
+  }
+
+  /** 一个说到一半的回合：占位节点还在闪，后半句还没来。 */
+  function halfTurn() {
+    useStore.setState({
+      activeId: "doc-a",
+      entries: [{ key: "live", kind: "assistant", text: "前半句", live: true }],
+      running: true,
+      runStartedAt: Date.now(),
+      stalled: false,
+      lastQuery: null,
+      attachments: [],
+    });
+  }
+
+  it("切走不叫停：一个 interrupt 都不发，回合留着继续跑", async () => {
+    const doc = seedDocument();
+    stubTwoSessions(doc);
+    halfTurn();
+    invokeCalls.length = 0;
+
+    await useStore.getState().selectSession("doc-b");
+
+    expect(invokeCalls.some((call) => call.cmd === "agent_interrupt")).toBe(false);
+    // 前台换成了没在跑的那条，但上一回合没被判死刑。
+    expect(useStore.getState().activeId).toBe("doc-b");
+    expect(useStore.getState().running).toBe(false);
+  });
+
+  it("走后进来的 token 折进影子：切回来一句不少，光标还在闪", async () => {
+    const doc = seedDocument();
+    stubTwoSessions(doc);
+    halfTurn();
+    await useStore.getState().selectSession("doc-b");
+
+    // 镜头在 b 这儿：a 的话不许串台，b 的对话也得是干净的。
+    publishAgent("doc-a", { kind: "token", text: "后半句" });
+    expect(texts()).not.toContain("后半句");
+
+    await useStore.getState().selectSession("doc-a");
+    const state = useStore.getState();
+    expect(state.activeId).toBe("doc-a");
+    expect(state.running).toBe(true);
+    expect(state.runStartedAt).not.toBeNull();
+    expect(texts()).toBe("前半句后半句");
+    expect(state.entries.some((entry) => entry.kind === "pending")).toBe(false);
+  });
+
+  it("后台那一圈收尾：切回去看见的是停下来的一整段，不是残缺的历史", async () => {
+    const doc = seedDocument();
+    stubTwoSessions(doc);
+    halfTurn();
+    await useStore.getState().selectSession("doc-b");
+    publishAgent("doc-a", { kind: "completed", turns: 1 });
+
+    await useStore.getState().selectSession("doc-a");
+    const state = useStore.getState();
+    expect(state.running).toBe(false);
+    expect(state.runElapsedMs).not.toBeNull();
+    expect(texts()).toBe("前半句");
+  });
+
+  it("外部 MCP 在别处起的回合：历史打底之后接上这一圈", async () => {
+    const doc = seedDocument();
+    stubTwoSessions(doc);
+    invokeResults["agent_history"] = [
+      { role: "user", content: [{ type: "text", text: "画只蝙蝠" }] },
+      { role: "assistant", content: [{ type: "text", text: "上一轮的回复" }] },
+    ];
+    // 台前在 b，a 这边从没亮过相：第一帧事件就是全部线索。
+    useStore.setState({ activeId: "doc-b", entries: [], running: false });
+    publishAgent("doc-a", { kind: "token", text: "这一圈" });
+    // 种子要等一趟 invoke 的往返，等它落地。
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    await useStore.getState().selectSession("doc-a");
+    const state = useStore.getState();
+    expect(state.running).toBe(true);
+    expect(texts()).toContain("上一轮的回复");
+    expect(texts()).toContain("这一圈");
+  });
+});
+
 describe("新建会话与模型定义改动", () => {
   /** 一条会话概览：侧栏摆的名字和画布尺寸都从它身上读。 */
   function sessionOf(width: number, height: number, label = "一号模型"): SessionInfo {

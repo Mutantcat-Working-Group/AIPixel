@@ -292,6 +292,32 @@ export interface Usage {
   output: number | null;
 }
 
+/**
+ * 后台会话的影子：切走的那一瞬间，把台前台回合的现场整份抄下来。
+ *
+ * 为什么必须有它：Rust 侧会话之间是并发的，切会话不该杀掉上一回合；而进行中的
+ * token 只活在事件流里，主循环要等轮次收尾才整段落库。没有影子的话，用户切一圈
+ * 回来只会看到一份残缺的历史重放，外加一个「不知道还在跑」的界面。
+ */
+export interface SessionShadow {
+  entries: TranscriptEntry[];
+  running: boolean;
+  /** 这一圈是我们自己起的才有起点；MCP 在外部起的回合无从得知。 */
+  runStartedAt: number | null;
+  runElapsedMs: number | null;
+  stalled: boolean;
+  usage: Usage | null;
+  pendingApproval: PendingApproval | null;
+  /** 最后一条事件的时间戳：切回来时靠它判断这一圈是不是已经卡住了。 */
+  lastEventAt: number | null;
+  /** 代次。异步读历史的路上又来了新事件，只有代次没变才合得上去。 */
+  generation: number;
+  /** 是否已经收到过收尾事件（跑完/报错/打断）。之后再来事件就是新的一圈。 */
+  sealed: boolean;
+  /** 历史种子是否已合进来。没合上之前 entries 只有折进来的这一圈。 */
+  seeded: boolean;
+}
+
 /** 待发送的附件：role + 名字 + 前端预览，发送时只带 role/media_type/base64。 */
 export interface PendingAttachment {
   key: string;
