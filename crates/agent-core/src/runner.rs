@@ -47,6 +47,13 @@ use pixel_core::decode;
 use pixel_core::document::Document;
 use pixel_core::DocPatch;
 
+/// 贴进来的精灵表切片。只有 `pixel_land_reference` 用它，但它认网格的那两套
+/// 死条件全在 pixel-core 里，并且有自己的单测——这里只负责调用。
+use pixel_core::refsheet;
+
+/// 参照图落地工具在回执里的自称。散在字面量里迟早和 tools 的那一处对不上。
+const LAND: &str = tools::LAND_REFERENCE_TOOL;
+
 /// 一次待执行的工具调用（JSON 解析失败的也排进来，让模型收到可修复的错误）。
 struct PlannedCall {
     id: String,
@@ -1586,6 +1593,10 @@ impl AgentSession {
                 text: Attachment::caption(&attachments, &plan.reference_modes),
             });
         }
+        // 附件清单另留一份。下面的 for 会把这个 Vec 消耗掉，而主循环里的
+        // `pixel_land_reference` 要按序号从同一份清单里取图：用户贴进来的图
+        // 只有这一份，不存下来，模型就只能望着画布描述它。
+        let turn_attachments = attachments.clone();
         for attachment in attachments {
             content.push(ContentBlock::Image {
                 media_type: attachment.media_type,
@@ -2244,6 +2255,11 @@ impl AgentSession {
                         } else if call.name == craft::PROMPT_TOOL {
                             // 只写下这一轮的提示词清单，不碰文档、不等模型。
                             self.run_craft(&call.input).await
+                        } else if call.name == LAND {
+                            // 把贴进来的附件落到画布上。同步的：解码、切片、
+                            // 量化都是本机计算，没有网络等待，也就不需要
+                            // until_cancelled 那层可中断包装。
+                            self.run_land_reference(&call.input, &turn_attachments)
                         } else if call.name == tools::IMAGE_GEN_TOOL {
                             // 生图要等模型回图，异步跑；await 期间绝不持有文档锁。
                             // 回图可能等上三分钟，中途点停止不能干等到超时才收：
@@ -2904,7 +2920,7 @@ impl AgentSession {
         };
         let active = self.active();
         let landed = self.with_document_mut(|doc| {
-            tools::land_generated(doc, &active, &params, &rgba, width, height)
+            tools::land_generated(doc, &active, &params.target(), &rgba, width, height)
         });
         let landed = match landed {
             Ok(l) => l,
@@ -2934,6 +2950,196 @@ impl AgentSession {
         if !image.note.trim().is_empty() {
             content.push_str(&format!("model note: {}\n", image.note.trim()));
         }
+        let grid = self.with_document(|doc| tools::active_grid(doc, &landed.layer, &landed.frame));
+        content.push_str(&grid);
+        ToolOutcome {
+            content,
+            is_error: false,
+        }
+    }
+
+    /// 把本轮附件里的某张图落到画布上。**不是异步的**：解码 + 切片 + 量化都是
+    /// 本机计算，没有网络等待，也就不需要包一层可中断等待。
+    ///
+    /// 这个工具存在的全部理由：用户贴进来的参考图要能变成「可以接着改的像素」。
+    /// 之前只有 `pixel_pixelize_image`，而它要模型手抄一整串 base64——抄不完，
+    /// 也没法挑网格里的某一格，于是「照这个画风再来一个动作」只能从零重画，
+    /// 画风必然跑偏。现在附件在 runner 手里，序号 + 切片方式 + 格号就够了。
+    fn run_land_reference(&self, input: &Value, attachments: &[Attachment]) -> ToolOutcome {
+        let params = match tools::LandReferenceParams::parse(input) {
+            Ok(p) => p,
+            Err(e) => {
+                return ToolOutcome {
+                    content: e,
+                    is_error: true,
+                }
+            }
+        };
+        // 序号是 1 起算的，和人眼在图片清单里看到的一致，所以这里减一。
+        let Some(attachment) = attachments.get(params.attachment - 1) else {
+            return ToolOutcome {
+                content: format!(
+                    "{LAND}: attachment {} is not on this message - it carries {} attached image(s). \
+                     Use a number from the 'Images attached to this message' caption, or no attachment at all.",
+                    params.attachment,
+                    attachments.len()
+                ),
+                is_error: true,
+            };
+        };
+        // 附件两种来路都收：裸 base64 + media_type（前端默认），或者干脆是个 data URL。
+        let (rgba, width, height) = if attachment.data_base64.trim_start().starts_with("data:") {
+            match decode::decode_data_url(&attachment.data_base64) {
+                Ok(v) => v,
+                Err(e) => {
+                    return ToolOutcome {
+                        content: format!("{LAND}: {e}"),
+                        is_error: true,
+                    }
+                }
+            }
+        } else {
+            let bytes = match decode::decode_base64(&attachment.data_base64) {
+                Ok(b) => b,
+                Err(e) => {
+                    return ToolOutcome {
+                        content: format!("{LAND}: could not read the attached image: {e}"),
+                        is_error: true,
+                    }
+                }
+            };
+            match decode::decode_image(&bytes, &attachment.media_type) {
+                Ok(v) => v,
+                Err(e) => {
+                    return ToolOutcome {
+                        content: format!("{LAND}: {e}"),
+                        is_error: true,
+                    }
+                }
+            }
+        };
+        // 切片。三条路：整张用、硬切、自己认。自己认不出来时不是错误——
+        // 后面按「整张用」继续，只是在回执里说清认没认出来，别让模型以为切过。
+        let grid = match params.slice {
+            tools::SliceMode::None => None,
+            tools::SliceMode::Sheet => {
+                let Some(cols) = params.cols else {
+                    return ToolOutcome {
+                        content: format!("{LAND}: slice='sheet' also needs 'cols' and 'rows'"),
+                        is_error: true,
+                    };
+                };
+                let Some(rows) = params.rows else {
+                    return ToolOutcome {
+                        content: format!("{LAND}: slice='sheet' also needs 'cols' and 'rows'"),
+                        is_error: true,
+                    };
+                };
+                match refsheet::grid_for(cols, rows, width, height) {
+                    Some(g) => Some(g),
+                    None => {
+                        return ToolOutcome {
+                            content: format!(
+                                "{LAND}: {cols}x{rows} does not cut a {width}x{height} image - \
+                                 pick cols/rows whose product is at most 4096 and nonzero"
+                            ),
+                            is_error: true,
+                        }
+                    }
+                }
+            }
+            tools::SliceMode::Auto => refsheet::detect(&rgba, width, height),
+        };
+        // 要某一格就得有网格。没有还硬要，等于让用户对着一个凭空的位置猜，
+        // 不如当场说清：要么 slice='none'，要么补 cols/rows。
+        let (bitmap, bitmap_w, bitmap_h) = match params.cell {
+            Some(index) => {
+                let Some(grid) = grid.as_ref() else {
+                    return ToolOutcome {
+                        content: format!(
+                            "{LAND}: cell {index} was asked for but no grid was found in this \
+                             {width}x{height} image, and slice='none' asks for the whole image. \
+                             Retry with slice='sheet' plus cols/rows, or drop 'cell'."
+                        ),
+                        is_error: true,
+                    };
+                };
+                match refsheet::cell_rgba(&rgba, width, height, grid, index) {
+                    Some(v) => v,
+                    None => {
+                        return ToolOutcome {
+                            content: format!(
+                                "{LAND}: {} - cell {index} does not exist in it",
+                                grid.locate(index)
+                            ),
+                            is_error: true,
+                        }
+                    }
+                }
+            }
+            // 不挑格：整张图就是一张画。slice='auto' 认出了网格也照整张落，
+            // 但回执里必须提醒一句——把一张精灵表糊上画布是最常见的翻车。
+            None => (rgba.clone(), width, height),
+        };
+        let landed = {
+            let active = self.active();
+            self.with_document_mut(|doc| {
+                tools::land_generated(doc, &active, &params.target, &bitmap, bitmap_w, bitmap_h)
+            })
+        };
+        let landed = match landed {
+            Ok(l) => l,
+            Err(e) => {
+                return ToolOutcome {
+                    content: format!("{LAND}: could not land the image: {e}"),
+                    is_error: true,
+                }
+            }
+        };
+        // 新建帧时把激活帧挪过去：后面的工具该接着这一帧画，用户看到的也对得上。
+        if params.target.spot == LandSpot::NewFrame {
+            let mut next = self.active();
+            next.frame = landed.frame.clone();
+            self.set_active(next);
+        }
+        let mut content = format!(
+            "landed attached image {n} onto layer {layer} frame {frame}: {used} color(s) used, +{added} palette color(s).\n",
+            n = params.attachment,
+            layer = landed.layer,
+            frame = landed.frame,
+            used = landed.report.colors_used,
+            added = landed.report.palette_added,
+        );
+        if let Some(grid) = grid.as_ref() {
+            content.push_str(&format!(
+                "slice: the image is a {cols}x{rows} grid ({total} cells, {cell_w}x{cell_h} each).\n",
+                cols = grid.cols,
+                rows = grid.rows,
+                total = grid.len(),
+                cell_w = grid.cell_w,
+                cell_h = grid.cell_h,
+            ));
+            if let Some(index) = params.cell {
+                content.push_str(&format!("base drawn from {}.\n", grid.locate(index)));
+            } else {
+                content.push_str(
+                    "no cell was named, so the WHOLE sheet went on as one picture - that is \
+                     almost never what you want. Call this tool again with cell=<0-based index>.\n",
+                );
+            }
+        } else if params.cell.is_some() {
+            // 到不了这里：上面已经为「要格却没网格」报过错。留着是对将来改结构的人兜底。
+            content.push_str("slice: no grid in this image; the whole picture was landed.\n");
+        }
+        // 这句是整条链的落点：落完必须接着改，不许推倒重画。少了它，模型会把
+        // 落好的底图当成「画坏了」，下一句就 clear() 从零再来一遍。
+        content.push_str(&format!(
+            "Those pixels are now the working base on {layer}/{frame}: refine them in place with \
+             pixel_run_shader or pixel_apply_operations. NEVER clear() or overwrite that frame to \
+             redraw the subject from nothing - the user's art style is in the pixels you just landed.\n",
+            layer = landed.layer,
+            frame = landed.frame,
+        ));
         let grid = self.with_document(|doc| tools::active_grid(doc, &landed.layer, &landed.frame));
         content.push_str(&grid);
         ToolOutcome {
@@ -6391,5 +6597,172 @@ mod tests {
                 "纯问答轮次不该带准则「{title}」"
             );
         }
+    }
+
+    /// 一张四色四宫格的文档，随后渲染成 PNG 当成「用户贴进来的图」。
+    /// 左上红、右上绿、左下蓝、右下白：四格同尺寸，正好当精灵表切，
+    /// 也正好当一整张画整张落。测试要的是像素本身，不是内容。
+    fn quad_doc(width: u32, height: u32) -> Document {
+        let mut doc = Document::new("quad", width, height).unwrap();
+        let quads = [
+            pixel_core::Rgba::rgb(255, 0, 0),
+            pixel_core::Rgba::rgb(0, 255, 0),
+            pixel_core::Rgba::rgb(0, 0, 255),
+            pixel_core::Rgba::rgb(255, 255, 255),
+        ];
+        let mut indices = vec![0u16; (width * height) as usize];
+        for y in 0..height {
+            for x in 0..width {
+                let col = usize::from(x >= width / 2);
+                let row = usize::from(y >= height / 2);
+                indices[(y * width + x) as usize] = doc.intern_color(quads[row * 2 + col]).unwrap();
+            }
+        }
+        if let Some(cel) = doc.cel_mut("L0", "F0") {
+            cel.indices.copy_from_slice(&indices);
+        }
+        doc
+    }
+
+    /// 一份文档包成附件：PNG 字节 + 不带 data: 前缀的 base64，和前端默认发来的一样。
+    fn attachment_of(doc: &Document) -> Attachment {
+        use super::super::models::AttachmentRole;
+        let bytes = pixel_core::png::document_to_png(doc).expect("PNG 编码得动");
+        Attachment {
+            role: AttachmentRole::Reference,
+            media_type: "image/png".into(),
+            data_base64: pixel_core::png::base64_encode(&bytes),
+        }
+    }
+
+    /// 画布上真正落住的像素数：索引 0 是透明，其余按 1 起算指向调色板。
+    ///
+    /// 这里必须减一去查调色板：cel 里存的是「1 起算」的档位，`palette[0]`
+    /// 对应 cel 索引 1。不减的话索引恰好顶到调色板长度（第 N 种颜色）时
+    /// 查出来是 None，明明落好的像素会被数成透明。
+    fn opaque_pixels(s: &AgentSession) -> usize {
+        s.with_document(|doc| {
+            doc.cel("L0", "F0")
+                .map(|cel| {
+                    cel.indices
+                        .iter()
+                        .filter(|&&i| {
+                            i > 0 && doc.palette.get((i - 1) as usize).is_some_and(|c| c.a > 0)
+                        })
+                        .count()
+                })
+                .unwrap_or(0)
+        })
+    }
+
+    /// 报了个清单里没有的附件号：必须报错，而不是默默把别的图落上去。
+    ///
+    /// 模型把号报错是常事（数成 0 起算、把画布快照也算进去）。这时候把第一张
+    /// 塞上去，模型会拿一个错位的局部当底图改，画得再好也对不上用户贴的图。
+    #[test]
+    fn an_attachment_number_off_the_list_comes_back_fixable() {
+        let s = session();
+        let attached = attachment_of(&quad_doc(8, 8));
+        let out = s.run_land_reference(&json!({"attachment": 3}), std::slice::from_ref(&attached));
+
+        assert!(out.is_error, "清单外的号不能照办：{}", out.content);
+        assert!(
+            out.content.contains("attachment 3 is not on this message"),
+            "报错要点名模型报的那个号：{}",
+            out.content
+        );
+        // 这条上一共几张图必须说清：模型据此改成对的号，比笼统一句「参数错了」有用。
+        assert!(
+            out.content.contains("carries 1 attached image"),
+            "报错要说清这一条上有几张图：{}",
+            out.content
+        );
+    }
+
+    /// 贴进来的一张整画，落地成真的像素——后续才有东西可改。
+    ///
+    /// 以前只有 `pixel_pixelize_image`，要模型手抄一整串 base64，抄不完，
+    /// 于是「照这个画风改一改」只能从零重画。这条守住的正是「像素在画布上」。
+    #[test]
+    fn a_pasted_picture_lands_as_real_pixels_on_the_active_cel() {
+        let s = session();
+        let attached = attachment_of(&quad_doc(8, 8));
+        let out = s.run_land_reference(&json!({"attachment": 1, "slice": "none"}), &[attached]);
+
+        assert!(!out.is_error, "{}", out.content);
+        assert!(
+            out.content
+                .contains("landed attached image 1 onto layer L0 frame F0"),
+            "回执要点明落在哪一层哪一帧：{}",
+            out.content
+        );
+        // 这句是整条链的落点：落完得接着改，不许推倒重画。
+        assert!(
+            out.content.contains("working base"),
+            "回执必须嘱咐「这是工作底图，接着改」：{}",
+            out.content
+        );
+        assert_eq!(opaque_pixels(&s), 64, "8x8 整张落完，一格都不该剩透明");
+        let colors = s.with_document(|doc| doc.palette.len());
+        assert!(colors >= 4, "四种颜色都该进文档调色板，实际 {colors}");
+        // 整图落地不新增帧：「改这一张」不是「再加一帧」。
+        let frames = s.with_document(|doc| doc.frames.len());
+        assert_eq!(frames, 1);
+    }
+
+    /// 网格图按格落地：切的是左下那一格，尺寸还是它自己的。
+    ///
+    /// 这是「照行走图改一个动作」的整条链：先切片、按用户要的动作挑格、
+    /// 再在那一格上改。尺寸跟着格子走，不拉伸填满画布——拉过的格子比例全错。
+    #[test]
+    fn a_sheet_cell_lands_at_its_own_size() {
+        let s = session();
+        let attached = attachment_of(&quad_doc(16, 16));
+        let out = s.run_land_reference(
+            &json!({"attachment": 1, "slice": "sheet", "cols": 2, "rows": 2, "cell": 2}),
+            &[attached],
+        );
+
+        assert!(!out.is_error, "{}", out.content);
+        assert!(
+            out.content.contains("2x2 grid (4 cells, 8x8 each)"),
+            "回执要交代切成什么样：{}",
+            out.content
+        );
+        // 左下那一格：行 1 列 0。模型据此知道自己拿的是哪一格，改完也知道改的是谁。
+        assert!(
+            out.content.contains("cell 2 (row 1, column 0)"),
+            "回执要点名第几行第几列：{}",
+            out.content
+        );
+        // 那格一片蓝：调色板里得有蓝，画布上得有蓝像素。绿和红不该跟进来。
+        let palette = s.with_document(|doc| doc.palette.clone());
+        assert!(
+            palette.iter().any(|c| c.b > 200 && c.r < 60 && c.g < 60),
+            "左下格是蓝的，调色板里却没蓝：{palette:?}"
+        );
+        assert!(
+            !palette.iter().any(|c| c.g > 200 && c.r < 60),
+            "只落一格，不该带进别的格"
+        );
+        assert_eq!(opaque_pixels(&s), 64, "8x8 的一格正好铺满 8x8 画布");
+    }
+
+    /// 认不出网格还要某一格，宁可报错也不猜。
+    ///
+    /// 猜的代价是模型拿一个错位的局部当底图，用户看见的是「我贴的画被切碎了」。
+    #[test]
+    fn asking_for_a_cell_of_a_picture_with_no_grid_is_refused() {
+        let s = session();
+        let attached = attachment_of(&quad_doc(8, 8));
+        let out = s.run_land_reference(&json!({"attachment": 1, "cell": 3}), &[attached]);
+
+        assert!(out.is_error, "没网格就不能切：{}", out.content);
+        assert!(
+            out.content.contains("no grid was found"),
+            "报错要说清是没找到网格，并给出补 cols/rows 这条路：{}",
+            out.content
+        );
+        assert_eq!(opaque_pixels(&s), 0, "报错之后画布一个像素都不该动");
     }
 }

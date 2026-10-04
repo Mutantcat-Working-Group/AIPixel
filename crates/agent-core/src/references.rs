@@ -188,7 +188,10 @@ fn negated(haystack: &str, at: usize) -> bool {
 pub fn rules(mode: ReferenceMode) -> &'static str {
     match mode {
         ReferenceMode::Style => "take ONLY its palette, ramps, light direction, outline and dithering technique; the subject, composition, pose and proportions must come from the user's words, never from this image",
-        ReferenceMode::Full => "reproduce its subject, composition, proportions and palette as closely as the canvas resolution allows, simplified into clean pixel art, and invent nothing that is not in the image",
+        // 完全参照比「画得像」多一条硬要求：像素得真的落到画布上。只凭描述重画
+        // 同一张图必然偏离用户自己的画风，而用户贴图就是为了钉住它——所以这里
+        // 直接把落地工具和切片方式写进每张图的约束里，模型不必回头翻系统提示词。
+        ReferenceMode::Full => "reproduce its subject, composition, proportions and palette as closely as the canvas resolution allows, simplified into clean pixel art, and invent nothing that is not in the image: land it first with pixel_land_reference (attachment=<n>, slice='none' for one picture, slice='auto' plus cell=<0-based index> for one cell of a grid sheet whose pose matches the request), then refine those landed pixels in place - never clear that frame and never redraw the subject from the user's words instead",
     }
 }
 

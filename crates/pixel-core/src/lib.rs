@@ -23,6 +23,7 @@ pub mod paperdoll;
 pub mod patch;
 pub mod pixelize;
 pub mod png;
+pub mod refsheet;
 pub mod rle;
 pub mod shader;
 pub mod sheet;

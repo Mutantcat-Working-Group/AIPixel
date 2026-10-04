@@ -158,6 +158,26 @@ pub const SHADER_TOOL: &str = "pixel_run_shader";
 /// 搭台动作和真正的画像素全走这一个工具，所以抽出来给提示词硬闸认名字。
 pub const APPLY_TOOL: &str = "pixel_apply_operations";
 
+/// 参照图落地工具名。把本轮附件里的某张图（必要时先切片）量化到画布上。
+/// 和生图一样要 runner 手里的附件清单，所以执行归主循环分流，不经 execute。
+pub const LAND_REFERENCE_TOOL: &str = "pixel_land_reference";
+
+/// `pixel_land_reference` 的工具描述。要点全在这儿：什么时候该用它、
+/// 三种切片方式怎么选、格号怎么数。模型最常犯的错是把一整张精灵表糊上画布，
+/// 或者干脆从零重画——所以「别从零重画」这句必须写在描述里。
+const LAND_REFERENCE_DESCRIPTION: &str = r##"Land ONE of the images attached to this turn onto the canvas grid: it is decoded, optionally cut into cells, and quantized onto the active cel (or a new frame) so that real pixels are there to edit. This is the tool that turns a pasted picture into a WORKING BASE - the drawing afterwards then modifies those pixels in place.
+
+WHEN TO USE IT - whenever the attachment has to BE on the canvas: a reference image in mode "full" (the image IS the subject), a sprite sheet whose one cell is the base to change, a cartoon the user wants cleaned up, or a style sample the user asked to have traced first. For a style-only reference you may instead skip this tool and draw from the user's words - but never redraw a full reference or a pasted sheet from nothing: a from-scratch redraw of the same subject drifts away from the user's own art style, while the landed cell keeps it exactly.
+
+SLICING (the pasted sheet almost never belongs on the canvas as one picture):
+  slice="auto"  (default) - look for a grid in the image. Two checks, both strict: transparent gaps between sprites (Aseprite exports, a hand-assembled row of frames), or a standard sheet layout that divides exactly (RPG Maker 4 rows x 3 or 4 columns, 4x4, 4x3, one row of frames, ...) where every cell has content at a similar fill. If neither check is certain it is refused rather than guessed, and you may retry with slice="sheet" and explicit cols/rows.
+  slice="none"  - the whole image is one picture (a single character portrait, a photo to trace).
+  slice="sheet" - force a cols x rows cut; pass both. Use it for a gapless sheet whose layout the detector does not know.
+Then pass cell=<0-based index, row-major from the top-left> to land just that cell. Omit cell to land the whole image (or the whole sheet when slicing found nothing). Cell size is taken from the image, so a cell lands at its own pixel size - never stretch a 32x32 cell to a 64x64 canvas to "fill" it; align it with canvas.cx / canvas.cy instead.
+
+AFTER LANDING the tool result names the layer and frame that now hold the pixels and shows the grid. Continue from there: refine with pixel_run_shader / pixel_apply_operations on THAT frame, never clear() it and never rebuild the subject elsewhere. For a sheet, land the cell matching the pose, direction or action the user asked for, then edit that cell; repeat the call for other cells when several frames are wanted (spot="new_frame").
+"##;
+
 #[derive(Debug, Clone)]
 pub struct ToolOutcome {
     pub content: String,
@@ -329,6 +349,31 @@ pub fn specs() -> Vec<ToolSpec> {
                 "required": ["prompt"]
             }),
         },
+        ToolSpec {
+            name: LAND_REFERENCE_TOOL.into(),
+            description: LAND_REFERENCE_DESCRIPTION.into(),
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "attachment": {"type": "integer", "minimum": 1, "description": "which attached image, 1-based as listed in the 'Images attached to this message' caption"},
+                    "slice": {"type": "string", "enum": ["auto","none","sheet"], "description": "auto = detect a grid in the image; none = one whole picture; sheet = force a cols x rows cut"},
+                    "cols": {"type": "integer", "minimum": 1, "maximum": 64, "description": "slice='sheet' only: how many cells across"},
+                    "rows": {"type": "integer", "minimum": 1, "maximum": 64, "description": "slice='sheet' only: how many cells down"},
+                    "cell": {"type": "integer", "minimum": 0, "description": "0-based cell to land, row-major from the top-left; omit to land the whole image"},
+                    "spot": {"type": "string", "enum": ["active_cel","new_frame"], "description": "overwrite the active cel (default) or land on a new_frame"},
+                    "layer": {"type": "string"},
+                    "frame": {"type": "string", "description": "target cel for active_cel, or the anchor a new_frame is inserted after"},
+                    "duration_ms": {"type": "integer", "description": "duration stamped on a new_frame"},
+                    "max_colors": {"type": "integer", "minimum": 2, "maximum": 256},
+                    "dither": {"type": "boolean"},
+                    "expand_palette": {"type": "boolean"},
+                    "alpha_threshold": {"type": "integer", "minimum": 0, "maximum": 255},
+                    "snap_tolerance": {"type": "integer", "minimum": 0, "maximum": 128},
+                    "fit": {"type": "string", "enum": ["contain","stretch"]}
+                },
+                "required": ["attachment"]
+            }),
+        },
         plan::spec(),
         craft::spec(),
     ]
@@ -351,6 +396,11 @@ pub fn execute(
         // execute，也回一句能听懂的话，而不是「unknown tool」。
         IMAGE_GEN_TOOL => err(format!(
             "{IMAGE_GEN_TOOL} runs asynchronously in the agent loop and cannot run inside tools::execute"
+        )),
+        // 参照图落地的位图在本轮附件里，只有主循环握得住；工具层看不见附件。
+        // 落到这里只说明有人绕过了 runner 直接调 execute。
+        LAND_REFERENCE_TOOL => err(format!(
+            "{LAND_REFERENCE_TOOL} runs in the agent loop, where this turn's attached images live"
         )),
         // 同理：本轮分流归 runner，它手里握着这一轮的附件清单和分流表，
         // 工具层看不见。落到这里只说明有人绕过了 runner 直接调 execute。
@@ -752,6 +802,29 @@ impl ImageGenToolParams {
             opts,
         })
     }
+
+    /// 抽出走落点的那一部分。生图和「把贴进来的参考图落到画布上」共用它：
+    /// 两条路只差位图从哪来，落在活跃 cel 还是新帧、量化给多少色，全一样。
+    /// 抽出来是免得参照图落地为了复用，还得伪造一个 prompt 字段。
+    pub fn target(&self) -> LandTarget {
+        LandTarget {
+            layer: self.layer.clone(),
+            frame: self.frame.clone(),
+            spot: self.spot,
+            duration_ms: self.duration_ms,
+            opts: self.opts.clone(),
+        }
+    }
+}
+
+/// 一张位图的落点与量化选项。位图是谁拿来的不重要，重要的是落在哪、怎么量化。
+#[derive(Debug, Clone)]
+pub struct LandTarget {
+    pub layer: Option<String>,
+    pub frame: Option<String>,
+    pub spot: LandSpot,
+    pub duration_ms: u32,
+    pub opts: PixelizeOptions,
 }
 
 /// 生成图落点与量化统计，回给主循环拼摘要、刷新画布。
@@ -762,31 +835,160 @@ pub struct GeneratedLand {
     pub report: pixelize::PixelizeReport,
 }
 
+/// 贴进来的图怎么切。认不出来的版式宁可报错也不猜：猜错的代价是模型拿一个
+/// 错位的局部当底图，画得再好也对不上用户贴的那张图。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SliceMode {
+    /// 先自己找网格，找不到就整张用。
+    Auto,
+    /// 整张图当一个画面。
+    None,
+    /// 按 cols x rows 硬切，模型明说了才这么干。
+    Sheet,
+}
+
+impl SliceMode {
+    /// 从入参里认切片方式。认不出的当 auto：那是三种里最不容易出事的一种
+    /// （整张用而不是硬切），比报错更省一轮来回。
+    pub fn parse(raw: Option<&str>) -> Self {
+        match raw.map(|s| s.trim().to_ascii_lowercase()) {
+            Some(s) if s == "none" || s == "whole" || s == "single" => SliceMode::None,
+            Some(s) if s == "sheet" || s == "grid" || s == "forced" => SliceMode::Sheet,
+            _ => SliceMode::Auto,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SliceMode::Auto => "auto",
+            SliceMode::None => "none",
+            SliceMode::Sheet => "sheet",
+        }
+    }
+}
+
+/// `pixel_land_reference` 的入参。位图本身不进来：模型只指「第几张图、怎么切、
+/// 第几格、落哪」，剩下的 Rust 做。这也正是它和 `pixel_pixelize_image` 的分工——
+/// 后者要模型手抄 base64，抄一长串 PNG 等于白烧一个输出预算。
+#[derive(Debug, Clone)]
+pub struct LandReferenceParams {
+    /// 1 起算的附件序号，和人眼在清单里看到的一致。
+    pub attachment: usize,
+    pub slice: SliceMode,
+    pub cols: Option<u32>,
+    pub rows: Option<u32>,
+    pub cell: Option<u32>,
+    pub target: LandTarget,
+}
+
+impl LandReferenceParams {
+    /// 从工具入参解析。量化选项和生图工具同一套解析，行为必须一致。
+    pub fn parse(input: &Value) -> Result<Self, String> {
+        let attachment = input
+            .get("attachment")
+            .and_then(|v| v.as_u64())
+            .filter(|v| *v >= 1)
+            .map(|v| v as usize)
+            .ok_or_else(|| {
+                format!("{LAND_REFERENCE_TOOL}: needs 'attachment' (1-based index of an attached image)")
+            })?;
+        let slice = SliceMode::parse(input.get("slice").and_then(|s| s.as_str()));
+        let cols = input
+            .get("cols")
+            .and_then(|v| v.as_u64())
+            .map(|v| v.clamp(1, 64) as u32);
+        let rows = input
+            .get("rows")
+            .and_then(|v| v.as_u64())
+            .map(|v| v.clamp(1, 64) as u32);
+        if slice == SliceMode::Sheet && (cols.is_none() || rows.is_none()) {
+            return Err(format!(
+                "{LAND_REFERENCE_TOOL}: slice='sheet' also needs 'cols' and 'rows'"
+            ));
+        }
+        let cell = input
+            .get("cell")
+            .and_then(|v| v.as_u64())
+            .map(|v| v.clamp(0, u32::MAX as u64) as u32);
+        let mut opts = PixelizeOptions::default();
+        if let Some(v) = input.get("max_colors").and_then(|v| v.as_u64()) {
+            opts.max_colors = (v as usize).clamp(2, 256);
+        }
+        if let Some(v) = input.get("dither").and_then(|v| v.as_bool()) {
+            opts.dither = v;
+        }
+        if let Some(v) = input.get("snap_tolerance").and_then(|v| v.as_u64()) {
+            opts.snap_tolerance = (v as u32).clamp(0, 128);
+        }
+        if let Some(v) = input.get("expand_palette").and_then(|v| v.as_bool()) {
+            opts.expand_palette = v;
+        }
+        if let Some(v) = input.get("alpha_threshold").and_then(|v| v.as_u64()) {
+            opts.alpha_threshold = v.clamp(0, 255) as u8;
+        }
+        if input.get("fit").and_then(|s| s.as_str()) == Some("stretch") {
+            opts.fit = FitMode::Stretch;
+        }
+        let field = |key: &str| -> Option<String> {
+            input
+                .get(key)
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+        };
+        Ok(LandReferenceParams {
+            attachment,
+            slice,
+            cols,
+            rows,
+            cell,
+            target: LandTarget {
+                layer: field("layer"),
+                frame: field("frame"),
+                spot: match input.get("spot").and_then(|s| s.as_str()) {
+                    Some("new_frame") => LandSpot::NewFrame,
+                    _ => LandSpot::ActiveCel,
+                },
+                duration_ms: input
+                    .get("duration_ms")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v.clamp(1, 60_000) as u32)
+                    .unwrap_or(83),
+                opts,
+            },
+        })
+    }
+}
+
 /// 把一张生成的位图落到文档上。ActiveCel 直接覆盖目标 cel；
 /// NewFrame 先插一帧再落。返回落点与新帧 id，供上层挪激活帧。
 pub fn land_generated(
     doc: &mut Document,
     active: &ActiveContext,
-    params: &ImageGenToolParams,
+    target: &LandTarget,
     rgba: &[u8],
     width: u32,
     height: u32,
 ) -> Result<GeneratedLand, String> {
-    let layer = params.layer.clone().unwrap_or_else(|| active.layer.clone());
-    let frame = match params.spot {
-        LandSpot::ActiveCel => params.frame.clone().unwrap_or_else(|| active.frame.clone()),
+    let layer = target.layer.clone().unwrap_or_else(|| active.layer.clone());
+    let frame = match target.spot {
+        LandSpot::ActiveCel => target.frame.clone().unwrap_or_else(|| active.frame.clone()),
         LandSpot::NewFrame => {
-            let anchor = params.frame.clone().unwrap_or_else(|| active.frame.clone());
+            let anchor = target.frame.clone().unwrap_or_else(|| active.frame.clone());
             let position = doc
                 .frames
                 .iter()
                 .position(|f| f.id == anchor)
                 .ok_or_else(|| format!("unknown frame: {anchor}"))?;
+            // 时长夹在 1..60000：0ms 的帧前端的播放器会当成 0 立刻重入，
+            // 一个 tick 套一个 tick，主线程被吃满，界面看着就是卡死。
+            let duration_ms = target.duration_ms.clamp(1, 60_000);
             ops::apply_batch(
                 doc,
                 &[PixelOperation::CreateFrame {
                     after: Some(anchor),
-                    duration_ms: params.duration_ms.clamp(1, 60_000),
+                    duration_ms,
                     id: None,
                 }],
             )
@@ -800,11 +1002,11 @@ pub fn land_generated(
         }
     };
     // ActiveCel 覆盖前先确认 cel 存在，错误里直接点名，让模型改对帧 id。
-    if params.spot == LandSpot::ActiveCel && doc.cel(&layer, &frame).is_none() {
+    if target.spot == LandSpot::ActiveCel && doc.cel(&layer, &frame).is_none() {
         return Err(format!("unknown cel: {layer}/{frame}"));
     }
     let report =
-        pixelize::pixelize_into_cel(doc, &layer, &frame, rgba, width, height, &params.opts)?;
+        pixelize::pixelize_into_cel(doc, &layer, &frame, rgba, width, height, &target.opts)?;
     Ok(GeneratedLand {
         layer,
         frame,
@@ -1387,6 +1589,8 @@ mod tests {
                     | "pixel_pixelize_image"
                     // 生图由 runner 异步分流，execute 里只有兜底分支，规格仍归这里发。
                     | IMAGE_GEN_TOOL
+                    // 参照图落地同样归 runner：附件在它手里。
+                    | LAND_REFERENCE_TOOL
                     // 本轮分流归 runner：它手里有这一轮的附件清单和分流表。
                     | PLAN_TOOL
                     // 提示词清单同样归 runner：它要把它绑到这一轮的每一次生图上。
@@ -1394,7 +1598,7 @@ mod tests {
             );
             assert!(handled, "{} is described but not dispatched", spec.name);
         }
-        assert_eq!(specs().len(), 8);
+        assert_eq!(specs().len(), 9);
     }
 
     #[test]
@@ -1509,7 +1713,8 @@ mod tests {
     fn generated_image_lands_on_the_active_cel_without_adding_a_frame() {
         let mut doc = Document::new("test", 16, 16).expect("16x16");
         let params = ImageGenToolParams::parse(&json!({"prompt": "a red slime"})).expect("parses");
-        let land = land_generated(&mut doc, &active(), &params, &quad_rgba(), 2, 2).expect("lands");
+        let land = land_generated(&mut doc, &active(), &params.target(), &quad_rgba(), 2, 2)
+            .expect("lands");
         assert_eq!(land.layer, "L0");
         assert_eq!(land.frame, "F0");
         assert_eq!(doc.frames.len(), 1, "active_cel must not spawn a frame");
@@ -1526,7 +1731,8 @@ mod tests {
             "duration_ms": 120,
         }))
         .expect("parses");
-        let land = land_generated(&mut doc, &active(), &params, &quad_rgba(), 2, 2).expect("lands");
+        let land = land_generated(&mut doc, &active(), &params.target(), &quad_rgba(), 2, 2)
+            .expect("lands");
         assert_eq!(land.frame, "F1");
         assert_eq!(doc.frames.len(), 2);
         assert_eq!(doc.frames[1].id, "F1");
@@ -1541,7 +1747,7 @@ mod tests {
         let mut doc = Document::new("test", 16, 16).expect("16x16");
         let params =
             ImageGenToolParams::parse(&json!({"prompt": "x", "frame": "F9"})).expect("parses");
-        let e = land_generated(&mut doc, &active(), &params, &quad_rgba(), 1, 1)
+        let e = land_generated(&mut doc, &active(), &params.target(), &quad_rgba(), 1, 1)
             .expect_err("F9 does not exist");
         assert!(e.contains("F9"), "{}", e);
     }
