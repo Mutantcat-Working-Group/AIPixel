@@ -345,7 +345,11 @@ export default function DocumentPanel() {
     };
     const tick = () => {
       show(index);
-      const hold = Math.max(16, frames[index].duration_ms);
+      // 时长是文档字段，缺失/非法时 setTimeout(fn, NaN) 会当成 0 立刻重入：
+      // 一个 tick 套一个 tick，主线程被播放循环吃满，界面看着就是卡死。
+      // 兜底取 83ms（≈12FPS，像素动画的通常节拍），并给帧号加一道越界守卫。
+      const raw = frames[index]?.duration_ms;
+      const hold = Number.isFinite(raw) ? Math.max(16, Math.floor(raw as number)) : 83;
       timer = window.setTimeout(() => {
         index = (index + 1) % frames.length;
         tick();
@@ -384,7 +388,13 @@ export default function DocumentPanel() {
     if (!node || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver((entries) => {
       const width = entries[0]?.contentRect.width ?? 0;
-      if (width > 0) setBudget(Math.floor(width));
+      // 非有限值一概不认（回授里有 NaN 会一路传到倍率计算上），2px 内的抖动也放过：
+      // 那是同一次布局的回授，不是用户真的拖了侧栏，逐个 setState 会和滚动条打架。
+      setBudget((prev) => {
+        const next = Math.floor(width);
+        if (!Number.isFinite(next) || next <= 0) return prev;
+        return Math.abs(next - prev) <= 2 ? prev : next;
+      });
     });
     observer.observe(node);
     return () => observer.disconnect();
