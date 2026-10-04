@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agent-core"
-version = "1.0.20261014"
+version = "1.0.20261015"
 dependencies = [
  "async-trait",
  "bytes",
@@ -35,7 +35,7 @@ dependencies = [
 
 [[package]]
 name = "aipixel"
-version = "1.0.20261014"
+version = "1.0.20261015"
 dependencies = [
  "agent-core",
  "futures-util",
@@ -2741,7 +2741,7 @@ dependencies = [
 
 [[package]]
 name = "pixel-core"
-version = "1.0.20261014"
+version = "1.0.20261015"
 dependencies = [
  "flate2",
  "image",
