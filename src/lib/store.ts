@@ -45,7 +45,7 @@ import type {
   PixelizeParams,
   PendingAttachment,
   PendingApproval,
- PermissionMode,
+  PermissionMode,
   Protocol,
   PixelDocument,
   PixelizeOptions,
@@ -223,14 +223,14 @@ interface StoreState extends DocumentSnapshot, WorkflowState, BatchState {
    *  能叠几条（上限 `presets.ts` 的 MAX_STACKED_PRESETS）：细节这件事是乘法，
    *  「写实渲染」管整张图按什么规矩收尾，「微细结构」管最后一两个像素放哪里，
    *  两条一起才凑得成一张写实的图。 */
-presetOverrides: string[];
-/** 切走后仍在跑的会话现场。键是会话 id，只在「后台确实有回合」时才存在。
- *
- * 会话之间在 Rust 是并发的，切走不打断；而进行中的 token 只活在事件流里，
- * 主循环要等轮次收尾才整段落库。影子就是那一段的暂存区。 */
-sessionShadows: Record<string, SessionShadow>;
-/** 新建会话弹窗开着。开机一条会话都没有时弹一次，用户关掉就再不自动弹。 */
-createPromptOpen: boolean;
+  presetOverrides: string[];
+  /** 切走后仍在跑的会话现场。键是会话 id，只在「后台确实有回合」时才存在。
+   *
+   * 会话之间在 Rust 是并发的，切走不打断；而进行中的 token 只活在事件流里，
+   * 主循环要等轮次收尾才整段落库。影子就是那一段的暂存区。 */
+  sessionShadows: Record<string, SessionShadow>;
+  /** 新建会话弹窗开着。开机一条会话都没有时弹一次，用户关掉就再不自动弹。 */
+  createPromptOpen: boolean;
   /** 工具块展开状态，按工具调用 id 记。跨会话重载也不丢：用户摊开的 JSON 不该
   * 因为切走再回来就自己合上。 */
   /** 当前会话的 .aip 落盘路径。null = 还没存过，关窗时要给用户一个「存哪儿」。 */
@@ -242,7 +242,7 @@ createPromptOpen: boolean;
   /** 关窗问询弹窗开着。true = Rust 把窗口按住了，就等一个答复。 */
   closeGuardOpen: boolean;
   toolOpen: Record<string, boolean>;
-}
+  }
 
 export interface StoreActions {
   setStyleOverride: (style: string | null) => void;
@@ -378,9 +378,8 @@ export interface StoreActions {
   /** 换配色范围：整幅按就近色重映射进新调色板，画面留住、颜色归队。 */
   setPaletteColors: (colors: string[]) => Promise<boolean>;
   /** 从零起一套；不给名字就沿用 Rust 的兜底命名。 */
-    createPalette: (name: string, colors: string[], layerId?: string) => Promise<void>;
+  createPalette: (name: string, colors: string[], layerId?: string) => Promise<void>;
   /** 删掉一套自定义范围。内置的、还被引用的，Rust 会拒。 */
-  /** 删一套配色范围。有层在引用时带 fallback：那些层先改指过去再删。 */
   deletePalette: (id: string, fallback?: string | null) => Promise<void>;
   renamePalette: (id: string, name: string) => Promise<void>;
   /** 往范围里添一个颜色。已经有这个色就当无事发生。 */
@@ -1231,10 +1230,10 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       // 对话尾巴，document_updated 才不会把新画布盖成旧画面，收尾事件也不
       // 会替新回合封口。必须早于 touchStallWatch——旧事件照样算「链路活着」
       // 的话，新回合真卡死就被它掩盖过去了。
-      if (sessionId !== getState().activeId) {
-        // 但绝不是扔掉。会话之间是并发的：切走只是不给它镜头，不是给它判死刑。
-        // 折进影子，用户切回来时这一圈的 token、工具块、收尾一样都不少。
-        foldBackgroundEvent(sessionId, raw);
+    if (sessionId !== getState().activeId) {
+      // 但绝不是扔掉。会话之间是并发的：切走只是不给它镜头，不是给它判死刑。
+      // 折进影子，用户切回来时这一圈的 token、工具块、收尾一样都不少。
+      foldBackgroundEvent(sessionId, raw);
         return;
       }
       const state = getState();
@@ -1317,7 +1316,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     authoritative = false,
     keepEntries = false,
   ) {
-   const seq = (loadSeq += 1);
+    const seq = (loadSeq += 1);
     // 换会话就把工作流面板的中间产物倒掉：上一条会话的提示词不属于这一条。
     setState({
       refined: null,
@@ -1328,10 +1327,13 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
       outcomeError: null,
       catalogReady: false,
       refinedDraft: "",
-      // 撤销栈是当前会话的笔迹，换会话不跟着走；挂着的审批同理。
+      // 撤销栈是当前会话的笔迹，换会话不跟着走。
       undoStack: [],
       redoStack: [],
-      pendingApproval: null,
+      // 有影子的这一条另说：后台会话也会举手要审批（foldBackgroundEvent 里
+      // 接），selectSession 刚把它恢复出来，这里再抹一次，用户就永远看不到
+      // 那张审批票，回合挂在那儿谁也不动。和 entries 一样，影子说了算。
+      pendingApproval: keepEntries ? getState().pendingApproval : null,
       pendingFrameIndex: null,
       closeGuardOpen: false,
     });
@@ -1513,7 +1515,7 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
           // 主动把新建弹窗递上去。关过一次就把这个标记关掉，之后再不打扰。
           if (!readCreatePromptDismissed()) {
             setState({ createPromptOpen: true });
-         }
+          }
         }
         setState({ booted: true });
       })();
@@ -1615,22 +1617,22 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
             runElapsedMs: null,
             stalled: false,
             usage: null,
-          lastQuery: null,
-          attachments: [],
-          pngUrl: null,
-          revision: 0,
-          pngRevision: -1,
-          pngFrame: -1,
-          frameIndex: 0,
-          pendingFrameIndex: null,
-          busy: false,
-          undoStack: [],
-          redoStack: [],
-          pendingApproval: null,
-        });
-        // running 一收，静默计时也得当场撤。留着的话它过半小时自己响，
-        // 在没有会话的空界面上弹一条「模型好像卡住了」。
-        clearStallWatch();
+            lastQuery: null,
+            attachments: [],
+            pngUrl: null,
+            revision: 0,
+            pngRevision: -1,
+            pngFrame: -1,
+            frameIndex: 0,
+            pendingFrameIndex: null,
+            busy: false,
+            undoStack: [],
+            redoStack: [],
+            pendingApproval: null,
+          });
+          // running 一收，静默计时也得当场撤。留着的话它过半小时自己响，
+          // 在没有会话的空界面上弹一条「模型好像卡住了」。
+          clearStallWatch();
         }
       }
       // 影子跟着会话一起走。放在最后：上面切走的那一步会把台前现场
@@ -1735,26 +1737,26 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         notice: null,
       });
       // 从这一刻起盯着静默：路上一个事件都不来的话，界面上会出现「可能卡住了」。
-    touchStallWatch();
-    // 说出去的话也是工程的一部分：.aip 只有文档，但用户嘴里「这个会话」
-    // 是连聊天记录一起算的。发过一句就记上待存，关窗时才问得到人。
-    getState().markProjectDirty();
-    try {
-      // 风格锁定跟着这一句走：用户在输入区钉了画风，模型这一回合就得按它画，
-      // 话里没提也不能改主意。
-      // 预设同理，且是几条一起走：点了「写实渲染 + 微细结构 + 闭塞接触」，
-      // 这一句就照这三条规矩收尾。两者都是「这一句的偏好」，一起送过去，
-      // Rust 那侧按先让位、再顶替的顺序拼进提示词——画风在时色数听画风的，
-      // 其余收尾规矩照常上路；与画风 id 重合的那条由画风段顶替，不发两遍。
-      await bridge.sendMessage(
-        id,
-        trimmed,
-        payload,
-        undefined,
-        getState().styleOverride,
-        getState().presetOverrides,
-      );
-    } catch (error) {
+      touchStallWatch();
+      // 说出去的话也是工程的一部分：.aip 只有文档，但用户嘴里「这个会话」
+      // 是连聊天记录一起算的。发过一句就记上待存，关窗时才问得到人。
+      getState().markProjectDirty();
+      try {
+        // 风格锁定跟着这一句走：用户在输入区钉了画风，模型这一回合就得按它画，
+        // 话里没提也不能改主意。
+        // 预设同理，且是几条一起走：点了「写实渲染 + 微细结构 + 闭塞接触」，
+        // 这一句就照这三条规矩收尾。两者都是「这一句的偏好」，一起送过去，
+        // Rust 那侧按先让位、再顶替的顺序拼进提示词——画风在时色数听画风的，
+        // 其余收尾规矩照常上路；与画风 id 重合的那条由画风段顶替，不发两遍。
+        await bridge.sendMessage(
+          id,
+          trimmed,
+          payload,
+          undefined,
+          getState().styleOverride,
+          getState().presetOverrides,
+        );
+      } catch (error) {
         clearStallWatch();
         failKey("store.send_failed", { error: String(error) });
       }
@@ -2029,11 +2031,11 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
           flagKey("store.empty_snapshot");
           return;
         }
-       snapshotSeq += 1;
-       setState({
-         attachments: [
-           ...getState().attachments,
-           {
+        snapshotSeq += 1;
+        setState({
+          attachments: [
+            ...getState().attachments,
+            {
               key: `snapshot:${getState().revision}:${snapshotSeq}`,
               role: "snapshot",
               name: translate(getState().lang, "store.snapshot_name"),
@@ -2361,12 +2363,12 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
           id,
           idea,
           0,
-         0,
-        getState().refineTarget,
-        getState().styleOverride,
-        getState().presetOverrides,
+          0,
+          getState().refineTarget,
+          getState().styleOverride,
+          getState().presetOverrides,
       );
-      setState({ refined, refinedDraft: refined.prompt, outcomeError: null });
+        setState({ refined, refinedDraft: refined.prompt, outcomeError: null });
       } catch (error) {
         setState({ outcomeError: workflowError(error) });
       } finally {

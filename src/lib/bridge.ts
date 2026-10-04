@@ -30,7 +30,7 @@ import type {
   ModelConfig,
   ModelsView,
   ModelRole,
- PermissionMode,
+  PermissionMode,
   Protocol,
   PixelDocument,
   RecipeImportReport,

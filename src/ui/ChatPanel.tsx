@@ -358,19 +358,19 @@ export default function ChatPanel() {
   const stalled = useStore((s) => s.stalled);
   const attachments = useStore((s) => s.attachments);
   const styleOverride = useStore((s) => s.styleOverride);
- const presetOverrides = useStore((s) => s.presetOverrides);
- // 收尾下拉的开合自己管：套餐按钮铺完一套就该收起，antd 默认只在点遮罩或
- // 普通选项时关下拉，点自定义按钮不会关，用户还得再点一下空白处。
- const [presetMenuOpen, setPresetMenuOpen] = useState(false);
- /** 点一下套餐：整套铺开（替换，不是合并），顺手收起下拉。 */
- const applyPresetBundle = (bundleId: string) => {
-   // 认不出的套餐 id 不猜：按钮只从内置三套里长出来，
-   // 真收到了野 id 说明代码和数据对不上，什么都不做比铺一套错的结果好。
-   if (!bundlePresetIds(bundleId)) return;
-   useStore.getState().setPresetOverrides(expandPresetChoice([`${BUNDLE_PREFIX}${bundleId}`]));
-   setPresetMenuOpen(false);
- };
- const [draft, setDraft] = useState("");
+  const presetOverrides = useStore((s) => s.presetOverrides);
+  // 收尾下拉的开合自己管：套餐按钮铺完一套就该收起，antd 默认只在点遮罩或
+  // 普通选项时关下拉，点自定义按钮不会关，用户还得再点一下空白处。
+  const [presetMenuOpen, setPresetMenuOpen] = useState(false);
+  /** 点一下套餐：整套铺开（替换，不是合并），顺手收起下拉。 */
+  const applyPresetBundle = (bundleId: string) => {
+    // 认不出的套餐 id 不猜：按钮只从内置三套里长出来，
+    // 真收到了野 id 说明代码和数据对不上，什么都不做比铺一套错的结果好。
+    if (!bundlePresetIds(bundleId)) return;
+    useStore.getState().setPresetOverrides(expandPresetChoice([`${BUNDLE_PREFIX}${bundleId}`]));
+    setPresetMenuOpen(false);
+  };
+  const [draft, setDraft] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const compose = useStore((s) => s.composeRequest);
 
@@ -582,12 +582,12 @@ export default function ChatPanel() {
                 }
                 placeholder={t("chat.preset_auto")}
                 listHeight={520}
-               value={presetOverrides}
-               aria-label={t("chat.preset_label")}
+                value={presetOverrides}
+                aria-label={t("chat.preset_label")}
                 open={presetMenuOpen}
                 onOpenChange={setPresetMenuOpen}
                 options={PRESET_IDS.map((id) => ({ value: id, label: t(`preset.${id}`) }))}
-               onChange={(value: string[]) =>
+                onChange={(value: string[]) =>
                   useStore.getState().setPresetOverrides(expandPresetChoice(value))
                 }
                 // 套餐挂在下拉底部而不是做成普通选项：选项叠满三条之后，

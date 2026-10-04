@@ -236,9 +236,9 @@ export default function DocumentPanel() {
   const [paletteOp, setPaletteOp] = useState<PaletteOpRequest | null>(null);
   const checkerRef = useRef<HTMLDivElement>(null);
   // 一笔笔画的临时状态全在 ref 里：pointermove 不该触发 React 渲染。
- const strokeRef = useRef<StrokeCell[]>([]);
- const lastCellRef = useRef<StrokeCell | null>(null);
- const paintingRef = useRef(false);
+  const strokeRef = useRef<StrokeCell[]>([]);
+  const lastCellRef = useRef<StrokeCell | null>(null);
+  const paintingRef = useRef(false);
   // 形状工具的锚点（按下的那一格）和平滑曲线的采样点。放 ref 是因为
   // pointermove 不该触发 React 渲染：形状预览重算在 drawStroke 里就完成了。
   const shapeAnchorRef = useRef<StrokeCell | null>(null);

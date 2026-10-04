@@ -1,6 +1,6 @@
 // Copyright (C) 2026 Mutantcat Working Group
 // SPDX-License-Identifier: GPL-3.0-only
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { briefToText, probeSummary, videoBriefToText } from "./dock-format";
 import { DEFAULT_BATCH_RECIPE, EMPTY_BATCH_RUN } from "./batch";
@@ -1392,6 +1392,14 @@ describe("回合只由它自己结束，侧道失败不陪葬", () => {
 });
 
 describe("切走之后，上一个会话残着的事件不能落到这一轮", () => {
+  beforeEach(async () => {
+    // 和隔壁同一个理：监听器由 boot 挂。单跑时没人 boot，事件发出去没人接，
+    // 正例哨兵（本会话的 token 照收）就成了摆设，反例也跟着失去参照。
+    invokeResults["session_list"] = [];
+    invokeResults["workflow_catalog"] = [];
+    await useStore.getState().boot();
+  });
+
   /** 一个停在原地的回合：模型那半截话没说完。 */
   function liveTurn(doc: PixelDocument) {
     useStore.setState({
@@ -1463,6 +1471,15 @@ describe("切走之后，上一个会话残着的事件不能落到这一轮", (
 });
 
 describe("切会话不杀回合：现场进影子，切回来原样接上", () => {
+  beforeEach(async () => {
+    // 订阅挂在 boot 上：这个 describe 全靠事件通道做切换。整套跑时有前面谁
+    // boot 过捎带着挂上，单跑（-t）就没人挂——事件发了没人接，影子永远空着，
+    // 切回去只剩半句话。自己 boot 一次，跑法就不再影响结论。
+    invokeResults["session_list"] = [];
+    invokeResults["workflow_catalog"] = [];
+    await useStore.getState().boot();
+  });
+
   /** 一条会话概览；两条会话是切换的最小阵容。 */
   function sessionOf(id: string, order: number): SessionInfo {
     return {
@@ -1576,6 +1593,29 @@ describe("切会话不杀回合：现场进影子，切回来原样接上", () =
     expect(state.running).toBe(true);
     expect(texts()).toContain("上一轮的回复");
     expect(texts()).toContain("这一圈");
+  });
+
+  it("后台举手要的审批票：切回去还挂着，不被读文档那次清零抹掉", async () => {
+    const doc = seedDocument();
+    stubTwoSessions(doc);
+    halfTurn();
+    await useStore.getState().selectSession("doc-b");
+    // a 那边停在工具调用上等决定：票只活在事件流里，影子先接住。
+    publishAgent("doc-a", {
+      kind: "approval_request",
+      call_id: "call-1",
+      name: "pixel_run_shader",
+      input: { script: "clear()" },
+    });
+
+    await useStore.getState().selectSession("doc-a");
+    const state = useStore.getState();
+    expect(state.running).toBe(true);
+    expect(state.pendingApproval).toEqual({
+      callId: "call-1",
+      name: "pixel_run_shader",
+      input: { script: "clear()" },
+    });
   });
 });
 

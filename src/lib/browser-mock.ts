@@ -555,7 +555,18 @@ function floodFill(
   if (sx < 0 || sy < 0 || sx >= width || sy >= height) return;
   const target = indices[sy * width + sx];
   if (target === index) return;
+  // 入队即标记：同一点只会进栈一次。「填过才跳」的写法里，一个点会被四个
+  // 邻居各塞一份才轮到它，线性扫描看着没后果，画布一大就是白扫几倍的量。
+  const seen = new Uint8Array(width * height);
+  seen[sy * width + sx] = 1;
   const stack: [number, number][] = [[sx, sy]];
+  const push = (nx: number, ny: number) => {
+    if (nx < 0 || ny < 0 || nx >= width || ny >= height) return;
+    const at = ny * width + nx;
+    if (seen[at] !== 0 || indices[at] !== target) return;
+    seen[at] = 1;
+    stack.push([nx, ny]);
+  };
   while (stack.length > 0) {
     const point = stack.pop();
     if (!point) break;
@@ -563,10 +574,10 @@ function floodFill(
     if (x < 0 || y < 0 || x >= width || y >= height) continue;
     if (indices[y * width + x] !== target) continue;
     indices[y * width + x] = index;
-    if (x > 0) stack.push([x - 1, y]);
-    stack.push([x + 1, y]);
-    if (y > 0) stack.push([x, y - 1]);
-    stack.push([x, y + 1]);
+    push(x - 1, y);
+    push(x + 1, y);
+    push(x, y - 1);
+    push(x, y + 1);
   }
 }
 
@@ -2250,12 +2261,12 @@ function handler(cmd: string, raw?: unknown): unknown {
       broadcast();
       return revision;
     }
-   case "editor_apply_ops":
+    case "editor_apply_ops":
       // 编辑器直接下的一整批结构操作。假后端不能整批吞掉：界面不动，预览就成了
-      //「功能看着有、实际没接上」。真机由 Rust 的 apply_batch 执行，这里逐条照它的
+      // 「功能看着有、实际没接上」。真机由 Rust 的 apply_batch 执行，这里逐条照它的
       // 规矩演一遍：帧、图层、两套调色板（存储 palette 与命名范围 palettes）都做。
-     for (const op of (payload.ops ?? []) as Record<string, unknown>[]) {
-       const id = op.id as string | undefined;
+      for (const op of (payload.ops ?? []) as Record<string, unknown>[]) {
+        const id = op.id as string | undefined;
         if (op.op === "create_frame") {
           const durationMs = typeof op.duration_ms === "number" ? op.duration_ms : 100;
           if (durationMs < 1 || durationMs > 60000) continue;
