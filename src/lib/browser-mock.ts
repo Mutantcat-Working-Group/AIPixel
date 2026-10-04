@@ -1150,6 +1150,8 @@ let LIMITS: LoopLimits = {
   max_continuations: 20,
   max_retries: 5,
   max_reasoning_continuations: 2,
+  max_tool_steps: 0,
+  max_turns: 0,
 };
 
 /** ---------- 预览里的文件类工作流 ----------

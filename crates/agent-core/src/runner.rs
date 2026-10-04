@@ -5,8 +5,11 @@
 //! 设计要点：
 //! - 文档是唯一权威状态，每轮重新组装系统提示词（上一轮工具可能已经改过 canvas）。
 //! - 模型永远不手写矩阵：所有绘制经由 `tools::execute`（ops / Lua 沙箱 / RLE 读回）。
-//! - 预算：`max_tool_steps`（单 turn 工具步数）、`max_turns`（工具跑完再来一问的次数）、
-//!   `max_tool_result_bytes`（回灌截断），外加「同一个失败调用连续 3 次」的退避保护。
+//! - 预算：`loop_limits` 里的 `max_tool_steps`（单 turn 工具调用数）与
+//!   `max_turns`（工具跑完再来一问的次数）默认都是 0 = 不设上限，一个像样的
+//!   像素画回合动辄几百步，早年写死的 24/12 砍断过太多健康的绘制。兜底改由
+//!   看门狗兜：连着几回没有任何一笔改动落盘才收摊。另外还有
+//!   `max_tool_result_bytes`（回灌截断）和「同一个失败调用连续 3 次」的退避保护。
 //! - 护栏：`loop_limits` 给续写、重试、纯思考续写分别封顶。模型再轴也有收摊的时刻。
 //! - 没说完的话：stop reason 是 `max_tokens` / `length` 就自动续写，最多 5 次；
 //!   请求失败（网络、假死）按 1s/2s/4s/8s 退避重发，最多 5 次。
@@ -117,6 +120,16 @@ const CANCEL_POLL: Duration = Duration::from_millis(120);
 /// 当场拦住再问一次。催的次数必须封顶，不然一个轴模型能把整轮预算
 /// 全耗在互相瞪眼上。
 const MAX_TOOL_NUDGES: usize = 2;
+
+/// 连着多少回一笔改动都没落盘，就认这一轮是在空转。
+///
+/// 这是默认的也是唯一的轮次刹车。轮次预算（`max_turns`）默认不设上限——真正
+/// 复杂的像素画回合要跑几百步，早年写死的 12 砍断过太多健康的绘制——所以
+/// 「什么时候收摊」只能由推进与否来决定。
+///
+/// 取 6 而不是 1：读画布、想想、再落笔是正常节奏，一个回合里连着只读两三回
+/// 也常见。只有连着六七回都摸不到一笔改动，才是真的不会画了。
+const MAX_STALE_ROUNDS: usize = 6;
 
 /// 「用户在编辑器里动了什么」最多攒几条。
 ///
@@ -1644,12 +1657,18 @@ impl AgentSession {
         let mut usage_in: Option<u32> = None;
         let mut usage_out: Option<u32> = None;
 
-        // 两个配额：逻辑轮次吃 max_turns 预算，重试封顶五次。续写的额度跟着
-        // 单次回复走，见下面循环内的声明——放在 turn 头上会让上一轮用掉的次数
-        // 记在这一轮头上，越往后越抠，最后任何回复都只剩半截。
+        // 唯一的硬配额：重试封顶五次。续写的额度跟着单次回复走，见下面循环
+        // 内的声明——放在 turn 头上会让上一轮用掉的次数记在这一轮头上，
+        // 越往后越抠，最后任何回复都只剩半截。
         let mut logical_rounds = 0usize;
+        // 连着多少回一个工具都没推动。看门狗的计数，见 MAX_STALE_ROUNDS。
+        // 这才是默认的刹车：轮次预算默认不设上限，砍活人的只能是「不推进」。
+        let mut stale_rounds = 0usize;
         // 整轮共用的重发闸门：次数、退避总时长、同一句报错的复读。见 `RetryGate`。
         let mut retry_gate = RetryGate::default();
+        // 上一回逻辑轮有没有真的推进：落了一笔改动、或者外部 MCP 工具跑成了。
+        // 每处理完一批工具调用就重新记一次，循环开头拿去判断。
+        let mut round_moved = false;
         // 整轮零工具调用时催过几次。见 MAX_TOOL_NUDGES。
         let mut tool_nudges = 0usize;
 
@@ -1673,7 +1692,10 @@ impl AgentSession {
 
             // 只有「工具跑完再来一问」算一个逻辑轮次；同一句话说一半被掐断后
             // 接着写不算——那本来就是这一轮的尾巴，不该吃掉用户的续轮预算。
-            if logical_rounds >= runner_config.max_turns {
+            //
+            // 默认这道闸是开着的：max_turns 为 0 = 不设上限。用户想要天花板就
+            // 去设置里填，填了才照他的数收摊。
+            if runner_config.loop_limits.turns_exhausted(logical_rounds) {
                 emit(
                     &tx,
                     AgentEvent::Error {
@@ -1681,7 +1703,7 @@ impl AgentSession {
                             "agent.turn_budget",
                             "this turn ran out of rounds after {rounds} edit(s); start a new message to keep going",
                         )
-                        .with("rounds", runner_config.max_turns as u64),
+                        .with("rounds", runner_config.loop_limits.max_turns as u64),
                     },
                 );
                 return;
@@ -2123,7 +2145,7 @@ impl AgentSession {
                     bail = Some((idx, AgentEvent::Interrupted));
                     break;
                 }
-                if steps >= runner_config.max_tool_steps {
+                if runner_config.loop_limits.tool_steps_exhausted(steps) {
                     bail = Some((
                         idx,
                         AgentEvent::Error {
@@ -2395,6 +2417,13 @@ impl AgentSession {
                     let revision = patch.revision;
                     emit(&tx, AgentEvent::DocumentUpdated { revision, patch });
                 }
+                // 看门狗要的「推进」信号：这一笔真的动过手。读画布读得再顺
+                // 也不算——「只会看、不会画」正是最典型的空转，得让它照原样
+                // 落进 stale_rounds 里。失败的那一份由 same_call_failed 另行
+                // 收摊，这里不必替它操心。
+                if !outcome.is_error && call.name != "pixel_read_canvas" {
+                    round_moved = true;
+                }
             }
             if let Some((unfinished_from, event)) = bail {
                 let leftovers = unfinished_tool_results(&call_ids, unfinished_from);
@@ -2407,6 +2436,28 @@ impl AgentSession {
                 emit(&tx, event);
                 return;
             }
+            // 看门狗落地处。放在工具阶段末尾而不是循环开头：续写和退避重发也在
+            // 这里绕圈，但它们在同一个逻辑轮里，拿它们当空转数会冤枉一个正经
+            // 写着长代码的模型。连着 MAX_STALE_ROUNDS 回一笔没落盘才收摊。
+            if round_moved {
+                stale_rounds = 0;
+            } else {
+                stale_rounds += 1;
+                if stale_rounds >= MAX_STALE_ROUNDS {
+                    emit(
+                        &tx,
+                        AgentEvent::Error {
+                            message: UiText::new(
+                                "agent.round_stalled",
+                                "this turn stopped making progress: {rounds} round(s) in a row without a single change landing on the canvas; the model only re-read it or kept asking the same thing - rephrase and send it again",
+                            )
+                            .with("rounds", stale_rounds as u64),
+                        },
+                    );
+                    return;
+                }
+            }
+            round_moved = false;
         }
     }
 
@@ -3445,6 +3496,7 @@ fn summarize(content: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::models::LoopLimits;
     use super::*;
     use pixel_core::document::Document;
 
@@ -3783,8 +3835,12 @@ mod tests {
     /// 会补一条报错的 ToolResult，消息簿始终配对。
     #[tokio::test]
     async fn a_turn_that_runs_out_of_tool_steps_still_pairs_every_tool_use() {
+        // 默认不设上限，所以这里显式填一道小天花板，好把撞线那条路走通。
         let s = session().with_runner_config(RunnerConfig {
-            max_tool_steps: 2,
+            loop_limits: LoopLimits {
+                max_tool_steps: 2,
+                ..LoopLimits::DEFAULT
+            },
             ..RunnerConfig::default()
         });
         rewire(
@@ -3834,6 +3890,116 @@ mod tests {
             }
             other => panic!("补的应该是 ToolResult，拿到 {other:?}"),
         }
+    }
+
+    /// 轮次预算默认不设上限：一个好好的回合不该被自己人的数字掐断。
+    ///
+    /// 这是「AI 画到一半被砍」那条怨气的正面兜底。默认的护栏只有看门狗，
+    /// 它只管「有没有在推进」。
+    #[tokio::test]
+    async fn a_long_but_productive_run_is_not_cut_off_by_default() {
+        let s = session();
+        let rounds = MAX_STALE_ROUNDS + MAX_STALE_ROUNDS + 2;
+        // 每笔调用之后模型还得再被问一次，所以末尾多备一截收尾的话。
+        // 假 provider 没词了就 panic，正好替这个测试盯着「回合真的跑完了」。
+        let mut scripts: Vec<Vec<Result<LlmEvent, ProviderError>>> = (0..rounds)
+            .map(|i| {
+                tool_call(
+                    &format!("call_{i}"),
+                    "pixel_apply_operations",
+                    json!({"operations": [{"op": "set_pixels", "cells": [{"x": 1, "y": 1, "color": "#ff0000"}]}]}),
+                )
+            })
+            .collect();
+        scripts.push(done("画完了"));
+        rewire(&s, scripts);
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("画个红点".into(), Vec::new(), tx, None).await;
+        let flow = drain(rx);
+
+        assert_eq!(flow.tools.len(), rounds, "每一笔调用都该跑掉");
+        assert!(flow.completed, "该正常收尾：{:?}", flow.error);
+        assert!(
+            flow.error.is_none(),
+            "默认不设轮次上限，健康的长回合不许被砍：{:?}",
+            flow.error
+        );
+        // 要图的一轮得先写提示词清单，第一笔改动会被那道闸挡一下，
+        // 所以推送次数最多比调用数少一次。
+        assert!(
+            (rounds - 1..=rounds).contains(&flow.doc_updates),
+            "几乎每一笔改动都该推给前端，只拿到 {}",
+            flow.doc_updates
+        );
+    }
+
+    /// 「只会看、不会画」的空转：连着几回一个工具都没推动才收摊。
+    ///
+    /// 读画布读得再顺也不算推进。这正是轮次上限放开之后唯一还需要兜底的形态——
+    /// 模型拿不到结论，翻来覆去读同一张画布，烧的是用户的钱。
+    #[tokio::test]
+    async fn a_read_only_loop_stops_after_a_few_sterile_rounds() {
+        let s = session();
+        rewire(
+            &s,
+            (0..MAX_STALE_ROUNDS)
+                .map(|i| tool_call(&format!("call_{i}"), "pixel_read_canvas", json!({})))
+                .collect(),
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("画布上有什么".into(), Vec::new(), tx, None)
+            .await;
+        let flow = drain(rx);
+
+        assert_eq!(flow.tools.len(), MAX_STALE_ROUNDS);
+        assert_eq!(
+            flow.error.as_deref(),
+            Some("agent.round_stalled"),
+            "只读不写的空转该被看门狗收摊"
+        );
+        assert!(
+            flow.error_detail
+                .as_deref()
+                .is_some_and(|d| d.contains(&format!("rounds={MAX_STALE_ROUNDS}"))),
+            "要说清连着空转了几回：{:?}",
+            flow.error_detail
+        );
+    }
+
+    /// 用户显式填了步数天花板，就得照他的数收摊，并且消息簿不能残缺。
+    #[tokio::test]
+    async fn an_explicit_tool_step_ceiling_is_respected() {
+        let s = session().with_runner_config(RunnerConfig {
+            loop_limits: LoopLimits {
+                max_tool_steps: 3,
+                ..LoopLimits::DEFAULT
+            },
+            ..RunnerConfig::default()
+        });
+        rewire(
+            &s,
+            (0..6)
+                .map(|i| {
+                    tool_call(
+                        &format!("call_{i}"),
+                        "pixel_apply_operations",
+                        json!({"operations": [{"op": "set_pixels", "cells": [{"x": 1, "y": 1, "color": "#ff0000"}]}]}),
+                    )
+                })
+                .collect(),
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        s.run_turn("画个红点".into(), Vec::new(), tx, None).await;
+        let flow = drain(rx);
+
+        assert_eq!(
+            flow.error.as_deref(),
+            Some("agent.tool_budget"),
+            "填了天花板就该照它收摊"
+        );
     }
 
     /// 一条消息簿里的 ToolUse 有没有配对的 ToolResult，直接决定下一发请求会不会

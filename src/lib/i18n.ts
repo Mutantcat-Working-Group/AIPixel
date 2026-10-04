@@ -151,6 +151,8 @@ export const zh = {
     "这一轮改不动了：连着改 {rounds} 回，工具步数见顶。另发一句话接着来。",
   "agent.tool_budget":
     "这一轮改不动了：{steps} 个工具步之后见顶。另发一句话接着来。",
+  "agent.round_stalled":
+    "这一轮停在这儿了：连着 {rounds} 回，模型只是反复看画布或者又问了一遍同样的事，一笔都没落下去。换个说法再发一句。",
   "agent.stalled":
     "回复不再推进了：模型要么把写过的原样又念一遍，要么几乎没吐新东西。运行停在上面的位置。",
   "agent.output_limit":
@@ -408,6 +410,12 @@ export const zh = {
   "settings.limits.reasoning": "纯思考最多几轮",
   "settings.limits.reasoning_hint":
     "连续几轮只吐推理、正文和工具调用一个都没有就收手。模型再轴也有停下的时刻。",
+  "settings.limits.tool_steps": "工具步数上限",
+  "settings.limits.tool_steps_hint":
+    "单个回合最多跑多少笔工具调用。填 0 表示不设上限（默认）：正经的像素画回合动辄几百步，一代入数字就会把干得起劲的 AI 砍断。",
+  "settings.limits.turns": "回合轮数上限",
+  "settings.limits.turns_hint":
+    "单个回合最多问模型多少回。填 0 表示不设上限（默认）。上面的工具步数管「跑多少笔」，这个管「来回问几次」。",
   "settings.limits.saved": "已保存",
   "settings.limits.reset": "恢复默认",
   "settings.tab_models": "模型",
@@ -1085,6 +1093,8 @@ export const en: Record<TKey, string> = {
     "This round is done for: tool steps hit the ceiling after {rounds} edit(s). Send another message to keep going.",
   "agent.tool_budget":
     "This round is done for: tool steps hit the ceiling after {steps} step(s). Send another message to keep going.",
+  "agent.round_stalled":
+    "This round stopped: {rounds} round(s) in a row where the model only re-read the canvas or asked the same thing again, without a single change landing on it. Rephrase and send it again.",
   "agent.stalled":
     "The reply stopped making progress: the model either repeated text it had already written or produced almost nothing new. The run stopped at the point shown above.",
   "agent.output_limit":
@@ -1345,6 +1355,12 @@ export const en: Record<TKey, string> = {
   "settings.limits.reasoning": "Reasoning-only cap",
   "settings.limits.reasoning_hint":
     "Give up after this many rounds that produced nothing but reasoning, no answer and no tool call. Every model stops eventually.",
+  "settings.limits.tool_steps": "Tool step cap",
+  "settings.limits.tool_steps_hint":
+    "How many tool calls one turn may run. 0 means no cap (the default): a real pixel-art turn runs to hundreds of steps, so any number here risks cutting off an AI that is drawing well.",
+  "settings.limits.turns": "Turn round cap",
+  "settings.limits.turns_hint":
+    "How many times one turn may go back to the model. 0 means no cap (the default). The step cap above counts calls made; this one counts round trips.",
   "settings.limits.saved": "Saved",
   "settings.limits.reset": "Restore defaults",
   "settings.tab_models": "Models",

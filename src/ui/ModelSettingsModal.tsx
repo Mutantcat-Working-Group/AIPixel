@@ -1,6 +1,6 @@
 // Copyright (C) 2026 Mutantcat Working Group
 // SPDX-License-Identifier: GPL-3.0-only
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { memo, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Alert,
   Button,
@@ -169,6 +169,18 @@ function LimitsSection() {
       hint: t("settings.limits.reasoning_hint"),
       max: 10,
     },
+    {
+      key: "max_tool_steps",
+      label: t("settings.limits.tool_steps"),
+      hint: t("settings.limits.tool_steps_hint"),
+      max: 100000,
+    },
+    {
+      key: "max_turns",
+      label: t("settings.limits.turns"),
+      hint: t("settings.limits.turns_hint"),
+      max: 10000,
+    },
   ];
 
   return (
@@ -284,7 +296,7 @@ function describeProbe(t: T, result: ImageSupport): string {
   return t("settings.probe_unknown", { reason: result.reason });
 }
 
-export default function ModelSettingsModal() {
+function ModelSettingsModal() {
   const t = useT();
   const open = useStore((s) => s.settingsOpen);
   const tab = useStore((s) => s.settingsTab);
@@ -791,3 +803,8 @@ export default function ModelSettingsModal() {
     </Modal>
   );
 }
+
+/** Panel 本体没有 props，重画只可能来自订阅；memo 一层纯粹是把父组件的
+ *  连锁渲染挡在外面——App 现在只订阅顶栏那几项，父组件不重画，
+ *  这些面板就更没必要跟着抖。 */
+export default memo(ModelSettingsModal);

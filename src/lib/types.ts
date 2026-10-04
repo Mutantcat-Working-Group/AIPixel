@@ -243,19 +243,28 @@ export interface Attachment {
 }
 
 /** 运行护栏：续写、重试、纯思考各自封顶。与 Rust 的 LoopLimits 字段名逐字对齐。
- * 填 0 是合法意愿（关掉这项自动行为），所以不能用 undefined 表示「没填」。 */
+ * 填 0 是合法意愿（关掉这项自动行为），所以不能用 undefined 表示「没填」。
+ * 工具步数与续轮数例外：那两个的 0 意思是「不设上限」，见下面字段注释。 */
 export interface LoopLimits {
   max_continuations: number;
   max_retries: number;
   max_reasoning_continuations: number;
+  /** 单个回合最多跑多少笔工具调用。0 = 不设上限。
+   * 默认就是 0：一张正经的像素画回合动辄几百步，写死一个数字只会把
+   * 干得起劲的 AI 砍断。这一项只是给「我想要一道天花板」的用户准备的。 */
+  max_tool_steps: number;
+  /** 单个回合最多问模型多少回。0 = 不设上限。 */
+  max_turns: number;
 }
 
 /** 护栏默认值。Rust 的 `LoopLimits::DEFAULT` 才是权威，这里只是「恢复默认」
- * 按钮需要一份能写回去的镜像；两处不同步时以 Rust 为准。 */
+* 按钮需要一份能写回去的镜像；两处不同步时以 Rust 为准。 */
 export const DEFAULT_LOOP_LIMITS: LoopLimits = {
   max_continuations: 20,
   max_retries: 5,
   max_reasoning_continuations: 2,
+  max_tool_steps: 0,
+  max_turns: 0,
 };
 
 /** AgentEvent 的 kind tag，snake_case。 */

@@ -253,23 +253,25 @@ pub struct ChatRequest {
 /// 运行预算与策略。
 #[derive(Debug, Clone)]
 pub struct RunnerConfig {
-    /// 单个 turn 内允许的最大工具步数。
-    pub max_tool_steps: usize,
     /// 单个工具结果回灌给模型时的最大字符数（截断保护）。
     pub max_tool_result_bytes: usize,
-    /// 单个 turn 内允许的最大续轮次数（模型反复调工具时的兜底）。
-    pub max_turns: usize,
     /// 系统提示词里 canvas RLE 窗口的字符预算。
     pub canvas_context_chars: usize,
     pub permission: PermissionMode,
-    /// 防死循环护栏：续写、重试、纯思考续写各自封顶。可在设置里改。
+    /// 运行护栏。工具步数与续轮数也住在这里，默认不设上限：一道像样的
+    /// 像素画回合动辄几十上百次工具调用，早年那两个写死的数字正是
+    /// 「AI 还健康地画着，忽然被自己人掐断」的病根。真正的刹车是
+    /// 不再推进时收摊的看门狗，见 runner 里的 `round_moved`。
     pub loop_limits: LoopLimits,
 }
 
-/// 运行护栏：把「续写、重试、只吐思考」三件事都封顶。
+/// 运行护栏：把「续写、重试、只吐思考、以及这个回合可以跑多远」都管起来。
 ///
 /// 模型再轴，这一轮也有收摊的时刻。没有这道闸，推理模型能把整轮预算全烧在
 /// 思考上，续写二十次还在想——用户盯着一个永远转圈的思考节点，什么也点不了。
+///
+/// 工具步数与续轮数是「用户想要才有的天花板」，不是默认的闸：默认 0（不设
+/// 上限）。谁想自己兜一道底，去设置里填个数就行。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LoopLimits {
@@ -280,6 +282,14 @@ pub struct LoopLimits {
     /// 连续几轮只吐推理、正文和工具调用一个都没有就收手。这条比续写总数更硬：
     /// 「一直在想、始终不动笔」正是无限思考的形态，续写只会让它想得更久。
     pub max_reasoning_continuations: usize,
+    /// 单个 turn 最多执行多少个工具调用。0 表示不设上限。
+    pub max_tool_steps: usize,
+    /// 单个 turn 内最多问模型多少回。0 表示不设上限。
+    ///
+    /// 与 `max_tool_steps` 的分工：这个数的是 Provider 往返次数。同一个回合，
+    /// 模型可能一次要六个工具调用，也可能每回合只动一笔——前者三步走完的活，
+    /// 后者要二十步。两个数都不该默认成为阻碍。
+    pub max_turns: usize,
 }
 
 impl LoopLimits {
@@ -288,17 +298,40 @@ impl LoopLimits {
         max_continuations: 20,
         max_retries: 5,
         max_reasoning_continuations: 2,
+        // 默认不设上限：真正复杂的工作改几千笔都正常。这里一刀切下去，
+        // 砍断的永远是 AI 正干得起劲的那一半。想要天花板的用户自己填数。
+        max_tool_steps: 0,
+        max_turns: 0,
     };
 
     /// 把用户填的数收进合理区间。填 0 是合法意愿（关掉这项自动行为），
-    /// 填个十万只会把用户自己坑死，所以封顶。
+    /// 填个十亿只会把用户自己坑死，所以封顶。0 原样放过：那是「不设上限」。
     pub fn clamped(mut self) -> Self {
         self.max_continuations = self.max_continuations.min(50);
         self.max_retries = self.max_retries.min(10);
         self.max_reasoning_continuations = self.max_reasoning_continuations.min(10);
+        self.max_tool_steps = self.max_tool_steps.min(MAX_TOOL_STEP_CEILING);
+        self.max_turns = self.max_turns.min(MAX_TURN_CEILING);
         self
     }
+
+    /// 工具步数见底了没有。0 表示不设上限，永远 false：
+    /// 这闸只是用户要的兜底，别拿它当看门狗使。
+    pub fn tool_steps_exhausted(&self, steps: usize) -> bool {
+        self.max_tool_steps > 0 && steps >= self.max_tool_steps
+    }
+
+    /// 续轮数见底了没有。0 表示不设上限，同上。
+    pub fn turns_exhausted(&self, turns: usize) -> bool {
+        self.max_turns > 0 && turns >= self.max_turns
+    }
 }
+
+/// 工具步数天花板的封顶值。比「默认上限」给得还慷慨：真有一天要画这么多笔，
+/// 让它画完远比被静默砍断来得体面。
+pub const MAX_TOOL_STEP_CEILING: usize = 100_000;
+/// 续轮天花板的封顶值。同上，够一个回合从白纸磨到成品。
+pub const MAX_TURN_CEILING: usize = 10_000;
 
 impl Default for LoopLimits {
     fn default() -> Self {
@@ -396,9 +429,7 @@ impl Attachment {
 impl Default for RunnerConfig {
     fn default() -> Self {
         RunnerConfig {
-            max_tool_steps: 24,
             max_tool_result_bytes: 6000,
-            max_turns: 12,
             canvas_context_chars: 4096,
             permission: PermissionMode::Auto,
             loop_limits: LoopLimits::default(),
