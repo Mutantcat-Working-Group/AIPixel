@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "aipixel"
 # 版本号跟着桌面端一起走。这里是 example 里的遗留转换脚本，发版流水线
 # 照样会给它打轮子，所以忘升这一行，release 里就会躺着一个上一版的包。
-version = "1.0.20261017"
+version = "1.0.20261018"
 description = "AIP pixel art converter toolkit"
 requires-python = ">=3.9"
 dependencies = ["Pillow"]
