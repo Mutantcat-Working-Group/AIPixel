@@ -1,6 +1,6 @@
 // Copyright (C) 2026 Mutantcat Working Group
 // SPDX-License-Identifier: GPL-3.0-only
-import { useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Button, Input, Modal, Tooltip } from "antd";
 import { Github, Pencil, Plus, Trash2 } from "lucide-react";
 
@@ -33,6 +33,36 @@ export default function SessionSidebar() {
   const [dragId, setDragId] = useState<string | null>(null);
   const [overId, setOverId] = useState<string | null>(null);
 
+  // 收摊：拖动态清零。dragging 那 45% 不透明度只是视觉，可 dragId 一卡住，
+  // 排序本身也跟着失灵（dropOn 见 !dragId 直接 return），所以这个清理必须是
+  // 硬保证，不能只依赖元素上的 onDragEnd。
+  const clearDrag = useCallback(() => {
+    setDragId(null);
+    setOverId(null);
+  }, []);
+
+  // macOS 上 dragDropEnabled 开着（要收文件拖放），WKWebView 会把页面里的
+  // HTML5 拖拽整个交给系统拖拽会话：松手之后 dragend / drop 不一定回得来。
+  // 于是 dragId 永远停在那个会话上，.dragging 的半透明跟着卡住——用户看到
+  // 的就是「第一项一直是灰的」。这里挂几层兜底：dragend、鼠标松手、窗口失焦、
+  // Esc，任何一样到了都收摊。活着的拖拽期间浏览器不会派发 mouseup，所以这些
+  // 兜底不会把正常排序掐断。
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") clearDrag();
+    };
+    window.addEventListener("dragend", clearDrag, true);
+    window.addEventListener("mouseup", clearDrag, true);
+    window.addEventListener("blur", clearDrag);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("dragend", clearDrag, true);
+      window.removeEventListener("mouseup", clearDrag, true);
+      window.removeEventListener("blur", clearDrag);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [clearDrag]);
+
   const beginRename = (id: string, current: string) => {
     renamingRef.current = id;
     setRenamingId(id);
@@ -60,8 +90,7 @@ export default function SessionSidebar() {
     const to = ids.indexOf(targetId);
     if (from < 0 || to < 0) return;
     ids.splice(to, 0, ...ids.splice(from, 1));
-    setDragId(null);
-    setOverId(null);
+    clearDrag();
     void reorderSessions(ids);
   }
 
@@ -95,7 +124,12 @@ export default function SessionSidebar() {
                 .filter(Boolean)
                 .join(" ")}
               draggable={renamingId !== session.id}
-              onClick={() => void useStore.getState().selectSession(session.id)}
+              onClick={() => {
+                // 点一下就收摊：万一上一轮拖拽的 dragend 丢了（WKWebView 老毛病），
+                // 用户点任意会话也能把那条半透明立刻拍掉，不用重启。
+                clearDrag();
+                void useStore.getState().selectSession(session.id);
+              }}
               onDragStart={(event) => {
                 setDragId(session.id);
                 // 给拖影一点内容：不然 Firefox 下是个空块，看不出拖的是什么。
@@ -114,8 +148,7 @@ export default function SessionSidebar() {
                 dropOn(session.id);
               }}
               onDragEnd={() => {
-                setDragId(null);
-                setOverId(null);
+                clearDrag();
               }}
               onContextMenu={(event) =>
                 openContextMenu(event, [
