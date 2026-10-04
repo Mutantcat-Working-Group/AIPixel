@@ -1552,13 +1552,13 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
         lastQuery: null,
         attachments: [],
         frameIndex: 0,
-    });
+      });
       // 后台这一圈还在跑：静默计时接着打表，别让切回来的人看到「已经停了」。
       if (shadow?.running) touchStallWatch();
       else clearStallWatch();
       await loadDocument(id, true, false, Boolean(shadow));
       await getState().refreshSessions();
-  },
+    },
 
     createSession: async (width, height, title) => {
       const document = width && height ? blankDocument(width, height) : undefined;
