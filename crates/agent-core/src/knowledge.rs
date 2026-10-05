@@ -91,7 +91,7 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "run and gun", "run 'n gun", "run-and-gun", "shooter", "contra", "gun sprite",
             "shoot while moving", "aiming", "jump animation", "landing", "gun arm",
         ],
-        body: "A side-view shooter character is built as a STACK of shared parts, not as one animation per action. Draw the base dummy at 8x16 and settle walk and run first - they set the expression and the standard of fluidity everything else is cut from. Then cut LEGS and TORSO into separate layers so the legs keep cycling through walk, run and jump independently of the top half; the shooting pose is 3 frames reused as an UPPER-BODY overlay, stamped onto every frame of every animation that allows linear motion (walk, run, jump), and the shoulder anchoring and bounce must follow the leg layer underneath or the two halves tear apart. HOLDING the gun is the cheap version: delete the arms from a finished frame and redraw them around the weapon, since the shoulder position and the bounce are already correct. JUMP stays minimal for input response: one tucked pose is the floor, and an 'up' pose for the ascent plus a 'down' pose for the descent is the sweet spot - the apex swap doubles as a timing cue. NO anticipation crouch: it adds input delay, so the jump fires instantly. LAND recycles the crouch pose plus one extra frame with the head and arms dipped to sell the weight, and that dip is optional if you want no loss of momentum. Provide both male and female builds by re-sketching the dummy rather than recolouring it, and let long hair animate on run and jump - but not on run-and-shoot, where the rhythmic run bounce should own the silhouette.",
+        body: "A side-view shooter character is built as a STACK of shared parts, not as one animation per action. Draw the base dummy at 8x16 and settle walk and run first - they set the expression and the standard of fluidity everything else is cut from. Then cut LEGS and TORSO into separate layers so the legs keep cycling through walk, run and jump independently of the top half; the shooting pose is 3 frames reused as an UPPER-BODY overlay, stamped onto every frame of every animation that allows linear motion (walk, run, jump), and the shoulder anchoring and bounce must follow the leg layer underneath or the two halves tear apart. HOLDING the gun is the cheap version: delete the arms from a finished frame and redraw them around the weapon, since the shoulder position and the bounce are already correct, and hang a long barrel muzzle-down from the centre of mass when idle. JUMP stays minimal for input response: one tucked pose is the floor, and an 'up' pose for the ascent plus a 'down' pose for the descent is the sweet spot - the apex swap doubles as a timing cue. NO anticipation crouch: it adds input delay, so the jump fires instantly, and if the game wants commitment make the LAND delay DYNAMIC - hold the recovery only when the fall exceeded a set distance, otherwise flash one bent-knee frame for a split second without stopping movement. LAND recycles the tuck/crouch pose plus one frame with the head and arms dipped to sell the weight, and that dip is optional if you want no loss of momentum. Re-sketch the dummy for the female build rather than recolouring it: the difference is EXPRESSION and weight, not anatomy, so she carries the weapon from her core with a lighter, more playful swing. Long hair animates on run and jump but not on run-and-shoot, where the run bounce should own the silhouette - and loose clothing and bulky fashion need their own sub-motion too, since none of them conform to the dummy.",
     },
     KnowledgeEntry {
         id: "shmup",
@@ -363,7 +363,7 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "瓦片边缘", "瓦片衔接", "接缝", "过渡瓦片", "地块过渡", "角块", "边缘块",
             "tile edge", "edges", "corner", "corners", "transition", "bitmask", "autotile", "welding",
         ],
-        body: "Ship the minimum nine-piece set - centre, four straight edges, four corners - welded so the centre band repeats and the corners close the loop, instead of one big picture. Drive grime and terrain transitions with a bitmask over the eight neighbours (four orthogonals plus four diagonals; byte 47, autotile 5x3) rather than a manual table of every combination. Cell size follows the engine: 16 for NES / SNES and RPG Maker 2000, 32 as the general middle, 48 for RPG Maker MV/MZ, 64 for HD sets. SIDE-VIEW is a different minimum: 8x8 cells, a 3x3 structure for floors, ceilings and walls, plus a 4x4 diamond shape holding the INNER corners that close L-shaped formations - twelve tiles cover a whole stage that has no slopes, and the inner-corner pieces are the ones people forget. Target the native resolution the tiles were drawn for rather than the monitor: 320x180 is 16:9, scales pixel-perfect into 1080p at 6x, and keeps characters and 8x8 tiles in a readable ratio. The whole set shares one light direction, one ramp per material and one outline rule, and is authored at exactly 1x - drawing big and downscaling smears the edges.",
+        body: "Ship the minimum nine-piece set - centre, four straight edges, four corners - welded so the centre band repeats and the corners close the loop, instead of one big picture. Drive grime and terrain transitions with a bitmask over the eight neighbours (four orthogonals plus four diagonals; byte 47, autotile 5x3) rather than a manual table of every combination. Cell size follows the engine: 16 for NES / SNES and RPG Maker 2000, 32 as the general middle, 48 for RPG Maker MV/MZ, 64 for HD sets. SIDE-VIEW is a different minimum: 8x8 cells, a 3x3 structure for floors, ceilings and walls, plus a 4x4 diamond shape holding the INNER corners that close L-shaped formations - twelve tiles cover a whole stage that has no slopes, and the inner-corner pieces are the ones people forget. In a side-view set the hard part is not the tiles but keeping the layers and objects separated while still reading depth, so separate a foreground band from the mid ground by VALUE first (one step darker, one step less saturated) and only then by detail: the sprite walking in front of it has to stay legible against both, and that constraint is what makes side-view level design harder than top-down. Target the native resolution the tiles were drawn for rather than the monitor: 320x180 is 16:9, scales pixel-perfect into 1080p at 6x, and keeps characters and 8x8 tiles in a readable ratio. The whole set shares one light direction, one ramp per material and one outline rule, and is authored at exactly 1x - drawing big and downscaling smears the edges.",
     },
     KnowledgeEntry {
         id: "dithering",
@@ -402,7 +402,7 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         id: "outlines",
         title: "Outline strategy",
         keywords: &["勾线", "描边", "轮廓线", "线稿", "outline", "outlines", "line art", "hard edge"],
-        body: "Pick ONE strategy for the whole drawing and keep it consistent, and the default is a solid outline on every shape: users read an outlined sprite as finished and an un-outlined one as an unfinished fill. Hue-shift the outline toward the surface color instead of using pure black on a saturated body, or it eats the silhouette - take the local hue a few steps darker rather than inventing a black. Keep outlines 1px at 32px and above; below 16px skip them entirely, or drop them everywhere only when the user asked for no outline, fog or backlight. The eight styles worth naming, drawn from one mushroom: single-pixel black (the animation-safe default), double-pixel, a dark shade of the surface colour, the region's own colour, an outline lit by the light direction, sel-out (outline AA toward a known background colour), broken or dashed, and none at all. Pick one per drawing and hold it on every frame.",
+        body: "Pick ONE strategy for the whole drawing and keep it consistent, and the default is a solid outline on every shape: users read an outlined sprite as finished and an un-outlined one as an unfinished fill. Hue-shift the outline toward the surface color instead of using pure black on a saturated body, or it eats the silhouette - take the local hue a few steps darker rather than inventing a black. That hue-shift rule assumes a CALM background; when the background is busy and the palette is stark, go the other way and keep a flat black outline, because there the heavy contrast is exactly what guarantees the sprite separates and a colour-matched line would let it melt into the tiles. Keep outlines 1px at 32px and above; below 16px skip them entirely, or drop them everywhere only when the user asked for no outline, fog or backlight. The eight styles worth naming, drawn from one mushroom: single-pixel black (the animation-safe default), double-pixel, a dark shade of the surface colour, the region's own colour, an outline lit by the light direction, sel-out (outline AA toward a known background colour), broken or dashed, and none at all. Pick one per drawing and hold it on every frame.",
     },
     KnowledgeEntry {
         id: "pixel-discipline",
@@ -2293,5 +2293,21 @@ mod tests {
         ] {
             assert_eq!(retrieve(query, 4)[0].id, preferred, "{query}");
         }
+    }
+
+    /// 跑射那一轮正文较长，DEFAULT_BUDGET 最先挤掉的恰恰是排在后面的条目。
+    /// 「落地延迟动态化」是 Pixelblog 60 补进来的手艺里最靠后的一句，所以拿它
+    /// 当预算的哨兵：正文再膨胀时在这里炸，而不是等模型又画出一个没有落地反馈的跳跃。
+    #[test]
+    fn the_run_and_gun_landing_note_survives_the_budget() {
+        let section = prompt_section(
+            "跑射角色跳跃动作和落地动作怎么做",
+            DEFAULT_LIMIT,
+            DEFAULT_BUDGET,
+        );
+        assert!(
+            section.contains("LAND delay DYNAMIC"),
+            "落地延迟动态化被预算挤掉了：{section}"
+        );
     }
 }
