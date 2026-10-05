@@ -1852,9 +1852,19 @@ function hold(frame: () => void, at: number): void {
 }
 
 function stopDemoTurn(): void {
+  const wasRunning = demoTimers.size > 0;
   for (const timer of demoTimers) clearTimeout(timer);
   demoTimers.clear();
-  fire(AGENT_EVENT_CHANNEL, { kind: "interrupted" });
+  // 没在跑时不补中断事件：用户连点停止不该在对话里堆出一串重复回执。
+  if (wasRunning) fire(AGENT_EVENT_CHANNEL, { kind: "interrupted" });
+}
+
+/** 浏览器预览里的权威运行读数：还有演示定时器就算忙。
+ *
+ * 真机这条路会在 task abort 之后立刻回 false，前端靠它对账僵尸 running；
+ * mock 用同一份语义，停止键和静默恢复在纯浏览器里也能走完整条链。 */
+function demoTurnStatus(): { busy: boolean; cancelled: boolean } {
+  return { busy: demoTimers.size > 0, cancelled: false };
 }
 
 /** 假后端在聊天里播一段「思考 -> 分流 -> 落笔 -> 答复」的演示流，纯浏览器里能直接看成色。
@@ -2027,6 +2037,8 @@ function handler(cmd: string, raw?: unknown): unknown {
     case "agent_interrupt":
       stopDemoTurn();
       return null;
+    case "agent_turn_status":
+      return demoTurnStatus();
     case "session_list":
       return listSessions(revision);
     case "session_create": {

@@ -65,6 +65,7 @@ pub fn run() {
             commands::agent_set_active,
             commands::agent_set_permission,
             commands::agent_sync_document,
+            commands::agent_turn_status,
             // ---- 文档与导出：.aip 读写、画布快照、各格式编码 ----
             commands::aip_load,
             commands::aip_save,

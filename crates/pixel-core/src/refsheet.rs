@@ -183,8 +183,19 @@ pub fn cell_rgba(
 /// 把一段长度均分成 parts 份，返回每份的 [start, end)。
 /// 除不尽的零头摊到前面的格子上，各格最多差 1px——整表尺寸不整除时也不塌。
 fn boundaries(total: u32, parts: u32) -> Vec<(u32, u32)> {
+    // 乘法的中间量必须走 u64：解码闸门放行的是「总像素数」不超 4M，
+    // 一张 2000000x2 的长条参考图完全合法，而 `total * i` 在 u32 里
+    // 4096 等分时能到 8e9，debug 下溢出 panic、release 下绕回，
+    // 切出来的格子会莫名其妙少几块。u64 装得下这个量级。
     (0..parts)
-        .map(|i| (total * i / parts, total * (i + 1) / parts))
+        .map(|i| {
+            let total = total as u64;
+            let parts = parts as u64;
+            (
+                (total * i as u64 / parts) as u32,
+                (total * (i as u64 + 1) / parts) as u32,
+            )
+        })
         .filter(|(s, e)| e > s)
         .collect()
 }
@@ -631,5 +642,17 @@ mod tests {
         // 但用户/模型明说了就切：说不清的时候不猜，说清了就照办。
         let forced = grid_for(2, 1, 10, 8).expect("cuts");
         assert_eq!(forced.len(), 2);
+    }
+
+    /// 超宽长条参考图也要切得完整：以前的 u32 中间量会在 4096 等分时绕回，
+    /// 切出来的格子凭空少几块，而这张图本身完全在解码闸门允许的 4M 像素内。
+    #[test]
+    fn a_very_wide_strip_still_cuts_into_every_cell() {
+        let grid = grid_for(4096, 1, 2_000_000, 2).expect("cuts");
+        assert_eq!(grid.len(), 4096, "每一格都要在，不能因溢出被丢掉");
+        let first = grid.cell(0).expect("first");
+        let last = grid.cell(4095).expect("last");
+        assert_eq!((first.x, first.w), (0, 488));
+        assert_eq!(last.x + last.w, 2_000_000, "最后一格要顶到图右边缘");
     }
 }

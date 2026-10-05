@@ -7,7 +7,7 @@
 use agent_core::{
     pins, ActiveContext, AgentEvent, AgentEventEnvelope, AgentSession, ApprovalDecision,
     Attachment, AttachmentRole, Capabilities, ImageSupport, LoopLimits, Message, ModelConfig,
-    ModelRole, PermissionMode, Protocol,
+    ModelRole, PermissionMode, Protocol, UiText,
 };
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, State};
@@ -463,6 +463,9 @@ pub(crate) fn run_turn(
             // 后面任何事件之前发出去，相对顺序一点没变。
             const DOC_COALESCE_MS: u64 = 40;
             let mut held: Option<AgentEvent> = None;
+            // 这一轮到底有没有收到过收尾事件。通道断的时候要靠它分辨
+            // 「正常跑完」和「future 半路蒸发」——后者不补一条，前端就永远转圈。
+            let mut terminal_seen = false;
             loop {
                 let next = if held.is_some() {
                     tokio::select! {
@@ -497,6 +500,25 @@ pub(crate) fn run_turn(
                             },
                         );
                     }
+                    // 通道断了却没有收尾事件：这一轮要么被停止键掐掉了，
+                    // 要么主循环的 future 在半路蒸发。前端把 running 押在
+                    // 「completed / error / interrupted 三选一必到」上，缺了
+                    // 这一条界面就永远停在「处理中」，按什么都没反应。
+                    // 补一条错误收口，让用户至少能重新发一句。
+                    if !terminal_seen {
+                        let _ = forwarder.emit(
+                            "agent-event",
+                            AgentEventEnvelope {
+                                session_id: owner.clone(),
+                                event: AgentEvent::Error {
+                                    message: UiText::new(
+                                        "agent.turn_vanished",
+                                        "that round went away without finishing; nothing else is running, send it again",
+                                    ),
+                                },
+                            },
+                        );
+                    }
                     break;
                 };
                 if matches!(event, AgentEvent::DocumentUpdated { .. }) {
@@ -513,6 +535,14 @@ pub(crate) fn run_turn(
                             event: pending,
                         },
                     );
+                }
+                if matches!(
+                    event,
+                    AgentEvent::Completed { .. }
+                        | AgentEvent::Error { .. }
+                        | AgentEvent::Interrupted
+                ) {
+                    terminal_seen = true;
                 }
                 let _ = forwarder.emit(
                     "agent-event",
@@ -532,19 +562,49 @@ pub(crate) fn run_turn(
     // 走守门员那层：主循环万一崩在半路，也要给这一回合补一个收口事件，
     // 不然前端的 running 永远不收，用户按什么都没反应。
     let text = text.to_string();
-    tauri::async_runtime::spawn(async move {
+    // 句柄留一份给停止键：取消标志是主路（主循环 120ms 轮一次），但万一
+    // 那一轮卡在没人轮询标志的等待里，宽限期一过就得靠它当场掐掉。
+    let task = tauri::async_runtime::spawn(async move {
         session
             .run_turn_guarded_with_preset(text, attachments, tx, pinned_style, pinned_presets)
             .await;
     });
+    state.note_turn_task(id, task);
     Ok(())
 }
 
 /// 中断当前 turn：流式轮询 120ms 内收尾，回一条 Interrupted 事件。
+///
+/// 正常路径只是设一个取消标志。但主循环若卡在某个不轮询标志的等待里
+/// （外部工具、生图、写盘这些环节都出现过），界面上按了停止就只会干等：
+/// 标志没人看，收尾事件也就永远不来。所以这里给两秒宽限，还不放手就把
+/// 这一轮的 task 直接掐掉——future 一蒸发，事件通道随之关闭，转发那头
+/// 会替这一轮补一条收尾，前端不会永远停在「处理中」。
 #[tauri::command]
-pub fn agent_interrupt(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
-    state.session(&id)?.interrupt();
+pub async fn agent_interrupt(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
+    let session = state.session(&id)?;
+    session.interrupt();
+    for _ in 0..20 {
+        if !session.is_busy() {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    state.abort_turn_task(&id);
     Ok(())
+}
+
+/// 这一轮到底还在不在跑。前端的「处理中」是拿事件推出来的：收尾事件一旦
+/// 丢在路上（切后台、WebView 重建），界面会永远停在转圈上，停止键按了也不
+/// 会有回音。静默提醒和停止入口拿这个读数对账，才能把「界面假死」和
+/// 「真还在跑」分开——前者当场就地收摊，不用等下一次超时。
+#[tauri::command]
+pub fn agent_turn_status(state: State<'_, Arc<AppState>>, id: String) -> Result<Value, String> {
+    let session = state.session(&id)?;
+    Ok(serde_json::json!({
+        "busy": session.is_busy(),
+        "cancelled": session.is_cancelled(),
+    }))
 }
 
 /// 用户对一条挂起的工具调用给出决定。call_id 对不上（新一轮已经开始）会报错，

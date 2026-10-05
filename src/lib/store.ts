@@ -20,6 +20,7 @@ import {
 } from "./transcript";
 import type {
   ActiveContext,
+  AgentTurnStatus,
   Attachment,
   AgentEvent,
   ApprovalDecision,
@@ -714,6 +715,11 @@ export const STALL_SECONDS = 1800;
 
 const STALL_MS = STALL_SECONDS * 1000;
 
+/** 等一小段，让 Rust 侧的收尾事件有机会先到，再决定要不要本地收口。 */
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /**
  * 离开多久再回来才算「睡了一觉」：短于这个时长（切了个窗口、看了一眼浏览器）
  * 不碰静默表，只有真的离开过（休眠、长时间切走）才对齐各路计时。
@@ -862,8 +868,109 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     clearStallWatch();
     stallTimer = setTimeout(() => {
       stallTimer = null;
-      if (getState().running) setState({ stalled: true });
+      const state = getState();
+      if (!state.running) return;
+      // 先按原逻辑亮提醒，用户不必等一次 IPC 往返；随后再问 Rust 这轮到底
+      // 还在不在跑。后者是僵尸 running 的对账口：task 已被 abort、事件丢了，
+      // 界面就得自己收口，不能把停止和重试继续押在不会来的事件上。
+      setState({ stalled: true });
+      const id = state.activeId;
+      if (id) void reconcileReleasedTurn(id, turnVanishedEvent(), 320);
     }, STALL_MS);
+  }
+
+  /** 本地构造一条收口事件：Rust 已经说这轮不在跑，而收尾事件没送到。 */
+  function turnVanishedEvent(): AgentEvent {
+    return {
+      kind: "error",
+      message: {
+        key: "agent.turn_vanished",
+        fallback:
+          "that round went away without finishing; nothing else is running, send it again",
+      },
+    };
+  }
+
+  /** 这条会话当前在不在跑。后台回合看影子，台前回合看 running。 */
+  function isSessionRunning(id: string): boolean {
+    const state = getState();
+    if (state.activeId === id) return state.running;
+    return state.sessionShadows[id]?.running ?? false;
+  }
+
+  /**
+   * 问一次 Rust 的权威运行读数。
+   *
+   * 读不到或形状不对（旧后端、临时 IPC 错误）时返回 null，调用方保持原样：
+   * 宁可多等一次真实收尾事件，也不能拿一个猜出来的 false 把正在跑的回合掐掉。
+   */
+  async function readTurnStatus(id: string): Promise<AgentTurnStatus | null> {
+    try {
+      const status = await bridge.turnStatus(id);
+      if (typeof status?.busy !== "boolean") return null;
+      return status;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 把一条已经不在 Rust 上运行的僵尸回合，在本地补一个收口。
+   *
+   * 台前会话照常封口对话、清 running、撤掉静默表；后台会话折进影子，用户切
+   * 回来时看到的是「已结束」，而不是一个永远转圈的假现场。
+   */
+  function settleTurnLocally(id: string, event: AgentEvent): boolean {
+    const state = getState();
+    if (state.activeId === id) {
+      if (!state.running) return false;
+      const elapsed =
+        state.runStartedAt === null ? state.runElapsedMs : Date.now() - state.runStartedAt;
+      setState({
+        entries: sealTranscript(reduceEvent(state.entries, event, state.lang)),
+        running: false,
+        runStartedAt: null,
+        runElapsedMs: elapsed,
+        stalled: false,
+        pendingApproval: null,
+      });
+      clearStallWatch();
+      void getState().refreshSessions();
+      return true;
+    }
+    const shadow = state.sessionShadows[id];
+    if (!shadow?.running) return false;
+    foldBackgroundEvent(id, event);
+    return true;
+  }
+
+  /**
+   * 在 Rust 说「这条会话已不忙」之后，把本地僵尸 running 收掉。
+   *
+   * 先留 `waitMs` 的窗口给正常收尾事件：事件先到就走原路，事件没到才本地补口。
+   * 这样既不会把真在跑的回合误判结束，也不会让界面上永远挂着一个不存在的任务。
+   */
+  async function reconcileReleasedTurn(
+    id: string,
+    event: AgentEvent,
+    waitMs = 640,
+  ): Promise<boolean> {
+    if (!isSessionRunning(id)) return true;
+    const deadline = Date.now() + waitMs;
+    let status = await readTurnStatus(id);
+    if (!status) return false;
+    while (status.busy && Date.now() < deadline) {
+      await wait(80);
+      if (!isSessionRunning(id)) return true;
+      status = await readTurnStatus(id);
+      if (!status) return false;
+    }
+    if (status.busy) return false;
+    // 正常路径下，abort 之后转发任务会立刻补一条收尾事件；再让一小步，
+    // 能把「本地补口」和「真实事件」同时落下造成的重复回执挡掉。
+    await wait(80);
+    if (!isSessionRunning(id)) return true;
+    return settleTurnLocally(id, event);
   }
 
   /**
@@ -1889,20 +1996,64 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     },
 
     retry: async () => {
-      const last = getState().lastQuery;
-      if (!last) return;
+      const state = getState();
+      // lastQuery 会在切会话时清空；重试入口只认它的话，用户切回来点重试
+      // 就会得到一次静默 no-op。对话里最后一条用户消息是同一份事实，兜底重建。
+      const fallback = [...state.entries]
+        .reverse()
+        .find((entry) => entry.kind === "user");
+      const last =
+        state.lastQuery ??
+        (fallback && fallback.kind === "user"
+          ? { text: fallback.text, attachments: fallback.attachments }
+          : null);
+      if (!last) {
+        flagKey("store.retry_unavailable");
+        return;
+      }
+      // 先确保上一轮真的松手。停止按钮和直接重试走同一条对账链：
+      // Rust 说不在跑就本地收口，别让一个僵尸 running 把重试挡在门外。
+      if (getState().running) {
+        await getState().interrupt();
+        if (getState().running && !(await waitForTurnRelease(2000))) {
+          failKey("agent.busy");
+          return;
+        }
+      }
       // 占位与运行态在 send 里统一布置；这里只把上次的字和附件还给发送入口。
       setState({ attachments: last.attachments });
       await getState().send(last.text);
     },
 
     interrupt: async () => {
-      const id = getState().activeId;
-      if (!id) return;
-      try {
-        await bridge.interrupt(id);
-      } catch (error) {
-        flagKey("store.interrupt_failed", { error: String(error) });
+      const state = getState();
+      const running = new Set<string>();
+      if (state.running && state.activeId) running.add(state.activeId);
+      // 后台影子里可能还压着真正在跑的那一轮：用户切走后点停止，
+      // 不能只盯着当前台前会话，否则按键看着像没反应。
+      for (const [id, shadow] of Object.entries(state.sessionShadows)) {
+        if (shadow.running) running.add(id);
+      }
+      if (running.size === 0) {
+        // 本地 running 已经没了，只剩一条过期的静默提醒：顺手撤掉，
+        // 别让用户对着一个已经没有任务的横幅再点一次。
+        clearStallWatch();
+        if (state.stalled) setState({ stalled: false });
+        return;
+      }
+      for (const id of running) {
+        try {
+          await bridge.interrupt(id);
+        } catch (error) {
+          // 停止命令的回执失败，不代表这一轮还在跑：IPC 抖一下、
+          // 会话刚被外部删掉，都可能让这一句报错。
+          flagKey("store.interrupt_failed", { error: String(error) });
+        }
+        // 停止命令回来只代表 Rust 收到了；前端还要对一次账。若 Rust 已经
+        // 不忙而收尾事件没到，就地补一条「已中断」，否则界面会永远转圈。
+        // 这一步放在成功和失败之外：命令失败但 Rust 其实已经空闲时（比如
+        // IPC 掉了一下），界面同样不该继续押着不会来的事件转圈。
+        await reconcileReleasedTurn(id, { kind: "interrupted" });
       }
     },
 

@@ -144,6 +144,8 @@ export const zh = {
   "agent.empty_message": "消息是空的：写点什么，或者附上一张图",
   "agent.busy": "这个会话还在处理上一条消息，等它跑完，或者先点停止",
   "agent.turn_crashed": "这一回话中途出了岔子，没有保存任何结果；把刚才的话再发一遍就好",
+  "agent.turn_vanished":
+    "这一轮没有正常收尾，任务已经不在运行；重新发送即可",
   "agent.request_failed": "请求没成：{reason}",
   "agent.request_refused": "重试 {attempts} 次后，这个提供方还是不接这单：{reason}；{why}",
   "agent.request_halted": "这一轮不再重发了：{why}；最后一次报错：{reason}",
@@ -664,6 +666,7 @@ export const zh = {
   "store.preset_stack_full": "收尾规矩最多同时生效 {max} 条，多出来的没有选中",
   "store.send_failed": "发送失败：{error}",
   "store.interrupt_failed": "中断失败：{error}",
+  "store.retry_unavailable": "没有可重试的上一条消息。",
   "store.save_mcp_failed": "保存 MCP 服务器失败：{error}",
   "store.remove_mcp_failed": "删除 MCP 服务器失败：{error}",
   "store.connect_mcp_failed": "连接 MCP 服务器失败：{error}",
@@ -1084,6 +1087,8 @@ export const en: Record<TKey, string> = {
     "This conversation is still working on the previous message; let it finish or press stop first",
   "agent.turn_crashed":
     "That turn stopped unexpectedly and nothing was saved; send it again",
+  "agent.turn_vanished":
+    "That round did not finish cleanly and is no longer running; send it again",
   "agent.request_failed": "The request failed: {reason}",
   "agent.request_refused":
     "This provider will not take this call ({attempts} retry(s) made): {reason}; {why}",
@@ -1612,6 +1617,7 @@ export const en: Record<TKey, string> = {
   "store.preset_stack_full": "At most {max} finish presets apply at once; the extra ones were not selected",
   "store.send_failed": "send failed: {error}",
   "store.interrupt_failed": "interrupt failed: {error}",
+  "store.retry_unavailable": "There is no previous message to retry.",
   "store.save_mcp_failed": "could not save the MCP server: {error}",
   "store.remove_mcp_failed": "could not remove the MCP server: {error}",
   "store.connect_mcp_failed": "could not connect the MCP server: {error}",

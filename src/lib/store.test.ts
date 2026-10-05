@@ -1313,6 +1313,167 @@ describe("静默提醒（模型半天不吭声）", () => {
   });
 });
 
+describe("僵尸回合对账：停止和重试不再押在不会来的事件上", () => {
+  afterEach(() => {
+    delete invokeResults["agent_turn_status"];
+    delete invokeErrors["agent_turn_status"];
+    delete invokeErrors["agent_interrupt"];
+  });
+
+  /** 静默看护响了之后的那一刻：横幅亮着，界面还在转圈，但 Rust 那头未必还活着。 */
+  function stalledTurn() {
+    useStore.setState({
+      activeId: "doc-01",
+      lang: "zh",
+      entries: [
+        { key: "u-1", kind: "user", text: "画一只八帧橘猫行走图", attachments: [] },
+        { key: "p-1", kind: "pending", thinking: false },
+      ],
+      // 切会话会把 lastQuery 清掉：这正是「切回来点重试原地不动」的由来。
+      lastQuery: null,
+      attachments: [],
+      running: true,
+      runStartedAt: Date.now() - STALL_SECONDS * 1000,
+      stalled: true,
+      notice: null,
+      sessionShadows: {},
+    });
+    invokeCalls.length = 0;
+  }
+
+  it("Rust 说这轮早就不在跑：停止键就地收口，横幅一起撤掉", async () => {
+    stalledTurn();
+    invokeResults["agent_turn_status"] = { busy: false, cancelled: true };
+
+    await useStore.getState().interrupt();
+
+    const state = useStore.getState();
+    expect(invokeCalls.some((call) => call.cmd === "agent_interrupt")).toBe(true);
+    expect(state.running).toBe(false);
+    expect(state.stalled).toBe(false);
+    // 占位节点跟着封口：不留一枚永远在闪的光标。
+    expect(state.entries.some((entry) => entry.kind === "pending")).toBe(false);
+  });
+
+  it("Rust 说还在跑：本地不收尾，等真正的收尾事件来封口", async () => {
+    stalledTurn();
+    invokeResults["agent_turn_status"] = { busy: true, cancelled: false };
+
+    await useStore.getState().interrupt();
+
+    // 对账窗口内一直读回 busy，说明后端确实还压着这一轮：不能替它判死刑。
+    expect(useStore.getState().running).toBe(true);
+    publishAgent("doc-01", { kind: "interrupted" });
+    expect(useStore.getState().running).toBe(false);
+    expect(useStore.getState().stalled).toBe(false);
+  });
+
+  it("读不到权威读数：宁可按原样挂着，也不拿猜出来的 false 掐掉真回合", async () => {
+    stalledTurn();
+    invokeErrors["agent_turn_status"] = "ipc closed";
+
+    await useStore.getState().interrupt();
+
+    expect(useStore.getState().running).toBe(true);
+    expect(useStore.getState().stalled).toBe(true);
+  });
+
+  it("停止命令报错但 Rust 已经空闲：照样就地收口，只多留一条告警", async () => {
+    stalledTurn();
+    invokeErrors["agent_interrupt"] = "ipc closed";
+    invokeResults["agent_turn_status"] = { busy: false, cancelled: true };
+
+    await useStore.getState().interrupt();
+
+    const state = useStore.getState();
+    expect(state.running).toBe(false);
+    expect(state.stalled).toBe(false);
+    expect(state.notice?.isError).toBe(true);
+  });
+
+  it("切回来点重试：以对话里最后一条用户消息为准，而不是静默不动", async () => {
+    stalledTurn();
+    invokeResults["agent_turn_status"] = { busy: false, cancelled: true };
+
+    await useStore.getState().retry();
+
+    expect(
+      invokeCalls.filter((call) => call.cmd === "agent_send_message"),
+    ).toEqual([
+      {
+        cmd: "agent_send_message",
+        args: {
+          id: "doc-01",
+          text: "画一只八帧橘猫行走图",
+          attachments: [],
+          modelId: null,
+          style: null,
+          presets: [],
+        },
+      },
+    ]);
+    expect(useStore.getState().running).toBe(true);
+  });
+
+  it("没有可重试的消息：亮一条提示，不装作在跑", async () => {
+    useStore.setState({
+      activeId: "doc-01",
+      lang: "zh",
+      entries: [{ key: "p-1", kind: "pending", thinking: true }],
+      lastQuery: null,
+      running: false,
+      stalled: false,
+      notice: null,
+      sessionShadows: {},
+    });
+    invokeCalls.length = 0;
+
+    await useStore.getState().retry();
+
+    expect(invokeCalls.some((call) => call.cmd === "agent_send_message")).toBe(false);
+    expect(useStore.getState().notice).toEqual({
+      text: "没有可重试的上一条消息。",
+      isError: true,
+    });
+  });
+
+  it("镜头在别处时点停止：后台那一轮的 interrupt 照样发得出去", async () => {
+    useStore.setState({
+      activeId: "doc-b",
+      lang: "zh",
+      entries: [],
+      running: false,
+      stalled: false,
+      lastQuery: null,
+      sessionShadows: {
+        "doc-a": {
+          entries: [{ key: "u-a", kind: "user", text: "画猫", attachments: [] }],
+          running: true,
+          runStartedAt: Date.now(),
+          runElapsedMs: null,
+          stalled: false,
+          usage: null,
+          pendingApproval: null,
+          lastEventAt: Date.now(),
+          generation: 1,
+          sealed: false,
+          seeded: false,
+        },
+      },
+    });
+    invokeCalls.length = 0;
+    invokeResults["agent_turn_status"] = { busy: false, cancelled: true };
+    invokeResults["session_list"] = [];
+
+    await useStore.getState().interrupt();
+
+    expect(
+      invokeCalls.some((call) => call.cmd === "agent_interrupt" && call.args.id === "doc-a"),
+    ).toBe(true);
+    expect(useStore.getState().sessionShadows["doc-a"]?.running).toBe(false);
+  });
+});
+
 describe("回合只由它自己结束，侧道失败不陪葬", () => {
   afterEach(() => {
     delete invokeErrors["document_png_url"];

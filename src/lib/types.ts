@@ -287,6 +287,16 @@ export type AgentEvent =
   | { kind: "error"; message: UiText }
   | { kind: "interrupted" };
 
+/** Rust 侧这一轮的真实占用状态。
+ *
+ * 前端的事件流只覆盖「收到过什么」，切后台、WebView 重建或 task 被掐掉时，
+ * 收尾事件可能根本到不了；这个读数专门用来把界面上的僵尸 running 和真在跑的
+ * 回合分开。`cancelled` 只作诊断，界面收口看 `busy`。 */
+export interface AgentTurnStatus {
+  busy: boolean;
+  cancelled: boolean;
+}
+
 /** `agent-event` 是全局通道，一个会话的事件对所有会话都可见，所以载荷必须自带
  * 是谁发的：用户切走之后上一个回合还要一两百毫秒才停干净，这期间它仍在广播。
  * 少了 session_id，它的 token 会拼进新对话尾巴，document_updated 会把新画布

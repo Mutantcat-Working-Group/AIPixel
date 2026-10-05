@@ -12,6 +12,7 @@ import type {
   ActiveContext,
   AgentEvent,
   AgentEventEnvelope,
+  AgentTurnStatus,
   Attachment,
   ApprovalDecision,
   BatchEvent,
@@ -266,6 +267,14 @@ export function sendMessage(
 /** 打断当前这一轮。主循环跑在 Rust，停不停由它说了算，前端只是递个话。 */
 export function interrupt(id: string): Promise<void> {
   return invoke("agent_interrupt", { id });
+}
+
+/** 问 Rust：这条会话的这一轮到底还占不占着主循环。
+ *
+ * 停止键和新一轮发送都拿它兜底。只看事件流的话，task 被 abort、WebView
+ * 重建、或者历史遗留的假 running 都会让界面永远等一条不会来的收尾事件。 */
+export function turnStatus(id: string): Promise<AgentTurnStatus> {
+  return invoke<AgentTurnStatus>("agent_turn_status", { id });
 }
 
 /**

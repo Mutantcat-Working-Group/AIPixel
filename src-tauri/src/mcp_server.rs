@@ -451,10 +451,17 @@ fn parse_http_request(buf: &[u8]) -> Option<HttpRequest> {
     let body = match content_length {
         Some(0) => Some(Vec::new()),
         Some(len) => {
-            if buf.len() < body_start + len {
+            // 偏移用 checked 加法算：Content-Length 完全由对方说了算，报一个
+            // `usize::MAX` 就能让 `body_start + len` 在 release 下绕回一个小值，
+            // 下面的切片随即「起点大于终点」当场 panic，而 debug 下是溢出 panic。
+            // 两种都等于对面一句话把连接任务打死（连 413 都回不去）。算不出
+            // 合法终点就一律当作「还没收全」，让读循环的 MAX_BODY_BYTES 闸门
+            // 去回 413。
+            let end = body_start.checked_add(len)?;
+            if buf.len() < end {
                 return None;
             }
-            Some(buf[body_start..body_start + len].to_vec())
+            Some(buf[body_start..end].to_vec())
         }
         None => None,
     };
@@ -2087,6 +2094,24 @@ mod tests {
         // 方法名大小写不敏感。
         let lower = b"get /mcp HTTP/1.1\r\n\r\n";
         assert_eq!(parse_http_request(lower).unwrap().method, "GET");
+    }
+
+    /// 荒唐的 Content-Length 只能把请求判成「没收全」，绝不能把连接任务打死。
+    /// 曾经这里直接算 `body_start + len`：release 下大数绕回小值、切片起点大于
+    /// 终点当场 panic；debug 下是溢出 panic。对面只要写一行超长长度就能把这一条
+    /// 连接炸掉，连 413 都回不去。
+    #[test]
+    fn parse_http_request_survives_an_absurd_content_length() {
+        for huge in [usize::MAX, usize::MAX - 4, usize::MAX / 2] {
+            let raw = format!("POST /mcp HTTP/1.1\r\ncontent-length: {huge}\r\n\r\n{{}}");
+            assert!(
+                parse_http_request(raw.as_bytes()).is_none(),
+                "报 {huge} 时该判成没收全，而不是算出个非法终点"
+            );
+        }
+        // 界内但还没收全的，仍旧只是「再等等」，别把正常的大 body 一并误伤。
+        let raw = "POST /mcp HTTP/1.1\r\ncontent-length: 100\r\n\r\n{}";
+        assert!(parse_http_request(raw.as_bytes()).is_none());
     }
 
     /// 响应头是客户端能不能接上的关键：少一个 CORS 头，浏览器里的引擎就过不去。

@@ -116,6 +116,11 @@ pub struct AppState {
     /// 落盘串行化。三份配置共用一套「写临时文件再 rename」的路子，
     /// 两条命令同时保存时得排队，否则两份内容会互相盖对方的临时文件。
     save_lock: Mutex<()>,
+    /// 各会话正在跑的那一轮 task。取消标志是主路：主循环每 120ms 轮一次，
+    /// 正常情况下设个旗就够了；这里是最后一道保险——主循环万一卡在一个没有
+    /// 轮询点的等待里，旗子永远没人看，用户按了停止只能干等。留下句柄，
+    /// 宽限期一过就把这一轮直接掐掉，让会话重新接得下活。
+    turn_tasks: Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>,
     counter: Mutex<u64>,
 }
 
@@ -136,6 +141,7 @@ impl Default for AppState {
             config_dir: Mutex::new(scratch_config_dir()),
             close_guard: Mutex::new(false),
             save_lock: Mutex::new(()),
+            turn_tasks: Mutex::new(HashMap::new()),
             counter: Mutex::new(0),
         }
     }
@@ -833,6 +839,35 @@ impl AppState {
         self.save_limits();
     }
 
+    /// 记下这一轮的 task 句柄。一个会话同一时刻只跑一轮（BusyGuard 挡着），
+    /// 所以直接顶掉旧的：留着早就跑完、或者已经被掐掉的句柄只会让停止键认错人。
+    pub(crate) fn note_turn_task(&self, id: &str, task: tauri::async_runtime::JoinHandle<()>) {
+        self.turn_tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id.to_string(), task);
+    }
+
+    /// 掐掉这一轮的 task，返回是否真的有东西可掐。
+    ///
+    /// 调用方负责先设中断标志、再给足宽限期：取消标志是主路，这里只兜
+    /// 「轮询标志那条路也堵死了」的死角。句柄被 abort 之后 future 当场蒸发，
+    /// BusyGuard 随之析构，会话不会永远钉在「忙」上。
+    pub(crate) fn abort_turn_task(&self, id: &str) -> bool {
+        let task = self
+            .turn_tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(id);
+        match task {
+            Some(task) => {
+                task.abort();
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn drop_session(&self, id: &str) {
         // 删掉的那一笔也得落盘：光改内存的话，重启后这条会话又回来了，
         // 用户以为自己删过，白白再删一遍。
@@ -847,6 +882,9 @@ impl AppState {
         if let Some(session) = removed {
             session.interrupt();
         }
+        // 中断标志同样可能没人看：会话都要从簿里消失了，这一轮更不该留着
+        // 继续烧额度。句柄在就当场掐掉，别等用户发现删了还在跑。
+        self.abort_turn_task(id);
         // 广播闸门跟着会话一起收尸：留着的话，同名会话重建后会继承上一个的
         // 合并窗口，第一发广播被无端压后一小会儿。
         crate::broadcast::release(id);
@@ -1096,5 +1134,29 @@ mod tests {
             ..good
         };
         assert!(absurd.validated().is_err(), "u32::MAX 的宽高必须被挡在门外");
+    }
+
+    /// 停止键的最后一道保险：主循环卡在不轮询取消标志的等待里时，句柄一 abort
+    /// 就得当场停住。留着的句柄要么掐错人、要么让「忙」永远下不来，两种都够呛。
+    #[test]
+    fn aborting_a_noted_turn_task_kills_the_stuck_future() {
+        let state = AppState::default();
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = finished.clone();
+        let task = tauri::async_runtime::spawn(async move {
+            // 故意挑一个不会自己醒的等待：只有 abort 能让这个 future 停下。
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        state.note_turn_task("doc-1", task);
+
+        assert!(state.abort_turn_task("doc-1"), "记过的句柄必须掐得动");
+        // 句柄是「一回合一个」的：掐掉之后再掐同一条不能假装还有东西。
+        assert!(!state.abort_turn_task("doc-1"));
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        assert!(
+            !finished.load(std::sync::atomic::Ordering::SeqCst),
+            "被 abort 的 future 不该继续跑到终点"
+        );
     }
 }

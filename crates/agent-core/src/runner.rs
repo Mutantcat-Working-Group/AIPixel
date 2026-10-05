@@ -1436,6 +1436,13 @@ impl AgentSession {
         self.cancelled.load(Ordering::SeqCst)
     }
 
+    /// 这一轮是不是还压在会话手上。前端的「处理中」是拿事件推出来的，
+    /// 收尾事件一丢就永远转圈；上层靠这个读数对账，才能把「界面假死」
+    /// 和「真的还在跑」分开，也才知道什么时候该动用最后手段掐掉任务。
+    pub fn is_busy(&self) -> bool {
+        self.busy.load(Ordering::SeqCst)
+    }
+
     /// 把一段「可能要等很久」的等待切成可中断的。
     ///
     /// 生图要等模型回图、外部 MCP 工具要等别人的服务器，两者都可能挂上几分钟。
