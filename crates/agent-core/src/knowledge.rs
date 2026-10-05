@@ -163,6 +163,23 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         ],
         body: "A multi-frame deliverable inherits the rhythm of its motion: keep subject placement and palette byte-identical across the strip so only the moving limbs change, park the key and contact poses at the ends of the row and space the in-betweens evenly between them, then hold each key pose one duration longer than its briefs. Keep the ground line, the light direction and the body outline the same on every frame - a limb that drifts one pixel mid-loop reads as a glitch, not as motion. Read the frames back before finishing: a tool result shows the active frame only, so a limb that wanders out of the body on frame three is invisible unless you look at all of them.",
     },
+    // 动画交付。序列帧和图集都只是「壳」，播放时真正决定手感的是逐帧时长；
+    // 只给一张图集就让引擎按固定帧率播，是交付环节最常见的失真来源。
+    KnowledgeEntry {
+        id: "animation-export",
+        title: "Delivering animation: PNG sequence, sheet and manifest",
+        keywords: &[
+            "导出动画", "导出序列帧", "导出gif", "导出精灵图", "序列帧导出", "图片序列",
+            "帧时长导出", "动画交付", "图集导出", "循环动画导出", "导出apng", "导出webp",
+            "导入engine", "导入引擎动画", "导入unity", "导入godot", "unity动画导入",
+            "godot动画导入", "每帧时长", "帧时长清单",
+            "export animation", "png sequence", "numbered frames", "frame sequence export",
+            "export gif", "animated gif", "export sprite sheet", "atlas export",
+            "animation manifest", "frame duration manifest", "loop animation export",
+            "aseprite export", "unity animation import", "godot animation import",
+        ],
+        body: "Deliver animation in the format the consumer actually plays, and keep the editable master. Still image: PNG. Web or social preview that has to move on its own: GIF, or APNG/WebP when the platform takes them - GIF holds only one-bit alpha, so a soft anti-aliased edge becomes a hard matte or a black fringe and an animated GIF wants the cleanest hard edges. Engines: export a NUMBERED PNG sequence (name_0001.png, name_0002.png ...) or one sprite sheet, and when you ship a sheet also ship a small manifest that records the frame size, the frame count, the origin or pivot and every frame's duration in milliseconds. A sheet by itself carries no per-frame timing, so an animation that looked right in the editor plays flat and mechanical once the engine imports it at a uniform rate - the timing has to travel with the frames. Never encode the timing into the pixels and never bake the sheet's grid into the artwork. Export at 100%, or at an integer multiple with nearest-neighbour resampling; a fractional resize destroys the pixel grid. When the source has layers and frames, that layered file stays the master and every PNG, GIF or sheet is regenerated from it - the export is a build artifact, not the file to edit next time.",
+    },
     KnowledgeEntry {
         id: "sheet-layouts",
         title: "Layout templates and character facings",
@@ -340,7 +357,7 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "smudge tool", "gradient overlay", "bucket tool", "line tool", "oekaki",
             "jpg", "png", "gif",
         ],
-        body: "Pixel art is defined by authorial control at the single-pixel level, not by a file extension or a small canvas. Any tool that places or smooths pixels automatically - blur, smudge, smear, blend brushes, gradient overlays, auto anti-aliasing - is off the table, because the artist is no longer choosing where each pixel lands. The bucket fill and the line tool are fine: what matters is that their output stays editable one pixel at a time. A practical test: if the result could have been produced without ever zooming in, it is ordinary digital painting (oekaki), not pixel art. Never export the master as JPG - lossy compression smears hard edges and silently introduces colours that were never in the palette; keep the editable source and export PNG, or GIF when a limited palette or an animation needs it.",
+        body: "Pixel art is defined by authorial control at the single-pixel level, not by a file extension or a small canvas. Any tool that places or smooths pixels automatically - blur, smudge, smear, blend brushes, gradient overlays, auto anti-aliasing - is off the table, because the artist is no longer choosing where each pixel lands. The bucket fill and the line tool are fine: what matters is that their output stays editable one pixel at a time. A practical test: if the result could have been produced without ever zooming in, it is ordinary digital painting (oekaki), not pixel art. Do not confuse the technical rules with the art: pixel art is just another medium, and a small canvas does not make up for weak drawing - the skills it still needs are anatomy, perspective, light and shadow, colour theory and even art history, so study them as drawing fundamentals rather than as pixel tricks. Never export the master as JPG - lossy compression smears hard edges and silently introduces colours that were never in the palette; keep the editable source and export PNG, or GIF when a limited palette or an animation needs it.",
     },
     KnowledgeEntry {
         id: "style-tiers",
@@ -1763,6 +1780,10 @@ mod tests {
             ("用 db32 的配色画一个角色", "palette-library"),
             ("配上 idle 和 attack 的动作，各多少帧", "anim-catalog"),
             ("角色要上下左右四个朝向，每个朝向一套行走", "sheet-layouts"),
+            (
+                "导出成 unity 用的序列帧，每帧时长写在哪里",
+                "animation-export",
+            ),
         ] {
             let hits = retrieve(query, 4);
             assert!(
