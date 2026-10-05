@@ -29,9 +29,11 @@ pub const DEFAULT_LIMIT: usize = 4;
 ///
 /// 上限要压得住闲聊轮，又不能小到把「奔跑」「瓦片」这种真·技法连坐丢掉。
 /// 一条「画 5 帧橘猫奔跑」会同时够到 `cat` + `walk-cycle` + `locomotion` +
-/// `quadruped`，四条正文合计约三千字符，所以给到 3400——刚好够一整轮
-/// 把姿态相位表、四足解剖和落地的行为准则一并带上，再多就该收手了。
-pub const DEFAULT_BUDGET: usize = 3400;
+/// `quadruped`，随知识库扩充，四条正文合计已接近四千四百字符，所以给到
+/// 5200——够一整轮把姿态相位表、四足解剖和落地的行为准则一并带上，
+/// 再多就该收手了。加了新条目、正文写长之后这条要跟着重算，否则被挤掉的
+/// 恰是检索分最高的那几条。
+pub const DEFAULT_BUDGET: usize = 5200;
 
 /// 行为准则三条：规格锁、收工自检、别画成程序化假图案。
 ///
@@ -56,7 +58,7 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         // `rpmaker-sheet` 也认这三个字。两边都命中时按词长加权打平，
         // 由库内顺序兜底——本条目在前，所以纯步态提问仍归步态。
         keywords: &["行走", "行走图", "走路", "步态", "奔跑", "跑动", "walk", "walking", "walk cycle", "run cycle", "gait"],
-        body: "Drive every limb from ONE phase variable. A 4-beat walk spreads the four legs over 0 / 0.25 / 0.5 / 0.75; a trot uses two diagonal pairs a half cycle apart. Lift a foot only while it swings forward - lift = max(0, sin(2pi*phase)) - and keep it planted while it travels back. The body bobs at twice the step frequency and the head counter-bobs a little. Close the loop: the last frame has to flow back into the first. An EIGHT-frame walk is the generous default because it can hold all four classic cartoon poses - contact, down, pass, up - twice per cycle; short-limbed chibi sprites and tiny canvases do fine with four to six, while long full-length limbs need the eight or the motion reads as a shuffle.",
+        body: "Drive every limb from ONE phase variable. A 4-beat walk spreads the four legs over 0 / 0.25 / 0.5 / 0.75; a trot uses two diagonal pairs a half cycle apart. Lift a foot only while it swings forward - lift = max(0, sin(2pi*phase)) - and keep it planted while it travels back. The body bobs at twice the step frequency and the head counter-bobs a little. Close the loop: the last frame has to flow back into the first. An EIGHT-frame walk is the generous default because it can hold all four classic cartoon poses - contact, down, pass, up - twice per cycle; short-limbed chibi sprites and tiny canvases do fine with four to six, while long full-length limbs need the eight or the motion reads as a shuffle. For a believable realistic walk, drive the eight keys from real footage rather than feel: screen-record or step through a walk, cut it to eight keys, and keep the four phases - contact (heel lands, limbs at the extreme, body lowest), down (foot flattens, body still low), pass (legs cross, body highest) and swing (lead leg reaches forward off the ground) - then mirror those four for the second half. The head should travel a TRIANGLE wave, not a sine: the pass frame rises faster than the contact frame drops, and uniform sine motion reads mechanical. Arms swing opposite to the legs and opposite-side limbs share one momentum, so the right arm's swing tracks the left leg. There is no need to redraw every direction - mirror the side view for the other side and re-draw only the asymmetric details.",
     },
     KnowledgeEntry {
         id: "anim-catalog",
@@ -101,6 +103,27 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "spaceship", "aircraft", "plane sprite", "star fighter",
         ],
         body: "In a shoot 'em up, readability beats realism. The player hitbox is a tiny circle kept at the same relative pixel across every animation frame; the player's own bullets and the enemy bodies get generous bounds so aiming always feels fair; enemy bullets get small centre hitboxes. The small player box plus the buffer is the whole feel of a tight dodge, and the player hitbox must never stick out past the sprite's own pixels. The player craft is usually about 48x32 and animated with the SAME trick for every movement option: one neutral level-flight frame plus two banked frames each way, driven by input press time - a tap shows the shallow roll briefly, a hold shows the full bank and stays there, and the release rolls back through the shallow position. Illustrate ROLL for vertical movement and keep the nose level: pitching distorts the pixel clusters and breaks the always-straight-forward firing line, which level design assumes. NEVER put inertia on player movement in a shmup - tap should move a smidge and settle, hold should move flat and fast, because inertia adds a handicap the level design has to fight. Give ground units cheap motion (moving treads, wobbling wheels, a one-pixel bob) and only spend extra frames on an air unit that actually changes altitude on screen. Detachable options, pods or escorts around the ship are not just firepower - they add screen presence, which is how the player keeps track of position while reading bullet patterns.",
+    },
+    KnowledgeEntry {
+        id: "combat-idle",
+        title: "Idle fighting stance and combat breathing",
+        keywords: &[
+            "待机", "待机动画", "战斗待机", "格斗站姿", "战斗姿势", "起手式", "备战", "呼吸",
+            "晃动", "待机循环", "抱架",
+            "idle stance", "fighting stance", "combat idle", "guard stance", "breathing idle",
+        ],
+        body: "A fighting idle is a bounce, not a still: the character holds the guard pose while every part rides a small up-down breath cycle anchored to the torso. Build an eight-frame loop - the figure rises 1px (legs straighten, knees shift in, shoulders, elbows and fists rise, the inner fist travelling the most), holds the top for one frame as the heels lift, then drops back through two frames of knee bend before the legs decompress - and time the rise slower than the fall (frames 1-4 at 100ms, 5-8 at 50ms) so gravity reads instead of a floating bob. A boxer's stance (hands guarding the face, neck tucked into the shoulders, knees softly bent) suits a punch-heavy character; a karate side-stance with a lower centre of gravity and a wider base suits a kicking one. Clothes and hair add sub-movement on top of the same bounce - fabric follows the body one frame late, the loose hem and hair lag behind - but keep the base forms solid and the folds minimal, because a jumbled silhouette in motion reads worse than a simple one.",
+    },
+    KnowledgeEntry {
+        id: "melee-attacks",
+        title: "Melee attack animation and weapon weight",
+        keywords: &[
+            "近战", "近战攻击", "挥砍", "劈砍", "出拳", "拳击", "直拳", "刺拳", "勾拳", "踢击",
+            "回旋踢", "前踢", "攻击动画", "打击感", "挥剑", "重击", "大锤", "长矛",
+            "melee", "punch", "jab", "cross punch", "kick", "round kick", "front kick",
+            "sword swing", "attack animation", "hit stop",
+        ],
+        body: "A melee attack is four to six phases, and the weapon's weight is the whole story: anticipation (1 frame of wind-up - longer means heavier but adds input delay), smear (the fast travel, drawn as an elongated trail in simple colours so it stays legible), rebound (only when the weapon strikes the ground - one brief bounce), follow-through (full extension, held longer to sell commitment and weight), recover (one frame pulling back toward idle) and overshoot (the idle pose shifted 1px backwards, so every hit snaps back with energy). Never put a smear on the anticipation or recover frames - it muddies the forward strike. Frame timing in milliseconds, by weapon: short sword 100/50/50/50/100/50 (400ms total) for a fast, wide sweep with minimal delay; spear 200/50/50/50/150/50 (550ms) for a longer hold on the wind-up and extension that buys reach and commitment; hammer 250/50/50/50/300/100 (800ms), the slowest wind-up and recovery of the set, backed by screen shake and the rebound. Punches follow the same shape: a jab fires straight from the guard with no telegraph and stays fast enough to chain, while a cross loads the fists and swings the elbows out for one or two wind-up frames before the hips twist into it. Kicks chamber the knee first - a front kick snaps the leg out from a raised knee with the chamber only implied in the smear, and a round kick adds a load frame and a spring frame before the hip-driven snap. In an eight-direction set keep the weapon in the same hand in every direction, and bend the pose per direction so the hitbox stays balanced rather than copying one swing around the circle.",
     },
     KnowledgeEntry {
         id: "frame-timing",
@@ -188,8 +211,29 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
     KnowledgeEntry {
         id: "tilemap",
         title: "Tilesets and tilemaps",
-        keywords: &["瓦片", "地图", "地块", "瓷砖", "平铺", "程序化", "值噪声", "配比", "tilemap", "tile map", "tileset", "tile set", "tiles", "无缝平铺"],
-        body: "Procedural beats hand-drawn: lay the base value with value noise, smooth it with cosine interpolation, then quantise hard into the ramp - anything freehand reads as decoration. Drive the noise at TWO scales, or one octave alone comes out either blotchy or flat: place the large nodes every 8-16 px so the big regions read as terrain, and run a second, finer pass every 3-6 px for the subtle variation inside them. Colour it by probability: about 70% of cells the base value, 15% one step lighter, 10% one step darker, and at most 5% sparse features (pebble, crack, tuft) with no single feature over 1% of the tile. Make every edge weld: fill two pixels in from each border with the wrap rule and hold edge contrast to within one ramp step so the seam disappears. Keep the tile strictly quantised - one stray value announces the grid. Never draw a black outline on a tile. Then verify: repeat the tile 2x2, 4x4 and 6x6 and read the result, and confirm the rotations and mirrors read as different tiles. Work on a cell grid of 8, 16 or 32, keep ONE light direction and ONE ramp per material across the whole set, and author it at exactly 1x.",
+        keywords: &["瓦片", "地图", "地块", "瓷砖", "平铺", "程序化", "值噪声", "配比", "砖块", "砖墙", "砖块尺寸", "手绘瓦片", "tilemap", "tile map", "tileset", "tile set", "tiles", "无缝平铺", "brick", "brick pattern"],
+        body: "Procedural beats hand-drawn: lay the base value with value noise, smooth it with cosine interpolation, then quantise hard into the ramp - anything freehand reads as decoration. Drive the noise at TWO scales, or one octave alone comes out either blotchy or flat: place the large nodes every 8-16 px so the big regions read as terrain, and run a second, finer pass every 3-6 px for the subtle variation inside them. Colour it by probability: about 70% of cells the base value, 15% one step lighter, 10% one step darker, and at most 5% sparse features (pebble, crack, tuft) with no single feature over 1% of the tile. Make every edge weld: fill two pixels in from each border with the wrap rule and hold edge contrast to within one ramp step so the seam disappears. Keep the tile strictly quantised - one stray value announces the grid. Never draw a black outline on a tile. Then verify: repeat the tile 2x2, 4x4 and 6x6 and read the result, and confirm the rotations and mirrors read as different tiles. Work on a cell grid of 8, 16 or 32, keep ONE light direction and ONE ramp per material across the whole set, and author it at exactly 1x. Hand-authored tiles obey a short rulebook: distribute visual weight evenly so no region dominates and the repeat stays hidden; repeat the same key clusters and never let two key clusters touch except corner to corner, or they clump into noise; keep the colour count low, because a busy texture next to another busy texture exhausts the eye and negative space is the friend; and mirror a tile to get an orientation variant before drawing a new one. Build a set in layers - keep the full-bleed repeating texture on the base, shave its sides and corners off for the connection tiles, and put textures that do not fill the whole tile on their own layer so a few pieces can be combined instead of baked into every variant. For a 16px brick tile with a 1px grout, the only brick sizes that divide evenly are 15, 7, 3 and 1px - including when the pattern is tilted 45 degrees - so pick from those or the courses break.",
+    },
+    KnowledgeEntry {
+        id: "sprite-scale",
+        title: "Sprite size in tile units and native resolution",
+        keywords: &[
+            "精灵尺寸", "角色多大", "角色尺寸", "精灵大小", "瓦片单位", "原生分辨率", "游戏分辨率",
+            "屏幕分辨率", "像素完美缩放", "分辨率怎么选",
+            "sprite size", "tile unit", "native resolution", "screen resolution",
+            "pixel perfect scaling", "reference resolution",
+        ],
+        body: "Size the sprite in TILE UNITS, not in free pixels: one tile wide by two tiles tall is the classic top-down character, and using whole multiples of the tile keeps the sprite snug in the grid and makes the collision box a simple tile expression. The frame is a frame, not a bounding box - leave a little air so adjacent sprites do not show gaps, but not so much that the character looks lost in it. In a top-down view the sprite may overlap the tile above it (depth runs down the screen, so lower means nearer) but should never overlap along the X axis, where the eye reads overlap as an error. At small sizes the head wants a third to half of the total height, because the face is what the player connects to; chasing realistic proportions on a 16-24px sprite just yields a stick figure. Four directions drawn properly can carry eight-direction movement - the 16-bit consoles did exactly that and it still reads well; add the four diagonal frames only when the sprite is large and detailed enough for the missing angles to be noticeable. The walk and the run can share one pose set: build eight run frames, then make the four-frame walk by dropping the full-stride frames and playing what is left slower. Pick a native resolution that multiplies cleanly into 1920x1080 - 320x180 (6x), 480x270 (4x) and 640x360 (3x) are the safe picks - because an arbitrary one leaves borders at full screen or breaks pixel perfection; higher native resolutions read as more zoomed-out and suit fast scrolling, lower ones read chunkier and suit a retro feel.",
+    },
+    KnowledgeEntry {
+        id: "sand-terrain",
+        title: "Sand terrain and recycling wall tiles",
+        keywords: &[
+            "沙子", "沙滩", "沙漠", "沙地", "沙纹", "土墙", "石墙", "墙面瓦片", "墙体",
+            "遗迹", "废墟",
+            "sand", "desert", "sand texture", "wall tile", "cliff", "ruins",
+        ],
+        body: "Sand is not noise: build it from long angled calligraphic S-curves that sweep across the tile and keep the waves parallel-ish, then break a few of them with irregularity so the field does not look printed. Watch the density - if every wiggly line connects into one net, the sand reads as noodles instead of drifts; leave flat space between the curves. A wall or cliff set is built the economical way: start from the FRONT-facing wall texture and make it loop on all four sides, then rotate that same texture to 45 degrees and trim pieces of it into the linking bottom tile and the wall-top tile, mirror the angled tile and swap one colour for the opposite wall face, and reach for a triangle tile only where a terrace has to meet the ground. Add a universal column or corner piece instead of four bespoke corners - it doubles as decoration. Every drop shadow in the set stays on one or two faces only, follows the single light source, and never runs longer than one tile regardless of how tall the wall looks; long shadows fight the sprites layered on top of them, and a short consistent shadow reads fine even though it is not physically accurate.",
     },
     KnowledgeEntry {
         id: "tiny-tiles",
@@ -467,7 +511,7 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         id: "isometric",
         title: "Isometric and 2.5D grids",
         keywords: &["等轴", "等距", "立体地图", "斜视", "isometric", "iso", "axonometric", "dimetric"],
-        body: "Keep ONE grid angle for the whole sheet: true isometric is 2:1 pixels, dimetric sits near 30 degrees. Give the three visible faces three distinct steps of the same ramp so a cube reads without an outline. Never mix angles, and keep verticals exactly vertical. Build units from simple geometric solids - a cube for a torso, a sphere for a shoulder, a cylinder for a limb - then push and pull them into the silhouette, and at 32x32 be willing to OMIT parts that will not read: two pixels is a whole hand, so the skill is abstraction, not detail. Work from the body outward, give the torso a tank-like jut and shoulders that sit higher than the head for weight, and keep the optics to one or two bright pixels. In an isometric mech, the upper leg is barely visible and the groin piece is often dropped, but the FEET are prominent: make them ski-like or talon-like for a stable footprint rather than copying a humanoid foot. On the environment side, a cube tile's diamond top has 2px corners, so adjacent tiles must overlap the top row for a flush fit (or squash the diamond by 1px to trade the look for a 1px corner); water sits about half a cube lower to read as a pit, and a single texture minus its highlights can carry a seamless 16-frame loop.",
+        body: "Everything rests on the 2-step (2:1) line: a true 30-degree isometric ground plane drawn in pixels resolves to a 2:1 step, about 26.5 degrees, and once you can read that rhythm the rest is bookkeeping. Keep ONE grid angle for the whole sheet and keep verticals exactly vertical. Draw a side circle from a skewed square plus a cross - the ellipse touches the square at the four cross tips. Keep one 2:1 line on its own layer as a ruler to check alignment, because at this angle you cannot trust your eye. Give the three visible faces three distinct steps of the same ramp so a cube reads without an outline. Cube corner style is a real choice: wide corners look better but need clever overlapping to tile, sharp 2:1 corners tile perfectly but read as hard. A cuboid need not be a cube - the top face just has to match its neighbours so tiles of different height stack - and every face texture has to loop on all four of its sides, not just the ground. Even dimensions are your friend; 36x36 is a common isometric tile. Build units from simple geometric solids - a cube for a torso, a sphere for a shoulder, a cylinder for a limb - then push and pull them into the silhouette, and at 32x32 be willing to OMIT parts that will not read: two pixels is a whole hand, so the skill is abstraction, not detail. Work from the body outward, give the torso a tank-like jut and shoulders that sit higher than the head for weight, and keep the optics to one or two bright pixels. In an isometric mech, the upper leg is barely visible and the groin piece is often dropped, but the FEET are prominent: make them ski-like or talon-like for a stable footprint rather than copying a humanoid foot. On the environment side, a cube tile's diamond top has 2px corners, so adjacent tiles must overlap the top row for a flush fit (or squash the diamond by 1px to trade the look for a 1px corner); water sits about half a cube lower to read as a pit, and a single texture minus its highlights can carry a seamless 16-frame loop.",
     },
     KnowledgeEntry {
         id: "perspective",
@@ -546,7 +590,7 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         id: "water",
         title: "Water, foam and reflections",
         keywords: &["水面", "湖水", "海面", "海浪", "波浪", "泡沫", "倒影", "water", "waves", "sea", "lake", "foam", "reflection", "ripple"],
-        body: "Water takes the sky's key colours, not its own hue: mirror the darkest and lightest sky steps and keep the mid tone. Foam reads as clusters along the contact edge, not as white blobs; reflections are vertically squashed copies of the object, broken by horizontal wobble.",
+        body: "Water takes the sky's key colours, not its own hue: mirror the darkest and lightest sky steps and keep the mid tone. Foam reads as clusters along the contact edge, not as white blobs; reflections are vertically squashed copies of the object, broken by horizontal wobble. Build an animated water tile from wavy interconnected blobs drawn with single-pixel lines: start one blob, branch lines from it until they reconnect into a network, break a few lines so the flow keeps moving, then add sparse highlights and a crude drop shadow a couple of pixels below each bright line. Animate it as TWO full tiles cut back and forth; a hard cut suits a retro look, but a third frame that blends the two textures at 50% opacity smooths the loop, and the timing must be neither so fast it reads as noise nor so slow it reads as choppy - only two frames can be convincing at the right speed.",
     },
     KnowledgeEntry {
         id: "foliage",
@@ -559,6 +603,17 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         title: "Sky, clouds and space",
         keywords: &["天空", "星空", "晚霞", "云朵", "云层", "sky", "clouds", "cloud", "stars", "space", "sunset"],
         body: "A sky is a vertical ramp with no hard edges; put the light source's warmth into the horizon band and the cool end at the top. Clouds take cumulus lobes with a flat shaded base and a lit top; at night keep only two star brightnesses so the field stays even.",
+    },
+    KnowledgeEntry {
+        id: "human-anatomy",
+        title: "Realistic human anatomy and head models",
+        keywords: &[
+            "人体", "人体比例", "八头身", "六头身", "头身比", "解剖", "人体结构", "真人比例",
+            "写实人体", "关节", "骨架",
+            "anatomy", "human anatomy", "head model", "eight head", "8 head", "six head",
+            "figure proportions", "realistic figure",
+        ],
+        body: "Two head models cover almost everything. The eight-head model is the realistic adult measure and needs a large canvas - a male lands near 29x96, and a female is slightly shorter only because the head unit is smaller. The six-head model is the stocky, doll-like stand-in that fits a small sprite; the same build at six heads is about 29x78. Under 32px you cannot hold an eight-head figure at all, so drop to six heads or fewer and read the pose from one limb line. Build the proportions as a colour-coded dummy first, one segment at a time, and check the shared alignment lines: elbow level with the belly button, wrist meeting the groin, knee midway between hip and ankle, shoulder width about two heads. Nothing drifts more than one pixel between views, and at this scale a single pixel of drift is a visible change, so measure instead of eyeballing. Hair, armour and loose clothing join only after the dummy holds together, and the fastest route to a believable large walk is to rotoscope a real video down to eight frames rather than inventing the motion.",
     },
     KnowledgeEntry {
         id: "proportions",
@@ -596,7 +651,7 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "vfx", "fx", "particle", "projectile", "bullet", "trail", "debris",
             "splatter", "blood", "goo", "lightning", "electricity", "spark", "sparks",
         ],
-        body: "An effect is a short PHASE LIST, not one puff: an explosion runs charge, a one-to-two-frame flash that blows the silhouette out to white, a fast bloom of hot core to mid to dark smoke, then debris and a settling dust ring - keep the hot core to a single colour and let the outer rings carry the ramp. The frames just before a hit stay empty, and the dust lands AFTER the foot or the body does; the ground briefly loses its outline where the impact is. Bullets and rockets are 2-4 pixel streaks plus a trail that fades over about three frames, never a round dot sliding across the canvas. Blood, goo and sparks must not eat the victim's silhouette - splatter outward from the wound and keep one bright specular so the fluid is not a flat stain.",
+        body: "An effect is a short PHASE LIST, not one puff: an explosion runs charge, a one-to-two-frame flash that blows the silhouette out to white, a fast bloom of hot core to mid to dark smoke, then debris and a settling dust ring - keep the hot core to a single colour and let the outer rings carry the ramp. The frames just before a hit stay empty, and the dust lands AFTER the foot or the body does; the ground briefly loses its outline where the impact is. Bullets and rockets are 2-4 pixel streaks plus a trail that fades over about three frames, never a round dot sliding across the canvas. Blood, goo and sparks must not eat the victim's silhouette - splatter outward from the wound and keep one bright specular so the fluid is not a flat stain. A flame is the same phase idea read upwards: keep one S-shaped main flame that whips and tapers as it rises, then let it break into smaller S-shaped particles near the tip, and animate the main shape like a flag flipped vertical. Six frames on a 100ms beat with the flickering highlight on a 50ms beat is a reliable campfire; cheap, dynamic, and readable at almost any size.",
     },
     KnowledgeEntry {
         id: "rim-light",
@@ -803,7 +858,7 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "quadruped", "beast", "four legs", "cat", "dog", "fox", "wolf", "bear", "deer",
             "rabbit",
         ],
-        body: "A side-view quadruped is ONE body mass plus four separate legs: two verticals under the shoulder, two under the hip, all four landing on the same ground line. The spine sags slightly in the middle, the chest sits higher than the belly, and the head rides level with the back rather than above it. Keep a visible gap between the near and far pair so the stance reads three-dimensional, shade the far legs a step darker, and give the tail its own curve with a phase lag.",
+        body: "A side-view quadruped is ONE body mass plus four separate legs: two verticals under the shoulder, two under the hip, all four landing on the same ground line. The spine sags slightly in the middle, the chest sits higher than the belly, and the head rides level with the back rather than above it. Keep a visible gap between the near and far pair so the stance reads three-dimensional, shade the far legs a step darker, and give the tail its own curve with a phase lag. In a quadruped walk the four legs run a four-beat cycle, and the back leg on one side follows the front leg of the OPPOSITE side by about a quarter cycle. Both diagonal legs must travel the same distance or the body stretches and contracts like an accordion, and the hip and the shoulder undulate in opposite but equal amounts so the back keeps a balanced rhythm. Break the anatomy into the same colour-coded parts as a biped, animate one pair of legs at a time, then the body, head and tail - and remember that a dog at speed does not walk, it bounds with the left and right legs working in near-parallel.",
     },
     KnowledgeEntry {
         id: "cat",
@@ -833,7 +888,7 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "鸟", "飞鸟", "小鸟", "麻雀", "鹰", "乌鸦", "翅膀", "羽",
             "bird", "birds", "wing", "wings", "feather", "eagle", "crow", "sparrow",
         ],
-        body: "A bird in profile is a teardrop body with a triangular beak at the front and a fan of tail feathers at the back, and the eye sits high and forward close to the beak. A folded wing reads as two or three overlapping bands along the body with the longest feather on the bottom; a spread wing is a long tapering blade with a notched tip. Legs are two thin lines to a three-toed foot, and a perched bird is mostly silhouette plus one belly shade.",
+        body: "A bird in profile is a teardrop body with a triangular beak at the front and a fan of tail feathers at the back, and the eye sits high and forward close to the beak. A folded wing reads as two or three overlapping bands along the body with the longest feather on the bottom; a spread wing is a long tapering blade with a notched tip. Legs are two thin lines to a three-toed foot, and a perched bird is mostly silhouette plus one belly shade. Animating a wing needs a marked joint: draw the wing from the FRONT first as a wireframe, mark the shoulder/elbow fold so the wing is not a rubbery sheet, then animate only the wings before adding body bob. The extremes - wings fully up and fully down - are the keyframes, so paint those first and add the smear between them. Eight frames describe the full arc, but fewer read fine at small sizes; thicken the leading edge and show a few tail feathers once the motion works.",
     },
     KnowledgeEntry {
         id: "fish",
@@ -1193,7 +1248,7 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "树", "树木", "大树", "树干", "松树", "棕榈", "枯木",
             "tree", "trees", "trunk", "pine", "palm", "log", "stump",
         ],
-        body: "A tree is a trunk plus a canopy mass: the trunk tapers as it rises, splits into two or three limbs that reach INTO the canopy, and takes a vertical grain. The canopy is a cluster of overlapping lobes of two or three sizes with only the outer edge varied. Conifers are stacked triangles with a flat bottom; broadleaf trees are round masses with notches. Keep one light direction on every lobe and let branch tips read as 2x2 clusters.",
+        body: "A tree is a trunk plus a canopy mass: the trunk tapers as it rises, splits into two or three limbs that reach INTO the canopy, and takes a vertical grain. The canopy is a cluster of overlapping lobes of two or three sizes with only the outer edge varied. Conifers are stacked triangles with a flat bottom; broadleaf trees are round masses with notches. Keep one light direction on every lobe and let branch tips read as 2x2 clusters. The quick modular route to a leafy tree: build ONE leaf bundle out of a repeated geometric unit (a rhombus, a 2x2 square, a circle), make a darker and a lighter variant on the same ramp, and layer the three according to one light source. Consistent leaf form and even distribution are what hide the repeat - a single odd-sized cluster draws the eye - and 4-5 colours per bundle is plenty; if the bundle only looks right after heavy touch-ups, the bundle itself is the problem. A conifer is built the other way: lay a stick skeleton, then draw the branches from top to bottom so the lower ones are overlapped, reflect the side branches to the opposite side before shading, and split them into light, mid and dark with the upper branches casting small shadows on the ones below.",
     },
     KnowledgeEntry {
         id: "rock",
@@ -1208,10 +1263,12 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         id: "building",
         title: "Buildings, houses and architecture",
         keywords: &[
-            "房子", "房屋", "建筑", "屋子", "塔楼", "城墙", "桥", "门", "窗",
+            "房子", "房屋", "建筑", "屋子", "塔楼", "城墙", "桥", "门", "窗", "城堡", "堡垒",
+            "尖塔", "屋顶", "石墙", "砖墙",
             "house", "building", "tower", "wall", "bridge", "door", "window", "hut",
+            "castle", "fortress", "spire", "roof", "brick wall",
         ],
-        body: "Architecture reads from one-box massing plus roof plus openings: settle the volumes as flat filled shapes first, then cut windows and doors as darker rectangles that never touch the wall edge except at the bottom. Roofs are the lightest plane because they face the sky, and walls take their shade from the same light direction. Keep every vertical exactly vertical and every roofline on one shared angle - mixed angles break the whole structure.",
+        body: "Architecture reads from one-box massing plus roof plus openings: settle the volumes as flat filled shapes first, then cut windows and doors as darker rectangles that never touch the wall edge except at the bottom. Roofs are the lightest plane because they face the sky, and walls take their shade from the same light direction. Keep every vertical exactly vertical and every roofline on one shared angle - mixed angles break the whole structure. A wall tile is designed exactly like a ground tile, but the CONTRAST against the neighbouring top and sides is what sells the rise: the top of a wall is much brighter than its sides, and a brick laid with its long narrow face out means the bricks on a side wall are shorter than on a top wall. Use a column or a universal corner piece instead of drawing four bespoke corner variants - the pay-off is not worth the extra tiles, and the column doubles as decoration. A wall set needs drop shadows to read, but keep every shadow short and no longer than one tile regardless of how tall the structure looks, cast mainly to one side and slightly downward, or long shadows fight the sprites layered over them. For a fantasy castle, start from a roof-capped tower - it sets the palette and the light direction - then block the whole silhouette as a rough plan and keep reusing those colours; the compact repetition of towers, turrets and spires over one shared angle is what reads as a castle rather than a pile of boxes.",
     },
     KnowledgeEntry {
         id: "food",
@@ -1731,6 +1788,23 @@ mod tests {
             // 俯视八方向角色与等轴机甲的姿势/分层规则。
             ("八方向角色跑步，剑和盾要保持左右手一致", "topdown"),
             ("32x32 等轴机甲怎么起形", "isometric"),
+            // Slynyrd Pixelblog 49/50/52/53 吸进来的人体、格斗与近战规则。
+            ("格斗待机怎么做出呼吸感", "combat-idle"),
+            ("挥剑动画的帧时长怎么排", "melee-attacks"),
+            ("勾拳和前踢的动作怎么拆", "melee-attacks"),
+            ("八头身人体比例怎么起稿", "human-anatomy"),
+            ("写实人物走路的八帧怎么排", "walk-cycle"),
+            // 手绘瓦片、水波动画、针叶树与城堡这几条扩充规则。
+            ("手绘瓦片重复的时候怎么藏接缝", "tilemap"),
+            ("16px 的砖墙按几像素砌才不破", "tilemap"),
+            ("水面瓦片怎么做两帧循环动画", "water"),
+            ("松树的枝条从上往下画还是从下往上", "tree"),
+            ("等轴斜圆和 2:1 标尺线怎么画", "isometric"),
+            ("城堡从哪个部分开始起稿", "building"),
+            ("沙子地砖的纹理怎么做才不生硬", "sand-terrain"),
+            ("墙面瓦片怎么从正面墙复用", "sand-terrain"),
+            ("角色尺寸按几个瓦片单位算", "sprite-scale"),
+            ("原生分辨率选多少才能像素完美", "sprite-scale"),
         ] {
             let hits = retrieve(query, 4);
             assert!(
