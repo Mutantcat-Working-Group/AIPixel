@@ -132,6 +132,19 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         body: "8-12 fps is the pixel-art norm. Hold key and contact poses longer and pass through in-betweens quickly; set each frame's duration instead of relying on a uniform rate, and keep the total loop divisible so the repeat is invisible. On small canvases, fewer frames with longer holds read better than many 60ms frames. Two anchor numbers worth starting from: 120 ms for idle and walk, 60 ms for run, shoot, land and dust - that is the classic 8-bit action split, and slowing the walk while the run stays fast is what makes the speed difference read.",
     },
     KnowledgeEntry {
+        id: "animation-principles",
+        title: "Animation principles: straight ahead, squash and anticipation",
+        keywords: &[
+            "弹跳", "弹性", "弹球", "挤压", "拉伸", "挤压拉伸", "预备动作", "预备帧", "起跳",
+            "落地", "回弹", "逐帧", "一帧一帧", "关键帧", "姿态到姿态", "运动规律", "动画原理",
+            "缓动", "重量感", "缓冲",
+            "squash and stretch", "squash", "stretch", "anticipation", "straight ahead",
+            "pose to pose", "key pose", "keyframe", "bounce", "bouncing", "follow through",
+            "ease in", "ease out", "animation principles",
+        ],
+        body: "Pick the build method before the first frame, because it decides how the motion is found. STRAIGHT AHEAD is frame one, then two, then three, letting each pose suggest the next - fast and loose, and the right default for fire, smoke, cloth and other organic movement. POSE TO POSE fixes the extremes first (contact, up, down, pass) and then fills the in-betweens - controllable, and the right default for a walk, a run, a jump and an attack. Whichever you use, draw the STILL first: one standing frame that locks the proportions, the palette and the detail ceiling every other frame has to match. Timing carries the weight, not the frame count. Build a bounce from gravity instead of a smooth curve: the ball falls 4px, then 3, then 2, then 1 as it speeds up, holds one frame on the ground, and rises back through 1/2/3/4 with one frame held at the top; that single hold at contact sells the impact better than any easing, and the same hold carries a sword hit, a landing and a foot plant. Squash and stretch keep the VOLUME constant - flatten on impact and elongate at the fastest moment, keeping the area the same so the form does not inflate like a balloon. Add ANTICIPATION before any big move: one wind-up frame in the opposite direction of the travel, so the eye is ready when the action fires. To LOOP, delete the still frame and the anticipation from the cycle and let the last frame flow straight back into the first, otherwise the repeat stutters every time around. On a multi-frame selection, set the hold frame's duration longer than the travel frames in one pass.",
+    },
+    KnowledgeEntry {
         id: "sprite-sheet",
         title: "Sprite-sheet and sequence layout",
         keywords: &[
@@ -408,7 +421,7 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "anti-aliasing", "antialiasing", "aa pixel", "external aa", "internal aa",
             "soft pixel", "aa banding", "over-anti-aliasing",
         ],
-        body: "AA puts a pixel whose value sits between a shape and its neighbour on every step of an edge. Three rules carry it: add it SELECTIVELY - one or two pixels where a curve meets a contrasting background; NEVER let it change the shape, because extra pixels in the corners quietly redraw the outline; and judge it at real size, never at 8x zoom. Length has to match the step it buffers: too little AA (one lone pixel on a long step) only blunts the corner without smoothing it, and too much turns the crisp edge into a blur - a 4-pixel step wants a roughly 4-pixel taper, not a single dot and not a smeared fringe. AA BANDING is the specific failure where the AA segments line up with the edge they are buffering, so the buffer becomes a second parallel outline and exposes the grid; stagger the starts of the AA runs instead of stacking them evenly. Inner AA lives inside the shape, outer AA lives on the background and dies the moment that background changes, so prefer inner AA on anything that may be moved onto a different background. Value is the only thing that has to be right, so an AA pixel's hue is free to pick. Most sprites need no AA at all, and where it is used as a style choice the beard and the hair are the places that earn it.",
+        body: "AA puts a pixel whose value sits between a shape and its neighbour on every step of an edge. Three rules carry it: add it SELECTIVELY - one or two pixels where a curve meets a contrasting background; NEVER let it change the shape, because extra pixels in the corners quietly redraw the outline; and judge it at real size, never at 8x zoom. Length has to match the step it buffers: too little AA (one lone pixel on a long step) only blunts the corner without smoothing it, and too much turns the crisp edge into a blur - a 4-pixel step wants a roughly 4-pixel taper, not a single dot and not a smeared fringe. Buffer only the steps that need it: draw the intended line first and compare it against the pixel result, because a staircase run of one pixel needs no AA and a clean straight line or an exact 45-degree run needs none at all. On a long step the buffer may EAT one of the shape's own pixels - growing the silhouette outward instead quietly rewrites the outline - and the AA run's direction has to follow the slope of the step it softens. AA BANDING is the specific failure where the AA segments line up with the edge they are buffering, so the buffer becomes a second parallel outline and exposes the grid; stagger the starts of the AA runs instead of stacking them evenly. Inner AA lives inside the shape, outer AA lives on the background and dies the moment that background changes, so prefer inner AA on anything that may be moved onto a different background. Value is the only thing that has to be right, so an AA pixel's hue is free to pick. Most sprites need no AA at all, and where it is used as a style choice the beard and the hair are the places that earn it.",
     },
     KnowledgeEntry {
         id: "sel-out",
@@ -469,6 +482,20 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         title: "One light source",
         keywords: &["光源", "光照", "受光", "背光", "阴影", "投影", "cast shadow", "light source", "lighting"],
         body: "Fix ONE light direction and honour it on every object in the scene. When the user named no direction, no lamp, no hour of day, do not invent one: read tops a half step lighter and undersides a half step darker off the viewer's angle, and pool the cast shadow on the ground beneath the form instead of leaning it toward an assumed source. The lit side takes the highlight, the shadow side a darker ramp step, and the darkest core shadow sits just past where the form turns away. Cast shadows must agree with that same direction in both length and lean. A small canvas rarely needs all seven parts of the basic model (highlight, midtone, terminator, shadow, bounce, occlusion, cast shadow) - pick by size and style. Material decides the read as much as direction does: matte spreads light evenly with no highlight at all, glossy takes a small sharp one, and metal takes strong contrast and reflects its surroundings.",
+    },
+    KnowledgeEntry {
+        id: "shading-workflow",
+        title: "Shading vocabulary and the photo-reference pass",
+        keywords: &[
+            "明暗", "明暗关系", "打光", "光照步骤", "阴影步骤", "照片参考", "参考照片",
+            "参考图打光", "按照片画", "照片写生", "临摹照片", "明暗交界线", "交界线",
+            "投影阴影", "体积阴影", "遮挡阴影", "亮面", "暗面", "环境反光", "落地阴影",
+            "shading", "shading vocabulary", "photo reference", "reference photo",
+            "study from a photo", "volume shadow", "projected shadow", "cast shadow shape",
+            "bounce light", "rim light", "occlusion", "terminator", "flat light",
+            "soft shadow", "hard shadow", "shading pass",
+        ],
+        body: "Name the light before shading it. A full pass has up to seven parts and you pick them by size and style: VOLUME SHADOW on the side turned away, TERMINATOR where the surface turns past the light, PROJECTED / CAST SHADOW thrown onto the ground or another object, REFLECTION or SPECULAR on a shiny surface, HIGHLIGHT on a matte one, RIM LIGHT grazing the far edge, and BOUNCE LIGHT colour reflected up into the shadow. A cast shadow is hard-edged and shaped by the form blocking the light; a soft shadow belongs to ambient light - and in pixel art a one- or two-pixel hard step almost always reads better than a blur. Light that strikes at a shallow angle is dimmer: shorten and darken the ramp as the surface turns away, and keep a flat face one uniform value instead of ramping it. Reference work is not tracing - read the photo for the structure of the light (where it comes from, which planes face it, where the cast shadow lands), then put the photo away and paint the form. A six-step pass gets there: 1 block the basic colours and shapes, 2 place the basic light and shadow, 3 add the projected shadows, 4 draw the details and engravings, 5 correct the shapes and reinforce the light and shadow, 6 finish with anti-aliasing and outlines only if the style wants them. Two habits do most of the rest: simplify and enlarge - drop detail the eye cannot read at 1x and grow the features that carry the subject - and never ship flat light, a soft face, or bands that follow the outline instead of the form.",
     },
     KnowledgeEntry {
         id: "pillow-shading",
@@ -1938,5 +1965,45 @@ mod tests {
         assert!(retrieve("做个能换装的纸娃娃角色", 4)
             .iter()
             .any(|e| e.id == "paperdoll-base"));
+    }
+
+    /// saint11《Pixel Art Articles》第 3、4 篇的正文：基础动画（弹跳、挤压拉伸、
+    /// 预备动作、循环接帧）与基础明暗（七类光术语、照片参考六步流程）。这两篇
+    /// 过去只当覆盖度清单核对过，正文没成形，于是「弹跳小球压扁一下」和
+    /// 「按照片画明暗」两句话都换不来一段落地的手艺。
+    #[test]
+    fn the_animation_and_shading_articles_surface() {
+        for (query, id) in [
+            ("画一个弹跳的小球，落地要压扁", "animation-principles"),
+            ("起跳之前要不要加预备动作", "animation-principles"),
+            ("挤压拉伸怎么才能不改变体积", "animation-principles"),
+            ("逐帧画还是先定关键帧再补中间帧", "animation-principles"),
+            (
+                "squash and stretch on a bouncing ball",
+                "animation-principles",
+            ),
+            ("按照片画，明暗关系怎么分", "shading-workflow"),
+            ("明暗交界线应该放在哪个位置", "shading-workflow"),
+            ("投影阴影和环境反光怎么区分", "shading-workflow"),
+            ("体积阴影和反光面怎么处理", "shading-workflow"),
+            ("photo reference shading pass", "shading-workflow"),
+        ] {
+            let hits = retrieve(query, 4);
+            assert!(
+                hits.iter().any(|e| e.id == id),
+                "'{query}' 没捞出 {id}：{:?}",
+                hits.iter().map(|e| e.id).collect::<Vec<_>>()
+            );
+        }
+        // 新的明暗条不许抢老主场：形体、镜面高光和细化还是各归各家。
+        for (query, preferred) in [
+            ("立体感不够，明暗交界太生硬", "form-shading"),
+            ("金属高光再亮一点", "specular"),
+            ("优化一下细节", "refine"),
+        ] {
+            assert_eq!(retrieve(query, 4)[0].id, preferred, "{query}");
+        }
+        // 动画原理条也不许把纯步态问题从步态表手里抢走。
+        assert_eq!(retrieve("画一个八帧的行走图", 4)[0].id, "walk-cycle");
     }
 }
