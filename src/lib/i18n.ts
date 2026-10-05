@@ -997,6 +997,13 @@ export const zh = {
   "knowledge.vegetation-shading": "植被、灌木与树丛明暗",
   "knowledge.water-animation": "水面循环与瀑布动画",
   "knowledge.clouds": "云朵造型与明暗",
+  "knowledge.character-idle": "角色待机弹跳与个性动作",
+  "knowledge.topdown-houses": "俯视房子：从盒子起稿",
+  "knowledge.explosions": "爆炸：闪光、爆裂、火与烟",
+  "knowledge.magic-vfx": "光魔法与暗魔法特效",
+  "knowledge.starfield": "星空、行星与太空背景",
+  "knowledge.topdown-depth-sorting": "俯视遮挡、层序与碰撞盒",
+  "knowledge.level-teaching": "用关卡递进教学机制",
 
   // ---------- 本轮分流节点 ----------
   "plan.reference_one": "第 {n} 张参照",
@@ -2018,6 +2025,13 @@ export const en: Record<TKey, string> = {
   "knowledge.vegetation-shading": "Vegetation, bushes and canopy shading",
   "knowledge.water-animation": "Animated water, ripples and waterfalls",
   "knowledge.clouds": "Cloud shapes and shading",
+  "knowledge.character-idle": "Bouncy character idles for any subject",
+  "knowledge.topdown-houses": "Drawing a top-down house from a box",
+  "knowledge.explosions": "Explosions: flash, blast, fire, smoke",
+  "knowledge.magic-vfx": "Light and dark magic effects",
+  "knowledge.starfield": "Starfields, planets and space backgrounds",
+  "knowledge.topdown-depth-sorting": "Top-down layering, colliders and occlusion",
+  "knowledge.level-teaching": "Teaching a mechanic through level progression",
 
   "plan.reference_one": "Reference {n}",
   "plan.mode.style": "Style only",

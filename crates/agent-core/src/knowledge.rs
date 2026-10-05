@@ -147,6 +147,17 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         body: "A fighting idle is a bounce, not a still: the character holds the guard pose while every part rides a small up-down breath cycle anchored to the torso. Build an eight-frame loop - the figure rises 1px (legs straighten, knees shift in, shoulders, elbows and fists rise, the inner fist travelling the most), holds the top for one frame as the heels lift, then drops back through two frames of knee bend before the legs decompress - and time the rise slower than the fall (frames 1-4 at 100ms, 5-8 at 50ms) so gravity reads instead of a floating bob. A boxer's stance (hands guarding the face, neck tucked into the shoulders, knees softly bent) suits a punch-heavy character; a karate side-stance with a lower centre of gravity and a wider base suits a kicking one. Clothes and hair add sub-movement on top of the same bounce - fabric follows the body one frame late, the loose hem and hair lag behind - but keep the base forms solid and the folds minimal, because a jumbled silhouette in motion reads worse than a simple one.",
     },
     KnowledgeEntry {
+        id: "character-idle",
+        title: "Bouncy character idles for any subject",
+        keywords: &[
+            "角色待机", "站立动画", "站立待机", "原地待机", "呼吸循环", "npc待机", "待机呼吸",
+            "角色站立", "人物待机",
+            "character idle", "idle animation", "idle loop", "idle bounce", "bouncy idle",
+            "standing animation", "npc idle", "personality idle",
+        ],
+        body: "A good idle is a bounce that shows personality, not a still frame. Two frames already work: drop 1px with the arms open and the knees bent, then rise 1px with the arms coming down - and the character must never gain or lose mass between the two poses. Three frames buy a slower fall, a better knee transition and a head that moves a beat late; six frames let you add secondary motion such as hair lagging behind the head, built from lots of 1px offsets. A dependable trick is to move the CONTENTS of the face and body AFTER the silhouette has already moved, so the details trail the outline instead of moving with it. Vertical motion on its own is boring - always give the horizontal movement something to compensate with. Use the idle to show who the character is: blink, yawn, look around, shift weight or scratch. Keep the base pose extreme enough to read at a glance, because the idle is what the player stares at most.",
+    },
+    KnowledgeEntry {
         id: "melee-attacks",
         title: "Melee attack animation and weapon weight",
         keywords: &[
@@ -207,7 +218,7 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "pose to pose", "key pose", "keyframe", "bounce", "bouncing", "follow through",
             "ease in", "ease out", "animation principles",
         ],
-        body: "Pick the build method before the first frame, because it decides how the motion is found. STRAIGHT AHEAD is frame one, then two, then three, letting each pose suggest the next - fast and loose, and the right default for fire, smoke, cloth and other organic movement. POSE TO POSE fixes the extremes first (contact, up, down, pass) and then fills the in-betweens - controllable, and the right default for a walk, a run, a jump and an attack. Whichever you use, draw the STILL first: one standing frame that locks the proportions, the palette and the detail ceiling every other frame has to match. Timing carries the weight, not the frame count. Build a bounce from gravity instead of a smooth curve: the ball falls 4px, then 3, then 2, then 1 as it speeds up, holds one frame on the ground, and rises back through 1/2/3/4 with one frame held at the top; that single hold at contact sells the impact better than any easing, and the same hold carries a sword hit, a landing and a foot plant. Squash and stretch keep the VOLUME constant - flatten on impact and elongate at the fastest moment, keeping the area the same so the form does not inflate like a balloon. Add ANTICIPATION before any big move: one wind-up frame in the opposite direction of the travel, so the eye is ready when the action fires. To LOOP, delete the still frame and the anticipation from the cycle and let the last frame flow straight back into the first, otherwise the repeat stutters every time around. On a multi-frame selection, set the hold frame's duration longer than the travel frames in one pass.",
+        body: "Pick the build method before the first frame, because it decides how the motion is found. STRAIGHT AHEAD is frame one, then two, then three, letting each pose suggest the next - fast and loose, and the right default for fire, smoke, cloth and other organic movement. POSE TO POSE fixes the extremes first (contact, up, down, pass) and then fills the in-betweens - controllable, and the right default for a walk, a run, a jump and an attack. Whichever you use, draw the STILL first: one standing frame that locks the proportions, the palette and the detail ceiling every other frame has to match. Timing carries the weight, not the frame count. Build a bounce from gravity instead of a smooth curve: the ball falls 4px, then 3, then 2, then 1 as it speeds up, holds one frame on the ground, and rises back through 1/2/3/4 with one frame held at the top; that single hold at contact sells the impact better than any easing, and the same hold carries a sword hit, a landing and a foot plant. Squash and stretch keep the VOLUME constant - flatten on impact and elongate at the fastest moment, keeping the area the same so the form does not inflate like a balloon. The rule that keeps a squash legal is MASS NEVER CHANGES: widen and you must shorten, stretch and you must narrow, so the area stays constant. The material sets how far you can push it - stiff stone or metal barely deforms, rubbery or fleshy matter can be taken much further - and stretching along the direction of travel is the cheap way to smooth a fast animation while the flat squash is saved for contact. Add ANTICIPATION before any big move: one wind-up frame in the opposite direction of the travel, so the eye is ready when the action fires. To LOOP, delete the still frame and the anticipation from the cycle and let the last frame flow straight back into the first, otherwise the repeat stutters every time around. On a multi-frame selection, set the hold frame's duration longer than the travel frames in one pass.",
     },
     KnowledgeEntry {
         id: "subpixel-motion",
@@ -353,6 +364,17 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         body: "Draw the character ONCE facing down and derive the other three directions from it - never sketch each direction from nothing, or the head size and shoulder width drift. UP never shows a face: it is the back of the head plus hair, and any weapon or pack rides on the back and must not swap shoulders. LEFT and RIGHT are mirrors, so draw one, flip it, then re-draw any asymmetric detail (a strap, a scar, a held item) instead of leaving it flipped. The head turns and the shoulders turn with it, and the body stays the same height in every direction or the sprite bobs as the player walks. There is no foreshortening from overhead: depth is the sprite's vertical POSITION on the canvas, not its scale, so a character standing further away is drawn higher up, not smaller. An EIGHT-direction set is 36 unique frames for one action, so build it from a DUMMY first - animate the bare anatomy until the motion is right, then paint the costume on top - and respect asymmetric details across every direction instead of mirroring them. Cut the armour and equipment into their own layers over the base body so a weapon or shield can be swapped without redrawing the character, and dial the arm swing down once a heavy item is added: the equipment has weight, and the run taking that weight is what sells it. A sword swing is six frames timed 100, 50, 50, 50, 100, 50 ms - a slow wind-up and a slow recovery around four fast swing frames - and the shoulders lead the blade. Judge the loop at full play speed, not frame by frame: sub-pixel flicker and clusters that merge into noise only show up in motion, and the fix is usually to drop a colour or simplify the cluster rather than to redraw the silhouette.",
     },
     KnowledgeEntry {
+        id: "topdown-depth-sorting",
+        title: "Top-down layering, colliders and occlusion",
+        keywords: &[
+            "俯视遮挡", "俯视层序", "层顺序", "前后关系", "深度排序", "碰撞盒", "俯视碰撞",
+            "遮挡关系", "角色被挡住", "屋檐遮挡", "多矩形碰撞",
+            "depth sorting", "y sorting", "order in layer", "top down collision",
+            "collision box", "occlusion", "overhead occlusion", "layering",
+        ],
+        body: "In a top-down game the drawing order changes as things move, so it has to be computed instead of baked into one picture. Sort by each object's BASELINE y - its feet or its bottom edge, never its top - and give every object an explicit order_in_layer so objects sharing a baseline do not flicker: floor decorations sit at the bottom, characters and buildings sort by their bottom edge, and anything the player can walk BEHIND - a roof, a tree canopy, an archway - sorts above the player and hides them while they pass. A collider is not the sprite: draw it as a separate, simpler shape on the ground plane, usually one or two rectangles, and give a large object several boxes - a building's walls, a tree's trunk, a table's legs - because the art's irregular silhouette would otherwise make the player collide with thin air. A floor prop with no height, such as a rug, a puddle or a painted marking, gets NO collider at all, and a doorway or a gate needs a collider only on its frame, never across the opening. Keep the collision layer invisible, separate from the art layer, and remember that an object both occluding and being walked on - a bridge, a raised walkway - needs its own layer above the player while the ground beneath it stays below.",
+    },
+    KnowledgeEntry {
         id: "paperdoll-base",
         title: "Paper-doll base (blank base) and swappable parts",
         keywords: &[
@@ -393,11 +415,11 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         id: "sand-terrain",
         title: "Sand terrain and recycling wall tiles",
         keywords: &[
-            "沙子", "沙滩", "沙漠", "沙地", "沙纹", "土墙", "石墙", "墙面瓦片", "墙体",
+            "沙子", "沙丘", "沙滩", "沙漠", "沙地", "沙纹", "土墙", "石墙", "墙面瓦片", "墙体",
             "遗迹", "废墟",
-            "sand", "desert", "sand texture", "wall tile", "cliff", "ruins",
+            "sand", "dune", "dunes", "sand dune", "desert", "sand texture", "wall tile", "cliff", "ruins",
         ],
-        body: "Sand is not noise: build it from long angled calligraphic S-curves that sweep across the tile and keep the waves parallel-ish, then break a few of them with irregularity so the field does not look printed. Watch the density - if every wiggly line connects into one net, the sand reads as noodles instead of drifts; leave flat space between the curves. A wall or cliff set is built the economical way: start from the FRONT-facing wall texture and make it loop on all four sides, then rotate that same texture to 45 degrees and trim pieces of it into the linking bottom tile and the wall-top tile, mirror the angled tile and swap one colour for the opposite wall face, and reach for a triangle tile only where a terrace has to meet the ground. Add a universal column or corner piece instead of four bespoke corners - it doubles as decoration. Every drop shadow in the set stays on one or two faces only, follows the single light source, and never runs longer than one tile regardless of how tall the wall looks; long shadows fight the sprites layered on top of them, and a short consistent shadow reads fine even though it is not physically accurate.",
+        body: "Sand is not noise: build it from long angled calligraphic S-curves that sweep across the tile and keep the waves parallel-ish, then break a few of them with irregularity so the field does not look printed. Watch the density - if every wiggly line connects into one net, the sand reads as noodles instead of drifts; leave flat space between the curves. A wall or cliff set is built the economical way: start from the FRONT-facing wall texture and make it loop on all four sides, then rotate that same texture to 45 degrees and trim pieces of it into the linking bottom tile and the wall-top tile, mirror the angled tile and swap one colour for the opposite wall face, and reach for a triangle tile only where a terrace has to meet the ground. Add a universal column or corner piece instead of four bespoke corners - it doubles as decoration. Every drop shadow in the set stays on one or two faces only, follows the single light source, and never runs longer than one tile regardless of how tall the wall looks; long shadows fight the sprites layered on top of them, and a short consistent shadow reads fine even though it is not physically accurate. A SCENE of sand, not just a tile, is built from a few large dunes drawn as overlapping crescents whose ridgelines run roughly the same way; offset the big masses from each other so the field does not read as one stamp repeated, and fade a soft shadow under each dune into the flat ground. Keep the wind ripples to a couple of long wavy lines per dune rather than a full carpet, push the lit ridges a step warm and cool the troughs a step, and leave one or two flat open areas between the dunes - a field with no negative space reads as corduroy instead of desert.",
     },
     KnowledgeEntry {
         id: "tiny-tiles",
@@ -428,7 +450,7 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "瓦片边缘", "瓦片衔接", "接缝", "过渡瓦片", "地块过渡", "角块", "边缘块",
             "tile edge", "edges", "corner", "corners", "transition", "bitmask", "autotile", "welding",
         ],
-        body: "Ship the minimum nine-piece set - centre, four straight edges, four corners - welded so the centre band repeats and the corners close the loop, instead of one big picture. Drive grime and terrain transitions with a bitmask over the eight neighbours (four orthogonals plus four diagonals; byte 47, autotile 5x3) rather than a manual table of every combination. Cell size follows the engine: 16 for NES / SNES and RPG Maker 2000, 32 as the general middle, 48 for RPG Maker MV/MZ, 64 for HD sets. SIDE-VIEW is a different minimum: 8x8 cells, a 3x3 structure for floors, ceilings and walls, plus a 4x4 diamond shape holding the INNER corners that close L-shaped formations - twelve tiles cover a whole stage that has no slopes, and the inner-corner pieces are the ones people forget. In a side-view set the hard part is not the tiles but keeping the layers and objects separated while still reading depth, so separate a foreground band from the mid ground by VALUE first (one step darker, one step less saturated) and only then by detail: the sprite walking in front of it has to stay legible against both, and that constraint is what makes side-view level design harder than top-down. Target the native resolution the tiles were drawn for rather than the monitor: 320x180 is 16:9, scales pixel-perfect into 1080p at 6x, and keeps characters and 8x8 tiles in a readable ratio. The whole set shares one light direction, one ramp per material and one outline rule, and is authored at exactly 1x - drawing big and downscaling smears the edges.",
+        body: "Ship the minimum nine-piece set - centre, four straight edges, four corners - welded so the centre band repeats and the corners close the loop, instead of one big picture. Drive grime and terrain transitions with a bitmask over the eight neighbours (four orthogonals plus four diagonals; byte 47, autotile 5x3) rather than a manual table of every combination. Cell size follows the engine: 16 for NES / SNES and RPG Maker 2000, 32 as the general middle, 48 for RPG Maker MV/MZ, 64 for HD sets. SIDE-VIEW is a different minimum: 8x8 cells, a 3x3 structure for floors, ceilings and walls, plus a 4x4 diamond shape holding the INNER corners that close L-shaped formations - twelve tiles cover a whole stage that has no slopes, and the inner-corner pieces are the ones people forget. In a side-view set the hard part is not the tiles but keeping the layers and objects separated while still reading depth, so separate a foreground band from the mid ground by VALUE first (one step darker, one step less saturated) and only then by detail: the sprite walking in front of it has to stay legible against both, and that constraint is what makes side-view level design harder than top-down. Target the native resolution the tiles were drawn for rather than the monitor: 320x180 is 16:9, scales pixel-perfect into 1080p at 6x, and keeps characters and 8x8 tiles in a readable ratio. The whole set shares one light direction, one ramp per material and one outline rule, and is authored at exactly 1x - drawing big and downscaling smears the edges. Organise the work around a MAIN tile that loops on all four sides: derive from it the top, bottom, left and right edge tiles that weld to the neighbouring terrain, then the four corners, then a cross set for paths, roads and rivers that meet and cross. If the set needs variation tiles, variations are only allowed to change the CENTRE - keep the border ring of the main tile intact on every variant, or two variants cannot sit side by side without a seam.",
     },
     KnowledgeEntry {
         id: "dithering",
@@ -471,7 +493,7 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         id: "outlines",
         title: "Outline strategy",
         keywords: &["勾线", "描边", "轮廓线", "线稿", "outline", "outlines", "line art", "hard edge"],
-        body: "Pick ONE strategy for the whole drawing and keep it consistent, and the default is a solid outline on every shape: users read an outlined sprite as finished and an un-outlined one as an unfinished fill. Hue-shift the outline toward the surface color instead of using pure black on a saturated body, or it eats the silhouette - take the local hue a few steps darker rather than inventing a black. That hue-shift rule assumes a CALM background; when the background is busy and the palette is stark, go the other way and keep a flat black outline, because there the heavy contrast is exactly what guarantees the sprite separates and a colour-matched line would let it melt into the tiles. Keep outlines 1px at 32px and above; below 16px skip them entirely, or drop them everywhere only when the user asked for no outline, fog or backlight. The eight styles worth naming, drawn from one mushroom: single-pixel black (the animation-safe default), double-pixel, a dark shade of the surface colour, the region's own colour, an outline lit by the light direction, sel-out (outline AA toward a known background colour), broken or dashed, and none at all. Pick one per drawing and hold it on every frame.",
+        body: "Pick ONE strategy for the whole drawing and keep it consistent, and the default is a solid outline on every shape: users read an outlined sprite as finished and an un-outlined one as an unfinished fill. Hue-shift the outline toward the surface color instead of using pure black on a saturated body, or it eats the silhouette - take the local hue a few steps darker rather than inventing a black. That hue-shift rule assumes a CALM background; when the background is busy and the palette is stark, go the other way and keep a flat black outline, because there the heavy contrast is exactly what guarantees the sprite separates and a colour-matched line would let it melt into the tiles. Keep outlines 1px at 32px and above; below 16px skip them entirely, or drop them everywhere only when the user asked for no outline, fog or backlight. The eight styles worth naming, drawn from one mushroom: single-pixel black (the animation-safe default), double-pixel, a dark shade of the surface colour, the region's own colour, an outline lit by the light direction, sel-out (outline AA toward a known background colour), broken or dashed, and none at all. Pick one per drawing and hold it on every frame. The outline does two different jobs and they should not look the same: an OUTER outline encloses the whole silhouette and separates it from the world, while INNER outlines divide shapes that already sit inside that silhouette and belong one or two steps lighter or thinner than the outer line, or the interior turns into a colouring book. SEL-OUT is the selective version of the outer line - it drops the black and uses a darker shade of the neighbouring colour where the background is known and light, so the silhouette does not read heavier than the art. Reinforcing the shape is the other selective use: thicken or darken the outline only on the unlit side so the stroke itself describes the volume. Keep the outline pixel-perfect - no doubles and no jaggies along the run - and match its behaviour to the material: hard-edged objects such as crates and cubes keep sharp corners, rounded subjects take a rounded outline, because the outline is where the viewer reads the material.",
     },
     KnowledgeEntry {
         id: "pixel-discipline",
@@ -560,7 +582,7 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "pixel cluster", "pixel clusters", "single pixel", "lone pixel", "noise pixel",
             "jaggies", "curve rhythm",
         ],
-        body: "A cluster is a continuous run of pixels of the exact same colour, and it is the unit the drawing is built from - the border of one cluster shapes the cluster beside it, so rearranging a cluster changes the picture more than recolouring it does. The aim is as FEW clusters as possible and no one-pixel clusters at all. Pixels that touch only diagonally are a WEAK connection: they technically join, but treat them as a seam to avoid unless the shape demands it. Details read as 2x2-plus clusters; one stray pixel reads as dirt. LONE PIXELS are the exception, justified for exactly three jobs: a specular highlight dot, texture, and a small but essential detail on a very small sprite (an eye, a beak, a star, a bubble). A lone pixel of a DIFFERENT color that directly buffers an edge is not noise either - it is anti-aliasing, and counts as part of the cluster it touches. When a lone pixel is carrying a real detail, the fix is to absorb it into a small shape (a 2x2, an L, a T) rather than to delete it; when it is not, delete it and merge the neighbours. Everything else is noise: fix a lumpy curve by re-spacing its runs into a regular step rhythm (45 degrees = one pixel per row, about 22.6 = 2-pixel runs, about 30 = evenly spaced) instead of smoothing it with extra color, and remember that single pixels expose the grid by revealing the resolution.",
+        body: "A cluster is a continuous run of pixels of the exact same colour, and it is the unit the drawing is built from - the border of one cluster shapes the cluster beside it, so rearranging a cluster changes the picture more than recolouring it does. The aim is as FEW clusters as possible and no one-pixel clusters at all. Pixels that touch only diagonally are a WEAK connection: they technically join, but treat them as a seam to avoid unless the shape demands it. Details read as 2x2-plus clusters; one stray pixel reads as dirt. LONE PIXELS are the exception, justified for exactly three jobs: a specular highlight dot, texture, and a small but essential detail on a very small sprite (an eye, a beak, a star, a bubble). A lone pixel of a DIFFERENT color that directly buffers an edge is not noise either - it is anti-aliasing, and counts as part of the cluster it touches. When a lone pixel is carrying a real detail, the fix is to absorb it into a small shape (a 2x2, an L, a T) rather than to delete it; when it is not, delete it and merge the neighbours. Everything else is noise: fix a lumpy curve by re-spacing its runs into a regular step rhythm (45 degrees = one pixel per row, about 22.6 = 2-pixel runs, about 30 = evenly spaced) instead of smoothing it with extra color, and remember that single pixels expose the grid by revealing the resolution. Clusters have to be KEPT, not just placed: once a cluster is right, hold its shape across the animation and move it as a unit, because a cluster that grows, shrinks or shifts one pixel per frame reads as boiling even when every individual frame looks fine. A dither pattern is a cluster tool too - repeat the same deliberate pattern to build texture rather than spraying pixels, and let a regular, repeating feature carry the eye where a scattered one would just read as noise. At small sizes a regular geometric shape is easier to recognise than an irregular one, so when a silhouette still fails, simplify it toward a circle, a box or a triangle before adding detail.",
     },
     KnowledgeEntry {
         id: "alignment",
@@ -580,7 +602,7 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "双像素", "像素拐角", "线条粗细", "台阶长度", "线条不干净", "断线", "锯齿", "阶梯",
             "doubles", "double pixel", "line weight", "step rhythm", "line quality", "jaggies",
         ],
-        body: "Two pixels forming an L at a corner make a DOUBLE, and that corner reads thicker, darker and harder than the rest of the line - for a uniform 1px outline, delete the extra corner pixel. JAGGIES come from uneven step lengths: a clean straight line runs 2-2-2-2 while a lumpy one runs 1-3-2-1-4. Read the border as a STAIRCASE and count the pixels in each step: on a correct curve the run lengths rise smoothly toward the horizontal and fall smoothly toward the vertical, usually in a geometric progression (5-3-2-1-1-2-3-5). The run lengths are allowed to change fast - what is not allowed is the direction of the change reversing in the middle of the curve, which is exactly what a jaggy is: a step that suddenly shrinks and then grows again. Fix it by PUSHING PIXELS to restore the steady rise or fall, never by adding colour - a 1-3-2-1 sequence is a misstep, not a shading problem. Doubles are not automatically a defect - running the entire outline in doubles is a bold style of its own, and one deliberately broken line can model a brow ridge.",
+        body: "Two pixels forming an L at a corner make a DOUBLE, and that corner reads thicker, darker and harder than the rest of the line - for a uniform 1px outline, delete the extra corner pixel. JAGGIES come from uneven step lengths: a clean straight line runs 2-2-2-2 while a lumpy one runs 1-3-2-1-4. Read the border as a STAIRCASE and count the pixels in each step: on a correct curve the run lengths rise smoothly toward the horizontal and fall smoothly toward the vertical, usually in a geometric progression (5-3-2-1-1-2-3-5). The run lengths are allowed to change fast - what is not allowed is the direction of the change reversing in the middle of the curve, which is exactly what a jaggy is: a step that suddenly shrinks and then grows again. Fix it by PUSHING PIXELS to restore the steady rise or fall, never by adding colour - a 1-3-2-1 sequence is a misstep, not a shading problem. Doubles are not automatically a defect - running the entire outline in doubles is a bold style of its own, and one deliberately broken line can model a brow ridge. Two line families coexist and the subject picks one: a REGULAR line holds a constant step (1-1-1-1 or 2-2-2-2) and reads crisp and mechanical, while an IRREGULAR line varies the run length and reads organic and hand-drawn - choose per subject and never mix the two inside one edge, or the line looks broken. A curve's steps start short, lengthen through the steepest part and shorten again; a jump straight from 1 to 4 is the classic bad transition. Scan every finished line for UNINTENTIONAL SQUARES and corners - a small box where the edge should flow - and delete the extra pixel; and where a long straight run reads too blocky, break it with an alternating colour step to soften the band without moving the geometry.",
     },
     // Pedro Medeiros 第 7 篇《Working with lines》整条吸收。line-quality 管的是
     // 「一条线画得干不干净」，这里管的是「这条线该不该存在、该用什么颜色」——
@@ -692,7 +714,7 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "bounce light", "rim light", "occlusion", "terminator", "flat light",
             "soft shadow", "hard shadow", "shading pass",
         ],
-        body: "Name the light before shading it. A full pass has up to seven parts and you pick them by size and style: VOLUME SHADOW on the side turned away, TERMINATOR where the surface turns past the light, PROJECTED / CAST SHADOW thrown onto the ground or another object, REFLECTION or SPECULAR on a shiny surface, HIGHLIGHT on a matte one, RIM LIGHT grazing the far edge, and BOUNCE LIGHT colour reflected up into the shadow. A cast shadow is hard-edged and shaped by the form blocking the light; a soft shadow belongs to ambient light - and in pixel art a one- or two-pixel hard step almost always reads better than a blur. Light that strikes at a shallow angle is dimmer: shorten and darken the ramp as the surface turns away, and keep a flat face one uniform value instead of ramping it. Reference work is not tracing - read the photo for the structure of the light (where it comes from, which planes face it, where the cast shadow lands), then put the photo away and paint the form. A six-step pass gets there: 1 block the basic colours and shapes, 2 place the basic light and shadow, 3 add the projected shadows, 4 draw the details and engravings, 5 correct the shapes and reinforce the light and shadow, 6 finish with anti-aliasing and outlines only if the style wants them. Two habits do most of the rest: simplify and enlarge - drop detail the eye cannot read at 1x and grow the features that carry the subject - and never ship flat light, a soft face, or bands that follow the outline instead of the form.",
+        body: "Name the light before shading it. A full pass has up to seven parts and you pick them by size and style: VOLUME SHADOW on the side turned away, TERMINATOR where the surface turns past the light, PROJECTED / CAST SHADOW thrown onto the ground or another object, REFLECTION or SPECULAR on a shiny surface, HIGHLIGHT on a matte one, RIM LIGHT grazing the far edge, and BOUNCE LIGHT colour reflected up into the shadow. A cast shadow is hard-edged and shaped by the form blocking the light; a soft shadow belongs to ambient light - and in pixel art a one- or two-pixel hard step almost always reads better than a blur. Light that strikes at a shallow angle is dimmer: shorten and darken the ramp as the surface turns away, and keep a flat face one uniform value instead of ramping it. Reference work is not tracing - read the photo for the structure of the light (where it comes from, which planes face it, where the cast shadow lands), then put the photo away and paint the form. A six-step pass gets there: 1 block the basic colours and shapes, 2 place the basic light and shadow, 3 add the projected shadows, 4 draw the details and engravings, 5 correct the shapes and reinforce the light and shadow, 6 finish with anti-aliasing and outlines only if the style wants them. Two habits do most of the rest: simplify and enlarge - drop detail the eye cannot read at 1x and grow the features that carry the subject - and never ship flat light, a soft face, or bands that follow the outline instead of the form. Compress the ramp: a small sprite wants three or four wide, deliberate bands, not a smooth gradient, and each step should shift hue slightly rather than only changing value. A face takes almost no gradient at all - one flat value in the light and one in the shadow, with the features carried by line and contrast, because a shaded face at 32px turns to mud. Start from a single flat base colour patch for the mid-tone, then add only the parts the piece actually needs: main light, terminator, bounce, highlight, and a hard cast shadow under the form. Self-shadow (the form on itself) keeps more detail and softer edges than a cast shadow, which is crisp and belongs to the blocking shape.",
     },
     KnowledgeEntry {
         id: "pillow-shading",
@@ -735,7 +757,7 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         id: "isometric",
         title: "Isometric and 2.5D grids",
         keywords: &["等轴", "等距", "立体地图", "斜视", "isometric", "iso", "axonometric", "dimetric"],
-        body: "Everything rests on the 2-step (2:1) line: a true 30-degree isometric ground plane drawn in pixels resolves to a 2:1 step, about 26.5 degrees, and once you can read that rhythm the rest is bookkeeping. Keep ONE grid angle for the whole sheet and keep verticals exactly vertical. Draw a side circle from a skewed square plus a cross - the ellipse touches the square at the four cross tips. Keep one 2:1 line on its own layer as a ruler to check alignment, because at this angle you cannot trust your eye. Give the three visible faces three distinct steps of the same ramp so a cube reads without an outline. Cube corner style is a real choice: wide corners look better but need clever overlapping to tile, sharp 2:1 corners tile perfectly but read as hard. A cuboid need not be a cube - the top face just has to match its neighbours so tiles of different height stack - and every face texture has to loop on all four of its sides, not just the ground. Even dimensions are your friend; 36x36 is a common isometric tile. Build units from simple geometric solids - a cube for a torso, a sphere for a shoulder, a cylinder for a limb - then push and pull them into the silhouette, and at 32x32 be willing to OMIT parts that will not read: two pixels is a whole hand, so the skill is abstraction, not detail. Work from the body outward, give the torso a tank-like jut and shoulders that sit higher than the head for weight, and keep the optics to one or two bright pixels. In an isometric mech, the upper leg is barely visible and the groin piece is often dropped, but the FEET are prominent: make them ski-like or talon-like for a stable footprint rather than copying a humanoid foot. On the environment side, a cube tile's diamond top has 2px corners, so adjacent tiles must overlap the top row for a flush fit (or squash the diamond by 1px to trade the look for a 1px corner); water sits about half a cube lower to read as a pit, and a single texture minus its highlights can carry a seamless 16-frame loop.",
+        body: "Everything rests on the 2-step (2:1) line: a true 30-degree isometric ground plane drawn in pixels resolves to a 2:1 step, about 26.5 degrees, and once you can read that rhythm the rest is bookkeeping. Keep ONE grid angle for the whole sheet and keep verticals exactly vertical. Draw a side circle from a skewed square plus a cross - the ellipse touches the square at the four cross tips. Keep one 2:1 line on its own layer as a ruler to check alignment, because at this angle you cannot trust your eye. Give the three visible faces three distinct steps of the same ramp so a cube reads without an outline. Cube corner style is a real choice: wide corners look better but need clever overlapping to tile, sharp 2:1 corners tile perfectly but read as hard. A cuboid need not be a cube - the top face just has to match its neighbours so tiles of different height stack - and every face texture has to loop on all four of its sides, not just the ground. Even dimensions are your friend; 36x36 is a common isometric tile. Build units from simple geometric solids - a cube for a torso, a sphere for a shoulder, a cylinder for a limb - then push and pull them into the silhouette, and at 32x32 be willing to OMIT parts that will not read: two pixels is a whole hand, so the skill is abstraction, not detail. Work from the body outward, give the torso a tank-like jut and shoulders that sit higher than the head for weight, and keep the optics to one or two bright pixels. In an isometric mech, the upper leg is barely visible and the groin piece is often dropped, but the FEET are prominent: make them ski-like or talon-like for a stable footprint rather than copying a humanoid foot. On the environment side, a cube tile's diamond top has 2px corners, so adjacent tiles must overlap the top row for a flush fit (or squash the diamond by 1px to trade the look for a 1px corner); water sits about half a cube lower to read as a pit, and a single texture minus its highlights can carry a seamless 16-frame loop. Start every solid as a BOX and sculpt it by pushing and pulling the silhouette - never draw the faces one at a time as separate pictures - because the box keeps the shared grid honest and the reveal of the three faces follows for free. To convert something you already designed flat, skew the top-down plan onto the 2:1 grid first, then lift the vertical walls; converting face by face loses the shared vanishing rhythm.",
     },
     KnowledgeEntry {
         id: "perspective",
@@ -804,7 +826,7 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "高光", "反光", "镜面", "光泽", "亮部", "金属", "刺眼",
             "specular", "highlight", "gloss", "shiny", "reflective", "sheen",
         ],
-        body: "A specular belongs to the LIGHT, not the surface: it stays where the light is even when the object turns. Keep it one to two pixels at 32px and place it on the lit side just inside the terminator, never centred on the lit face. Hardness is the material - metal is a sharp band with an angular tail, wet surfaces and glass a tight bright core, glazed ceramic and plastic a broad blob, cloth, fur and skin nothing at all. Tie it to one value brighter than anything else in the drawing, and never let two speculars compete inside one silhouette.",
+        body: "A specular belongs to the LIGHT, not the surface: it stays where the light is even when the object turns. Keep it one to two pixels at 32px and place it on the lit side just inside the terminator, never centred on the lit face. Hardness is the material - metal is a sharp band with an angular tail, wet surfaces and glass a tight bright core, glazed ceramic and plastic a broad blob, cloth, fur and skin nothing at all. Tie it to one value brighter than anything else in the drawing, and never let two speculars compete inside one silhouette. The highlight's SHAPE is a language of its own: a single pixel or a tiny L for a small object, a short crescent that follows the lit rim for a sphere, a thin line down the lit edge for a blade, and a small ring or dot cluster for glass, gems and wet surfaces. A round object wants the crescent hugging its curve, never a dot floating in the middle; a sword or an axe wants one long thin line along the lit edge, never a spot in the centre of the blade, and a second, much dimmer and smaller highlight may sit on the opposite side to hint at bounce light. Lay the simple highlight first, then add the extra one only if the object still reads as flat - two equal highlights cancel each other out",
     },
     KnowledgeEntry {
         id: "subsurface",
@@ -975,7 +997,7 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "illumination", "three point lighting", "key light", "fill light",
             "volumetric light", "light shaft", "contre-jour", "lighting setup",
         ],
-        body: "Pick a lighting setup on purpose. Three-point: a key light establishes the form, a dimmer fill opens the shadow so it does not die, and a rim separates the subject from the background. Contre-jour: the source sits behind the subject, so the body becomes a dark silhouette and the rim does the describing. Light from below reads unnatural and threatening. Volumetric light is a cone or shaft of colour drawn as a translucent shape, not a glow around a lamp. Whichever you choose, hue-shift the shadow toward the opposite side of the wheel and use one complementary accent so the dark side stays alive.",
+        body: "Pick a lighting setup on purpose. Three-point: a key light establishes the form, a dimmer fill opens the shadow so it does not die, and a rim separates the subject from the background. Contre-jour: the source sits behind the subject, so the body becomes a dark silhouette and the rim does the describing. Light from below reads unnatural and threatening. Volumetric light is a cone or shaft of colour drawn as a translucent shape, not a glow around a lamp. Whichever you choose, hue-shift the shadow toward the opposite side of the wheel and use one complementary accent so the dark side stays alive. NORMAL LIGHT is the most literal mode: shade each surface by how far it turns away from the light and let the terminator follow the form, which suits a sphere, a face or any rounded subject. TOP LIGHT is the friendliest - the crown of the form takes the light and everything below the horizon drops - and REFLECTED (bounce) light is its counterweight, a faint band of colour lifted back into the shadow from the surface below. BG CONTRAST decides whether the silhouette reads at all: put the dark side of the subject against a light background and the light side against a dark one, so the edge never merges. HUE DRIFT sells the temperature of the source: warm light with cool shadows for sunlight or fire, or the reverse under moonlight and shadow, and the further from the source, the more the shadow drifts. Commit to one named setup per picture and stop second-guessing it once the pass starts.",
     },
     KnowledgeEntry {
         id: "contrast",
@@ -1014,7 +1036,7 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "upscale", "scale", "nearest neighbor", "crisp", "pixel perfect",
             "already scaled", "find the original scale", "rescale",
         ],
-        body: "Scale pixel art with nearest neighbour at integer factors or it blurs into mush. Integer doubling keeps every pixel a square block; non-integer factors make uneven pixel sizes - avoid them or accept the wobble. NEVER scale by a partial percentage: 107% breaks the pixels unevenly and the result is a mess, while 200% makes every pixel exactly 2x2 and stays sharp, so partial resizes are simply off the table. Scale for display only, with nearest neighbour, and keep an editable source file (.ase / .aip) alongside every export so a later edit reopens the original instead of a rescaled copy. The editor's zoom view scales up; the export does not bake in any smoothing. Someone hands you an ALREADY-SCALED image - say a 3x export - and you need it at 2x: do not resample one scaled grid onto another. Read the scale first by counting the pixels inside one big block (a block three pixels tall means 300%), divide the resolution by that factor to get back to native, and only then scale up by the new integer. Round-tripping through native is the only way to avoid a second, uneven grid. When a target size cannot be reached with whole numbers, go up or down with a smooth filter AFTER the integer step instead of letting the pixels wobble.",
+        body: "Scale pixel art with nearest neighbour at integer factors or it blurs into mush. Integer doubling keeps every pixel a square block; non-integer factors make uneven pixel sizes - avoid them or accept the wobble. NEVER scale by a partial percentage: 107% breaks the pixels unevenly and the result is a mess, while 200% makes every pixel exactly 2x2 and stays sharp, so partial resizes are simply off the table. Scale for display only, with nearest neighbour, and keep an editable source file (.ase / .aip) alongside every export so a later edit reopens the original instead of a rescaled copy. The editor's zoom view scales up; the export does not bake in any smoothing. Someone hands you an ALREADY-SCALED image - say a 3x export - and you need it at 2x: do not resample one scaled grid onto another. Read the scale first by counting the pixels inside one big block (a block three pixels tall means 300%), divide the resolution by that factor to get back to native, and only then scale up by the new integer. Round-tripping through native is the only way to avoid a second, uneven grid. When a target size cannot be reached with whole numbers, go up or down with a smooth filter AFTER the integer step instead of letting the pixels wobble. Changing the resolution of a drawing is a REDRAW, not a resize: decide the canvas size before drawing whenever you can, and when a piece must change size, redraw the shapes that need it instead of resampling the whole picture. Enlarging means ADDING detail the small version had no room for - extra shading steps, texture, facial features - not stretching the old clusters, and shrinking means DELETING the detail that no longer reads rather than cramming it in. After any change of size, re-check the outline and the dither first, because a filtered or resampled edge is the first thing to break, then walk the whole silhouette and fix it at the new scale.",
     },
     // saint11 的《Scaling Pixel Art》和《Consistency》两篇合起来讲的是同一件事：
     // 像素网格一被破坏，风格就散了。前一条管「放大」，这条管「转角度」——
@@ -1081,7 +1103,7 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         id: "ui-kit",
         title: "Pixel UI panels and frames",
         keywords: &["界面", "面板", "按钮", "边框", "血条", "进度条", "panel", "button", "frame", "border"],
-        body: "Pixel UI works on nine-slice logic: four corners unchanged, edges stretched, middle filled. Keep a 1px inner highlight top-left and a 1px dark line bottom-right, one flat fill between them, and leave one transparent pixel of padding so neighbouring frames do not touch.",
+        body: "Pixel UI works on nine-slice logic: four corners unchanged, edges stretched, middle filled. Keep a 1px inner highlight top-left and a 1px dark line bottom-right, one flat fill between them, and leave one transparent pixel of padding so neighbouring frames do not touch. Author the panel ON that grid - the four corners are fixed 1:1, the four edges stretch along one axis only, and the centre fills whatever space is left - then the same piece resizes from a tooltip to a full window without redrawing. A THREE-slice version (two fixed ends, one stretchable middle) covers bars, simple buttons and value tracks; use it whenever the shape is one-dimensional, because the full nine-slice is wasted there. Put the detail and the decoration in the corners and keep the edges and centre plain or tileable, or a stretched middle smears the pattern into stripes. For a raised or pseudo-3D box, bevel by role: the light face runs along the top and left, the dark face along the bottom and right, and the fill between them stays flat - never bevel all four sides with the same value, or the box reads as a button that is already pressed.",
     },
     KnowledgeEntry {
         id: "icon",
@@ -1638,6 +1660,11 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "桌布",
             "飘带",
             "绶带",
+            "布料",
+            "布褶",
+            "折痕",
+            "褶皱",
+            "飘动",
             "banner",
             "flag",
             "pennant",
@@ -1645,8 +1672,11 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "curtain",
             "drape",
             "tapestry",
+            "cloth",
+            "fabric folds",
+            "cloth movement",
         ],
-        body: "Hanging cloth reads from its folds, and a fold is two long parallel edges around a dark core - never a smudge: settle the whole cloth as one silhouette first, then cut three or four spaced vertical fold lines, each taking the same law (lit face, one mid, dark core) so the eye reads a ripple rather than random stripes. A flag carries its charge as a smaller mass with clear margin near the hoist side, and the free edge takes the wider ripple. Cloth takes no specular, never touches the silhouette of whatever it hangs from, and keeps every fold edge near-vertical - only a named wind tilts them.",
+        body: "Hanging cloth reads from its folds, and a fold is two long parallel edges around a dark core - never a smudge: settle the whole cloth as one silhouette first, then cut three or four spaced vertical fold lines, each taking the same law (lit face, one mid, dark core) so the eye reads a ripple rather than random stripes. A flag carries its charge as a smaller mass with clear margin near the hoist side, and the free edge takes the wider ripple. Cloth takes no specular, never touches the silhouette of whatever it hangs from, and keeps every fold edge near-vertical - only a named wind tilts them. Animate cloth as a sine wave travelling along its length rather than by moving pixels at random: the wave keeps the shape coherent while the surface shifts, and the movement must never break the silhouette or the cloth reads as torn. Folds open outward FROM a compression point - the shoulder, the belt, the peg - so the creases radiate instead of running parallel, and dark areas carry fewer details than the lit planes because the eye cannot read them there. Cloth throws its own shadow onto itself, and narrow strips get fewer and shallower dark folds than a wide banner: the wider the cloth, the more room the folds have to stack.",
     },
     KnowledgeEntry {
         id: "tree",
@@ -1689,6 +1719,17 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         body: "A top-down town is assembled from buildings that all sit on the SAME 16x16 tile foundation as the terrain, so every structure snaps to the grid the roads and lawns already use. A building may break the TOP edge of its footprint by a few pixels - that overhang is what lets the roof or a chimney overlap the tile behind it and quietly adds depth - but it must NEVER break the bottom or the sides of the footprint, because that is where the layering order is decided and a broken side collides with the neighbouring tile. Build one roof-first and work downward: block the roof and walls as flat masses, cut the windows and doorways as darker openings, drop shadows under the eaves and inside every recess from the one light direction, and only then outline. Skip a straight black outline for a line one or two steps darker than the pixels it touches, so the asset reads clean against any ground. Finish by fleshing out the property around the foundation and casting its drop shadow onto the ground, and size that property on the same 16x16 grid so lawns, driveways and parking lots line up with the map. Lay the town out as a grid of blocks joined by roads, where a road is just a terrain tile carrying a traffic line, and keep every roof, wall and ground plane lit from the same direction. The same recipe scales from a single cottage to a school, office, church or civic building - only the massing and the number of stops change.",
     },
     KnowledgeEntry {
+        id: "topdown-houses",
+        title: "Drawing a top-down house from a box",
+        keywords: &[
+            "俯视房子怎么画", "俯视建筑结构", "顶视角房屋", "俯视屋顶", "房子俯视图",
+            "屋顶透视", "房子结构",
+            "top down house", "topdown house", "top-down house", "overhead building",
+            "roof perspective", "building silhouette", "footers",
+        ],
+        body: "Build a top-down house in this order and it stays readable at any size: start with a box; make the roof slightly bigger than the walls; bend the lines a little to add fake perspective and make the shapes more dynamic; block out the doors, windows and details; then add depth, more depth and more detail; finish with a base light/shadow pass; only then render the textures. L and T shaped plans read better than plain rectangles, and stacking blocks on top of each other creates interesting silhouettes for free. The fake perspective only works from a 3/4 top-down camera - used from other angles it looks broken, so fix the camera before designing the building. When the silhouette still looks flat, add footers that straighten the base so the house sits squarely on the grid.",
+    },
+    KnowledgeEntry {
         id: "food",
         title: "Food, fruit and consumables",
         keywords: &[
@@ -1717,6 +1758,16 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         body: "A pixel sheet also works as a grid of INDEX numbers instead of colours, and that buys three things: recolouring the whole image is one conditional-format rule per colour, the per-colour pixel count comes from a single COUNTIF (which is also the bead and embroidery bill), and a mirror is `=H1` dragged sideways. Four ways to fill the grid: by hand, with a number palette plus rules, by pasting an image, or by importing a pattern CSV. Keep one cell per pixel, one row of cells per canvas row, and always deliver a numbered grid with a legend - a legend-free number sheet is unreadable.",
     },
     KnowledgeEntry {
+        id: "explosions",
+        title: "Explosions: flash, blast, fire, smoke",
+        keywords: &[
+            "爆炸", "爆炸特效", "爆裂", "爆破", "炸开", "炸裂", "闪光", "冲击波", "爆炸动画",
+            "explosion", "explode", "exploding", "blast", "detonation", "shockwave",
+            "explosion animation",
+        ],
+        body: "Build an explosion in layers - flash, blast, fire, smoke - and animate them one at a time instead of drawing the whole thing per frame. Four frames is the minimum and more frames read smoother. Frame one is a CONTRAST FLASH: a mostly dark frame whose only job is to make everything after it feel brighter. Frame two is the white flash, optionally carrying shrapnel or a few light lines. Frame three is the sharp blast - use sharp angles, because an explosion is not built from curves, and keep the noise out. Frame four is the fade, and the two parts fade at different speeds: fire dies quickly while smoke lingers, so the flame silhouette is gone first and only the haze is left. Explosion art behaves like bubbles - shapes grow, overlap and pop. Watch the surroundings, because a blast can throw flying bits that land after the explosion itself is over; the debris is an afterthought and must not compete with the flash.",
+    },
+    KnowledgeEntry {
         id: "fire-flames",
         title: "Flames, fire and burning animation",
         keywords: &[
@@ -1734,6 +1785,17 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "electricity", "electric", "lightning", "bolt", "electric arc", "tesla", "shock",
         ],
         body: "Electricity has to be fast, so animate it on alternating frames and insert blank frames rather than sustaining it - the eye fills the gap in and the strike flickers instead of glowing. An arc is a moving, dissipating channel: keep the particle count low and let the blank frame do the work. A bolt reads from sharp angles plus a first frame that is white or much brighter than the rest, then the bright shape fades back toward that first silhouette over a single held frame. Mix arcs, bolts and a puff of smoke to sell scale, and remember that sparks can resolve in as few as three frames. Never soften the corners, because a bolt built from curved segments stops reading as electricity.",
+    },
+    KnowledgeEntry {
+        id: "magic-vfx",
+        title: "Light and dark magic effects",
+        keywords: &[
+            "魔法特效", "法术特效", "魔法", "光魔法", "暗魔法", "神圣特效", "邪恶特效",
+            "符文", "法阵", "咒语特效", "治疗特效", "亡灵特效",
+            "magic effect", "magic vfx", "spell effect", "dark magic", "light magic",
+            "holy magic", "rune", "sigil", "arcane",
+        ],
+        body: "Light and dark magic are two opposite palettes, and the read comes from that contrast. Dark effects: cold, complementary and high in contrast - green against purple rather than neighbouring hues - with fluid, smoke-like shapes that connect to each other and fade in spirals, slowly. Put the light BELOW the subject, because light from underneath reads unnatural and threatening, use unnatural colours for lightning, and prefer sharp shapes with overlapping animations for a chaotic feel. Light effects: bright, saturated, analogous colours, small sparks that fall slowly or even drift upward (too many sparks collapse into noise), rounded or square shapes rather than spikes, no smoke at all, and particle trails that start fast and then slow down. Light magic reads as order, intelligence, cleanliness, calm and good, while dark magic reads as unnatural, chaotic, mystical, ghostly and morbid. When the effect is a sequence, let the parts happen in order instead of all at once - rain, then the blast, then the symbol - and use overlapping animations plus a rune or symbol for a mystical finish.",
     },
     KnowledgeEntry {
         id: "smoke-particles",
@@ -1789,7 +1851,7 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "木材", "木料", "橡木", "原木",
             "wood", "wooden", "wood grain", "bark", "plank", "timber", "log",
         ],
-        body: "Start wood from a medium-toned silhouette built out of a few very basic shapes, then add shadow while avoiding pillow shading. Keep the shadow hue-shifted, and let long grain lines follow the form instead of running parallel to the edge. Bark is built like overlapping scales: light the scales individually but read them as one shape, or the trunk turns to noise. Add knots, nails, cracks, moss and grass as separate elements on top of the finished form rather than as texture baked into the base. Keep the transitions slow and do not over-do the highlight, because wood is a low-contrast material; a tree stump's rings fade out with distance instead of staying equally strong all the way in.",
+        body: "Start wood from a medium-toned silhouette built out of a few very basic shapes, then add shadow while avoiding pillow shading. Keep the shadow hue-shifted, and let long grain lines follow the form instead of running parallel to the edge. Bark is built like overlapping scales: light the scales individually but read them as one shape, or the trunk turns to noise. Add knots, nails, cracks, moss and grass as separate elements on top of the finished form rather than as texture baked into the base. Keep the transitions slow and do not over-do the highlight, because wood is a low-contrast material; a tree stump's rings fade out with distance instead of staying equally strong all the way in. For a stylised log, plank or barrel, the fastest readable grain is a run of near-45-degree parallel grooves - a dark line with a lighter line beside it - spaced evenly but not perfectly identical, with one or two knots interrupting the set. Keep the grooves following the length of the piece and let the end-grain show its rings instead, because a groove that crosses the grain direction reads as a crack.",
     },
     KnowledgeEntry {
         id: "sword-design",
@@ -1866,7 +1928,7 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "vegetation", "bushes", "shrubbery", "leaf clusters", "canopy shading",
             "plant shading",
         ],
-        body: "Vegetation is drawn in three passes: shape, then light, then detail. Block the correct silhouette and the cluster level first, light the cluster as a single mass before touching individual leaves, and only add leaf texture last. Because light on foliage is warm, almost half of the ramp can legitimately live in light green - do not spend the whole ramp on shadow. Keep the light direction consistent between adjacent bushes or the grouping reads as separate plants, and increase contrast where two clusters intersect so the forms separate. Grow leaves in clusters rather than one pixel at a time.",
+        body: "Vegetation is drawn in three passes: shape, then light, then detail. Block the correct silhouette and the cluster level first, light the cluster as a single mass before touching individual leaves, and only add leaf texture last. Because light on foliage is warm, almost half of the ramp can legitimately live in light green - do not spend the whole ramp on shadow. Keep the light direction consistent between adjacent bushes or the grouping reads as separate plants, and increase contrast where two clusters intersect so the forms separate. Grow leaves in clusters rather than one pixel at a time. Split the work into four visible layers - highlights, base, shadow and dirt - and paint one solid colour per region as you advance, so each zone is finished before the next begins; that keeps a clump from turning into confetti. A bush is a 3D block, not a flat sticker: give it a lit top plane, a mid front plane and a dark underside, and let grass and vines spill over a cliff edge so hard terrain corners stay hidden. Real photographs are the best reference for the branching rhythm, the way a vine traces a silhouette, and the fold of a large leaf, but read the photo and then put it away. Far vegetation loses contrast and drifts toward the sky colour, and every small detail in the canopy has to be deliberate: a spot of light, a single dark leaf, a stem line - if it is not carrying form, delete it.",
     },
     KnowledgeEntry {
         id: "water-animation",
@@ -1886,6 +1948,28 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "cloud", "clouds", "cloud shading", "cumulus", "cloud layer",
         ],
         body: "Think of a cloud as groups of spheres sharing one flat base, then light those spheres as a single mass instead of individually. Keep the base as flat colour, shift the shadows slightly for shape, and stay low-contrast - a high-contrast cloud reads as rock. When the sun sits behind the cloud the rim takes a bright outline and the shadow lives in the flat underside, and that backlight is usually more convincing than a top-down light. Avoid clusters that are only one or two pixels, and remember that different cloud types follow different rules, so decide the weather and the altitude before you shade.",
+    },
+    KnowledgeEntry {
+        id: "starfield",
+        title: "Starfields, planets and space backgrounds",
+        keywords: &[
+            "星空", "星星", "星星背景", "宇宙背景", "星球", "星云", "银河", "太空背景",
+            "夜空星星", "行星",
+            "starfield", "stars", "space background", "starry sky", "planet", "nebula",
+            "galaxy", "outer space",
+        ],
+        body: "Build space from a few reusable pieces rather than from noise. Stars come from two or three colour variations and a handful of common shapes; cluster them and vary the density so scattered bright points give the field rhythm. Twinkling stars need only a tiny colour change and a low frame count, and they must be OUT OF SYNC with each other - a field that pulses in unison reads as a bug - and not every star has to animate at all. Big stars hue-shift and gain saturation toward the middle. A planet's shadow is made by overlapping two circles, spirals read as gas and work especially well in space, and clouds that fade into stars can carry tentacle-like spirals. Give a large planet a backlight so it separates from the field. Avoid a 100% black background - use a very dark colour instead - and keep a background planet lower in contrast than the foreground stars, or the depth collapses.",
+    },
+    KnowledgeEntry {
+        id: "level-teaching",
+        title: "Teaching a mechanic through level progression",
+        keywords: &[
+            "关卡设计", "教学关", "教学曲线", "机制教学", "引导玩家", "难度曲线", "新手引导",
+            "先教后练", "关卡节奏", "机制递进", "教玩家", "新机制", "玩法教学", "机制引导",
+            "level design", "teaching level", "mechanic tutorial", "difficulty curve",
+            "level progression", "onboarding", "teach then test", "game design",
+        ],
+        body: "A teaching level is a loop of four beats, and each one has to be readable before the player even moves. TEACH the mechanic in a safe, controlled space where failure costs nothing: one hazard, one tool, one clear line of sight, and the geometry itself demonstrates the rule. PRACTICE it immediately with a small variation that confirms the player understood - same mechanic, new position. ASSESS it with a low-stakes challenge the player cannot skip: the level should be solvable only by using the tool that was just taught, so the game quietly checks the lesson. Then GIVE a second tool, and finish with a surprise that combines the new tool with an old threat the player thought they had beaten, because the combination, not the individual piece, is the real test. Never stack two new mechanics in one room, never hide the lesson behind text, and keep the safe teaching space free of enemies so the player can experiment without a timer. The same curve scales to pixel art props: introduce one visual element at a time in a scene, let it repeat, then add the next layer, or the composition reads as noise the same way an unfair level does.",
     },
 ];
 
@@ -2784,6 +2868,70 @@ mod tests {
         // 一整轮特效问题会同时够到 vfx 加几条新条目，预算仍要兜得住。
         let text = prompt_section(
             "做一套战斗特效：火焰、浓烟、闪电、血迹和旋风",
+            DEFAULT_LIMIT,
+            DEFAULT_BUDGET,
+        );
+        assert!(
+            text.chars().count() <= DEFAULT_BUDGET,
+            "{}",
+            text.chars().count()
+        );
+    }
+
+    /// 跑射那一轮正文较长，DEFAULT_BUDGET 最先挤掉的恰恰是排在后面的条目。
+    /// 「落地延迟动态化」是 Pixelblog 60 补进来的手艺里最靠后的一句，所以拿它
+    /// 当预算的哨兵：正文再膨胀时在这里炸，而不是等模型又画出一个没有落地反馈的跳跃。
+    #[test]
+    fn the_saint11_fourth_one_pager_batch_surfaces() {
+        // 第四批：待机、爆炸、魔法、星空、俯视建筑与层序，以及一批并进既有条目的
+        // 单页规则。每条都要中英双语捞得到，而且不能把老主场抢走。
+        for (query, id) in [
+            ("画角色待机动画", "character-idle"),
+            ("做爆炸特效", "explosions"),
+            ("光魔法和暗魔法怎么画", "magic-vfx"),
+            ("画星空和行星", "starfield"),
+            ("俯视房子怎么画", "topdown-houses"),
+            ("俯视遮挡和层序怎么排", "topdown-depth-sorting"),
+            ("界面面板和按钮怎么画", "ui-kit"),
+            ("怎么教玩家新机制", "level-teaching"),
+            ("布料飘动和折痕怎么画", "fabric-banner"),
+            ("沙丘场景怎么画", "sand-terrain"),
+            ("等距网格怎么画", "isometric"),
+            ("瓦片边缘和过渡块怎么接", "tile-edges"),
+            ("character idle animation", "character-idle"),
+            ("explosion effect animation", "explosions"),
+            ("light magic vfx", "magic-vfx"),
+            ("starfield and planet background", "starfield"),
+            ("top down house from a box", "topdown-houses"),
+            ("top down depth sorting collider", "topdown-depth-sorting"),
+            ("9 slice ui panel and frame", "ui-kit"),
+            ("teach a mechanic level progression", "level-teaching"),
+            ("cloth movement and folds", "fabric-banner"),
+            ("sand dune scene", "sand-terrain"),
+            ("isometric 2:1 grid", "isometric"),
+            ("tile edges and transition pieces", "tile-edges"),
+        ] {
+            let hits = retrieve(query, 4);
+            assert!(
+                hits.iter().any(|e| e.id == id),
+                "'{query}' 没捞出 {id}：{:?}",
+                hits.iter().map(|e| e.id).collect::<Vec<_>>()
+            );
+        }
+
+        // 新条目不能抢老主场：纯猫、纯高光、纯优化、纯行走图照旧各归各家。
+        for (query, preferred) in [
+            ("画一只坐着的小猫", "cat"),
+            ("金属高光再亮一点", "specular"),
+            ("优化一下细节", "refine"),
+            ("画一个八帧的行走图", "walk-cycle"),
+        ] {
+            assert_eq!(retrieve(query, 4)[0].id, preferred, "{query}");
+        }
+
+        // 一整轮题材 + 特效一起问，预算仍要兜得住。
+        let text = prompt_section(
+            "做一套待人机：角色待机、爆炸、光魔法、星空、俯视房子和瓦片",
             DEFAULT_LIMIT,
             DEFAULT_BUDGET,
         );
