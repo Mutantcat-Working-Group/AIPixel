@@ -329,6 +329,20 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         body: "What breaks a pixel drawing is mostly habit carried over from vector art: anti-aliasing on the silhouette, sub-pixel placement, gradient fills, local transparency, blur, bezier handles, and any colour outside the palette. Fix the light direction once for the whole project - default top-left - and never flip it halfway. The colour budget is per image, not per shape: 3 for minimalist, 4-6 under 32px, 3 per sprite plus transparent on NES, 15 for SNES-style, 31 for a modern look, 47 for a dense illustration. Sizes that stay clean: 8, 16, 24, 32, 48, 64, 96, 128, 256. Draw at exactly 1x - resampling afterwards turns clusters into mush.",
     },
     KnowledgeEntry {
+        id: "pixel-art-definition",
+        title: "What counts as pixel art, and how to export it",
+        keywords: &[
+            "像素画定义", "什么算像素画", "算不算像素画", "单像素控制", "逐像素控制",
+            "自动工具", "自动放置像素", "模糊工具", "涂抹工具", "渐变叠加", "油漆桶",
+            "直线工具", "放大才看得见", "不算像素画", "欧卡基",
+            "保存为jpg", "不要jpg", "jpg压缩", "导出png", "导出gif",
+            "pixel art definition", "per-pixel control", "automatic tools", "blur tool",
+            "smudge tool", "gradient overlay", "bucket tool", "line tool", "oekaki",
+            "jpg", "png", "gif",
+        ],
+        body: "Pixel art is defined by authorial control at the single-pixel level, not by a file extension or a small canvas. Any tool that places or smooths pixels automatically - blur, smudge, smear, blend brushes, gradient overlays, auto anti-aliasing - is off the table, because the artist is no longer choosing where each pixel lands. The bucket fill and the line tool are fine: what matters is that their output stays editable one pixel at a time. A practical test: if the result could have been produced without ever zooming in, it is ordinary digital painting (oekaki), not pixel art. Never export the master as JPG - lossy compression smears hard edges and silently introduces colours that were never in the palette; keep the editable source and export PNG, or GIF when a limited palette or an animation needs it.",
+    },
+    KnowledgeEntry {
         id: "style-tiers",
         title: "Console and house style tiers",
         keywords: &[
@@ -836,7 +850,7 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "analogous",
             "color scheme",
         ],
-        body: "Pick the hue relationship before the first pixel: analogous (a 30-60 degree band) reads calm and unified, complementary (opposite hues) reads punchy but needs one side clearly dominant, and a triad reads busy unless two thirds of the canvas is neutral. Warm hues advance and cool hues recede, so spend the warm accent on the focal point and keep the cool hues in the background. One hue family should own more than half the canvas.",
+        body: "Pick the hue relationship before the first pixel: analogous (a 30-60 degree band) reads calm and unified, complementary (opposite hues) reads punchy but needs one side clearly dominant, and a triad reads busy unless two thirds of the canvas is neutral. Warm hues advance and cool hues recede, so spend the warm accent on the focal point and keep the cool hues in the background. One hue family should own more than half the canvas. Hue carries its own apparent brightness: at the same numeric value yellow reads lightest while blue and violet read darkest, so a palette that is technically equal in value still looks uneven - compensate on purpose instead of fighting it. Keep the hue count low, because a piece that borrows a few hues reads calmer than one that spreads across the whole wheel.",
     },
     KnowledgeEntry {
         id: "temperature",
@@ -1801,6 +1815,10 @@ mod tests {
             ("分不清该画成线还是画成体块，块状像素怎么处理", "form-first"),
             ("颜色太艳了有点刺眼，灰阶跨度也不够", "palette-control"),
             ("交付前把它翻转看看，再去色核对明暗", "final-checks"),
+            // Cure 对「什么才算像素画」与导出格式的红线。
+            ("什么算像素画，是不是要逐像素控制", "pixel-art-definition"),
+            ("导出的时候能不能存成 jpg", "pixel-art-definition"),
+            ("用油漆桶和直线工具算不算作弊", "pixel-art-definition"),
             // Pedro Medeiros 两篇与 Slynyrd Pixelblog 60 吸进来的规则。
             ("色块起稿怎么画，不打线稿行不行", "cluster-sketching"),
             ("受限调色板要做色相替换，高光该借哪个色", "ramps"),
@@ -1910,6 +1928,7 @@ mod tests {
             ("立体感不够，明暗交界太生硬", "form-shading"),
             ("金属高光再亮一点", "specular"),
             ("尾巴画条平滑的抗锯齿曲线", "smooth-curves"),
+            ("颜色太艳了有点刺眼，灰阶跨度也不够", "palette-control"),
         ] {
             assert_eq!(retrieve(query, 4)[0].id, preferred, "{query}");
         }
