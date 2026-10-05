@@ -137,12 +137,77 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         keywords: &[
             "弹跳", "弹性", "弹球", "挤压", "拉伸", "挤压拉伸", "预备动作", "预备帧", "起跳",
             "落地", "回弹", "逐帧", "一帧一帧", "关键帧", "姿态到姿态", "运动规律", "动画原理",
-            "缓动", "重量感", "缓冲",
+            "重量感", "缓冲",
             "squash and stretch", "squash", "stretch", "anticipation", "straight ahead",
             "pose to pose", "key pose", "keyframe", "bounce", "bouncing", "follow through",
             "ease in", "ease out", "animation principles",
         ],
         body: "Pick the build method before the first frame, because it decides how the motion is found. STRAIGHT AHEAD is frame one, then two, then three, letting each pose suggest the next - fast and loose, and the right default for fire, smoke, cloth and other organic movement. POSE TO POSE fixes the extremes first (contact, up, down, pass) and then fills the in-betweens - controllable, and the right default for a walk, a run, a jump and an attack. Whichever you use, draw the STILL first: one standing frame that locks the proportions, the palette and the detail ceiling every other frame has to match. Timing carries the weight, not the frame count. Build a bounce from gravity instead of a smooth curve: the ball falls 4px, then 3, then 2, then 1 as it speeds up, holds one frame on the ground, and rises back through 1/2/3/4 with one frame held at the top; that single hold at contact sells the impact better than any easing, and the same hold carries a sword hit, a landing and a foot plant. Squash and stretch keep the VOLUME constant - flatten on impact and elongate at the fastest moment, keeping the area the same so the form does not inflate like a balloon. Add ANTICIPATION before any big move: one wind-up frame in the opposite direction of the travel, so the eye is ready when the action fires. To LOOP, delete the still frame and the anticipation from the cycle and let the last frame flow straight back into the first, otherwise the repeat stutters every time around. On a multi-frame selection, set the hold frame's duration longer than the travel frames in one pass.",
+    },
+    KnowledgeEntry {
+        id: "subpixel-motion",
+        title: "Sub-pixel motion without fractional positions",
+        keywords: &[
+            "亚像素", "次像素", "半像素", "不到一像素", "小于一像素", "缓慢移动", "细微移动",
+            "呼吸起伏", "轻微晃动", "飘浮", "悬浮",
+            "subpixel", "sub-pixel", "sub pixel", "subpixel animation", "quarter pixel",
+            "less than one pixel",
+        ],
+        body: "Pixel positions are whole numbers, so a move smaller than one pixel cannot be drawn by translating the sprite a fraction. Fake it by editing the shape in place: shift one part of the cluster, break a line, or recolour a single pixel so the eye reads the motion. Keep the change to one or two pixels and keep the colour count low in that area, because several colours packed into a tiny region turn the silhouette to mush and the sub-pixel step stops reading.",
+    },
+    KnowledgeEntry {
+        id: "easing",
+        title: "Easings: motion accelerates and decelerates",
+        keywords: &[
+            "缓动", "缓入缓出", "加速", "减速", "匀速运动", "线性运动", "运动曲线",
+            "速度变化", "速度曲线",
+            "easing", "ease in", "ease out", "ease-in-out", "acceleration", "deceleration",
+            "linear motion", "velocity curve", "slow in slow out",
+        ],
+        body: "Uniform spacing reads mechanical: real motion speeds up and slows down. Put the in-betweens close together at the start (ease in), leave the middle travelling fast, and crowd them again at the end (ease out); a move that snaps out of a hold and lands softly is the same idea plus anticipation and overshoot. When a single frame has to carry the whole acceleration, distort that middle frame - stretch it along the travel - instead of adding another frame.",
+    },
+    KnowledgeEntry {
+        id: "seamless-loop",
+        title: "Seamless loops: the ends must match",
+        keywords: &[
+            "循环", "无缝循环", "循环动画", "循环点", "首尾衔接", "首尾相接",
+            "循环卡顿", "循环跳帧", "循环闪烁", "循环接缝",
+            "seamless loop", "loop animation", "looping", "loop point", "cycle seam",
+            "loop seamlessly",
+        ],
+        body: "A loop is seamless when the last frame flows into the first with no jump, so either make the first and last poses match or drop the duplicated frame and let the last one flow straight back. Do not start every particle, glint or flicker on the same frame - stagger their phases or the whole loop pulses in unison. Match the frame counts of anything that has to keep time, use empty or held frames to give the repetition air, and play the full cycle twice before judging it.",
+    },
+    KnowledgeEntry {
+        id: "motion-blur",
+        title: "Motion blur, ghost trails and smear frames",
+        keywords: &[
+            "动态模糊", "运动模糊", "拖影", "残像", "重影", "残影拖尾",
+            "motion blur", "ghosting", "ghost trail", "afterimage", "smeared frame",
+            "motion smear",
+        ],
+        body: "Blur only the frames where the object actually travels fast - the key pose must stay crisp or the motion stops reading. Draw the blur as an offset duplicate of the shape in a darker or complementary colour placed behind or ahead of it along the travel line, and fade it over two or three frames. A trail that lingers longer than that smears the whole animation; for a swing or a hit, use one elongated shape rather than a stack of ghosts.",
+    },
+    KnowledgeEntry {
+        id: "animation-planning",
+        title: "Planning an animation before drawing frames",
+        keywords: &[
+            "动画规划", "动画计划", "动画流程", "规划动画", "拆动画", "动画分镜",
+            "关键姿态", "关键pose", "动画拆分",
+            "animation planning", "plan an animation", "plan the animation",
+            "animation breakdown", "plan the cycle", "animation plan",
+        ],
+        body: "Settle the animation before drawing a strip: draw the still frame first to lock the proportions and the palette, rough the key poses at the extremes of the motion, then fill the in-betweens. Decide the frame count, the loop point and which parts move before painting, and split the body into separate parts when only one limb changes - that is cheaper than redrawing the whole figure and keeps the parts consistent. If the still frame took several correction rounds, do not start animating until it is settled, because every later frame inherits the error.",
+    },
+    KnowledgeEntry {
+        id: "modular-animation",
+        title: "Modular animation: separate parts and hidden joints",
+        keywords: &[
+            "部件动画", "分部件动画", "拼装动画", "模块化动画", "部件拆分", "关节重叠",
+            "关节接缝", "旋转部件", "缩放部件", "部件拼接",
+            "modular animation", "part animation", "cut-out animation", "pivot animation",
+            "joint overlap", "hide the seam",
+        ],
+        body: "Draw the parts that move separately - head, torso, upper and lower limb, tail, cloth - and animate them by rotating or scaling around a fixed pivot instead of redrawing the whole figure. Overlap the parts at the joint by a pixel or two so the rotation never opens a gap, and hide the seam somewhere the eye does not track: a cuff, a belt, a change of material or colour. Modular motion suits machinery, cloth and simple limbs; anything that deforms, like a face or a squash-and-stretch body, still wants frame-by-frame drawing.",
     },
     KnowledgeEntry {
         id: "sprite-sheet",
@@ -429,6 +494,17 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         body: "A cluster is a continuous run of pixels of the exact same colour, and it is the unit the drawing is built from - the border of one cluster shapes the cluster beside it, so rearranging a cluster changes the picture more than recolouring it does. The aim is as FEW clusters as possible and no one-pixel clusters at all. Pixels that touch only diagonally are a WEAK connection: they technically join, but treat them as a seam to avoid unless the shape demands it. Details read as 2x2-plus clusters; one stray pixel reads as dirt. LONE PIXELS are the exception, justified for exactly three jobs: a specular highlight dot, texture, and a small but essential detail on a very small sprite (an eye, a beak, a star, a bubble). A lone pixel of a DIFFERENT color that directly buffers an edge is not noise either - it is anti-aliasing, and counts as part of the cluster it touches. When a lone pixel is carrying a real detail, the fix is to absorb it into a small shape (a 2x2, an L, a T) rather than to delete it; when it is not, delete it and merge the neighbours. Everything else is noise: fix a lumpy curve by re-spacing its runs into a regular step rhythm (45 degrees = one pixel per row, about 22.6 = 2-pixel runs, about 30 = evenly spaced) instead of smoothing it with extra color, and remember that single pixels expose the grid by revealing the resolution.",
     },
     KnowledgeEntry {
+        id: "alignment",
+        title: "Breaking alignment to smooth a shape",
+        keywords: &[
+            "对位", "错位", "对齐网格", "网格错位", "破格", "错开一格", "偏移一格",
+            "破对齐",
+            "alignment", "breaking alignment", "off grid", "off-grid", "grid alignment",
+            "misaligned",
+        ],
+        body: "Two shapes locked onto the same pixel column or row share every step, and the seam between them reads as one blunt block. Break the alignment on purpose - offset the neighbouring shape by a single pixel - and both curves gain room, the transition reads smoother, and the same silhouette can hold more detail without adding colours. The exception is a deliberately geometric or tiled look, where the shared grid is the style and the steps should line up exactly.",
+    },
+    KnowledgeEntry {
         id: "line-quality",
         title: "Line weight: doubles, jaggies and step rhythm",
         keywords: &[
@@ -701,6 +777,17 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         body: "At 32px and under a character is five to six heads tall with no neck detail and mitten hands; under 16px reduce to three heads and read the pose from a single limb line. Spend the detail budget on the eyes and the silhouette - everything else is an accent.",
     },
     KnowledgeEntry {
+        id: "cuteness",
+        title: "Cuteness: proportions and shapes that read as cute",
+        keywords: &[
+            "可爱角色", "可爱造型", "萌", "萌系", "q版", "Q版", "大头", "头大",
+            "短手短脚", "圆润造型",
+            "cute", "cuteness", "chibi", "adorable", "big head", "stubby limbs",
+            "cute proportions",
+        ],
+        body: "Cute is a proportion recipe, not a colour: simplify the form into rounded masses, make the head large relative to the body, place big eyes low on the face with a small mouth and nose, and keep the limbs short and stubby. Soften every corner and keep sharp, spiky edges for one signature unless the character is deliberately edgy. In animation, cuteness comes from bounce - a small vertical hop, a squash on landing and a slight stretch at the fastest point.",
+    },
+    KnowledgeEntry {
         id: "eyes",
         title: "Eyes and facial read",
         keywords: &["眼睛", "眼部", "瞳孔", "眼神", "脸部", "表情", "eye", "eyes", "pupil", "face", "expression"],
@@ -739,10 +826,41 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         body: "A rim light is a thin 1px band of the lightest ramp step on the shadow side of the form, and it must follow the same light direction as everything else. Use it to separate a dark subject from a dark background; drop it where the subject already contrasts with its backdrop.",
     },
     KnowledgeEntry {
+        id: "darkness",
+        title: "Dark scenes: keep a readable value and one light",
+        keywords: &[
+            "暗场景", "黑暗场景", "夜晚场景", "夜戏", "低光照", "夜里", "黑暗环境", "暗部",
+            "darkness", "dark scene", "low light", "night scene", "dark environment",
+        ],
+        body: "Darkness is not a low-contrast grey wash. Start from a general dark shape, then place a few strong points of light and build the scene around them; the dark areas still need one value that describes their shape, and rim lights around the silhouette are what keep the subject separate from the background. Do not spread detail evenly through the dark - most of it should disappear, and the eye should be taken to the light. Keep the light direction consistent no matter how dim the scene is.",
+    },
+    KnowledgeEntry {
+        id: "illumination",
+        title: "Illumination setups: key, fill, rim, contre-jour and volumetric",
+        keywords: &[
+            "三点布光", "主光", "辅光", "背光剪影", "体积光", "光柱", "打光方案",
+            "布光", "逆光剪影",
+            "illumination", "three point lighting", "key light", "fill light",
+            "volumetric light", "light shaft", "contre-jour", "lighting setup",
+        ],
+        body: "Pick a lighting setup on purpose. Three-point: a key light establishes the form, a dimmer fill opens the shadow so it does not die, and a rim separates the subject from the background. Contre-jour: the source sits behind the subject, so the body becomes a dark silhouette and the rim does the describing. Light from below reads unnatural and threatening. Volumetric light is a cone or shaft of colour drawn as a translucent shape, not a glow around a lamp. Whichever you choose, hue-shift the shadow toward the opposite side of the wheel and use one complementary accent so the dark side stays alive.",
+    },
+    KnowledgeEntry {
         id: "contrast",
         title: "Contrast and visual hierarchy",
         keywords: &["对比", "主次", "焦点", "突出", "醒目", "contrast", "hierarchy", "focal point", "emphasis"],
         body: "Decide the one focal point and give it the strongest value contrast; push everything else one or two steps flatter. Reserve the darkest dark and lightest light for that spot. If everything is crisp, nothing reads first. Saturation is seasoning, not the main course: keep most of the canvas quiet and let full saturation live only where the eye should land - a drawing that is saturated everywhere reads as noise. Value outranks hue every single time, so check it the cheap way - put a black layer over the finished drawing with its blend mode set to Colour: the greyscale version still has to read, or the picture is being carried by colour alone.",
+    },
+    KnowledgeEntry {
+        id: "one-bit",
+        title: "1-bit drawing: value, silhouette and dither",
+        keywords: &[
+            "1bit", "1-bit", "一位色", "双色", "黑白", "黑白像素", "黑白画", "黑白风格",
+            "单色像素",
+            "one bit", "1 bit", "two color", "two colour", "black and white pixel art",
+            "monochrome sprite",
+        ],
+        body: "With only two colours there is no ramp to hide behind, so the drawing is carried by the outline, the silhouette and the contrast between them. Pick the single most important shape and let the rest simplify; use dithering to fake a mid tone, but keep the pattern regular or it turns into noise; and remember that a full-black fill on white reads heavier than a pattern, so reserve it for the shape that must dominate. A 1-bit animation can sell a lot with the same economy: break the outline in one or two places to imply motion.",
     },
     KnowledgeEntry {
         id: "symmetry",
@@ -773,6 +891,17 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         title: "Noise, scanlines and retro texture",
         keywords: &["噪点", "颗粒", "肌理", "老电视", "扫描线", "做旧", "noise", "grain", "scanline", "texture", "dirty"],
         body: "Texture is a threshold pattern, not random smearing: noise(x,y,scale) with a low scale gives long streaks, a high scale gives speckle. Add texture last and at low density (10-20% of pixels) so the underlying form survives; never let it cross a ramp boundary.",
+    },
+    KnowledgeEntry {
+        id: "glitch-effect",
+        title: "Glitch effect: slices, colour separation and timing",
+        keywords: &[
+            "故障风", "故障效果", "故障艺术", "电子故障", "信号干扰", "画面撕裂",
+            "色差分离", "故障特效",
+            "glitch", "glitch effect", "glitch art", "chromatic aberration", "rgb split",
+            "screen tear", "signal interference",
+        ],
+        body: "A glitch is built from a few cheap moves: displace horizontal slices of the image by one to four pixels, offset the red and blue channels in opposite directions for a chromatic fringe, and add scanlines or a flicker. Keep the loop to two or three frames with the displacement changing each frame, and keep most of the image stable so the broken slices read as damage instead of a broken file. Do not glitch the whole frame at once - a clean area beside the corruption is what makes it legible.",
     },
     KnowledgeEntry {
         id: "crt-screen",
@@ -851,6 +980,17 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "where do i start", "how do i start",
         ],
         body: "Work in four passes and finish each before the next starts. 1 SILHOUETTE: one flat colour, nothing but the outer shape - if it does not read as one blob, stop and restate the proportions rather than shading it. 2 LINE ART: cut that shape into its major regions (brim, face, beard, staff) at one consistent weight. 3 FLAT COLOUR: one local colour per region, ignoring light entirely. 4 REFINE: shading, highlight and the small details last. The silhouette barely changes between pass one and pass four, and that stability is the whole point of drawing it first. Other starts are legitimate too - construction lines for proportion, rough colour blocks for atmosphere, drawing big and shrinking for detail - but whatever you pick, the first pass stays about the big shape only, and there is no single correct order. For a SCENE, work BACK TO FRONT and keep the layer count low: lay the far plane (sky, mountains) first, then the mid ground, then the near silhouette, because the foundation has to exist before anything sits on it - that is what makes the colours and the relative scale of the objects easy to judge.",
+    },
+    KnowledgeEntry {
+        id: "art-pipeline",
+        title: "Pixel-art pipeline: background, shape, ramp, light, highlight",
+        keywords: &[
+            "作画管线", "绘制管线", "作画顺序", "绘制顺序", "先画背景", "上色顺序",
+            "明暗顺序", "先铺色再打光",
+            "art pipeline", "pixel art pipeline", "drawing order", "process order",
+            "work order",
+        ],
+        body: "A reliable order for a single asset is: background colour, background shape, character or foreground, local colour ramp, shading, then highlights and effects last. Each step answers one question and the next assumes it is settled, so changing the ramp after the shading means redoing the shading. Keep a small 1x preview open the whole time and judge every step in it - at zoom any edge looks fine, and only the small view tells you whether the value structure is working.",
     },
     KnowledgeEntry {
         id: "cluster-sketching",
@@ -2111,5 +2251,47 @@ mod tests {
         }
         // 动画原理条也不许把纯步态问题从步态表手里抢走。
         assert_eq!(retrieve("画一个八帧的行走图", 4)[0].id, "walk-cycle");
+    }
+
+    /// saint11 单页技巧集里成篇的动画与画面手艺：亚像素位移、缓动、
+    /// 无缝循环、动态模糊、动画规划、模块化动画、破对齐、可爱比例、暗部、
+    /// 布光、1-bit、故障效果和作画管线。这些条目过去只在覆盖度清单里，
+    /// 用户真的问「缓入缓出怎么加」「暗场景怎么不糊成一团」时捞不出手艺。
+    #[test]
+    fn the_saint11_one_pager_techniques_surface() {
+        for (query, id) in [
+            ("让角色做小于一像素的缓慢移动", "subpixel-motion"),
+            ("运动太匀速了，加点缓入缓出", "easing"),
+            ("循环动画首尾衔接待不住，怎么接", "seamless-loop"),
+            ("快速挥剑加一点运动模糊和拖影", "motion-blur"),
+            ("动画开工前怎么规划关键姿态", "animation-planning"),
+            ("把角色拆成部件动画，关节怎么藏接缝", "modular-animation"),
+            ("两个形状对齐得太死，想错开一格", "alignment"),
+            ("画一个Q版大头可爱角色", "cuteness"),
+            ("夜晚场景太灰了，怎么保持可读", "darkness"),
+            ("三点布光怎么打", "illumination"),
+            ("画一个双色黑白像素角色", "one-bit"),
+            ("加一点故障风色差分离效果", "glitch-effect"),
+            ("作画顺序应该先画背景还是先打光", "art-pipeline"),
+        ] {
+            let hits = retrieve(query, 4);
+            assert!(
+                hits.iter().any(|e| e.id == id),
+                "'{query}' 没捞出 {id}：{:?}",
+                hits.iter().map(|e| e.id).collect::<Vec<_>>()
+            );
+        }
+        // 新条目不许抢老主场：步态、细化、动物、明暗、高光和现成配色各归各家。
+        for (query, preferred) in [
+            ("画一个八帧的行走图", "walk-cycle"),
+            ("优化一下细节", "refine"),
+            ("画一只坐着的小猫", "cat"),
+            ("明暗交界线应该放在哪个位置", "shading-workflow"),
+            ("金属高光再亮一点", "specular"),
+            ("8位配色", "style-recipes"),
+            ("无缝瓦片地图", "tilemap"),
+        ] {
+            assert_eq!(retrieve(query, 4)[0].id, preferred, "{query}");
+        }
     }
 }
