@@ -87,11 +87,13 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         title: "Side-view run 'n gun: layering, jump and shoot-on-move",
         keywords: &[
             "跑射", "横版射击", "射击游戏角色", "持枪", "举枪", "开枪", "边跑边射", "移动射击",
-            "跳跃动作", "落地动作", "受击", "掩体",
+            "跳跃动作", "落地动作", "受击", "掩体", "站立射击", "蹲伏射击", "射击帧复用",
+            "射击动作复用",
             "run and gun", "run 'n gun", "run-and-gun", "shooter", "contra", "gun sprite",
             "shoot while moving", "aiming", "jump animation", "landing", "gun arm",
+            "standing shot", "crouching shot", "shooting overlay", "reuse shooting frames",
         ],
-        body: "A side-view shooter character is built as a STACK of shared parts, not as one animation per action. Draw the base dummy at 8x16 and settle walk and run first - they set the expression and the standard of fluidity everything else is cut from. Then cut LEGS and TORSO into separate layers so the legs keep cycling through walk, run and jump independently of the top half; the shooting pose is 3 frames reused as an UPPER-BODY overlay, stamped onto every frame of every animation that allows linear motion (walk, run, jump), and the shoulder anchoring and bounce must follow the leg layer underneath or the two halves tear apart. HOLDING the gun is the cheap version: delete the arms from a finished frame and redraw them around the weapon, since the shoulder position and the bounce are already correct, and hang a long barrel muzzle-down from the centre of mass when idle. JUMP stays minimal for input response: one tucked pose is the floor, and an 'up' pose for the ascent plus a 'down' pose for the descent is the sweet spot - the apex swap doubles as a timing cue. NO anticipation crouch: it adds input delay, so the jump fires instantly, and if the game wants commitment make the LAND delay DYNAMIC - hold the recovery only when the fall exceeded a set distance, otherwise flash one bent-knee frame for a split second without stopping movement. LAND recycles the tuck/crouch pose plus one frame with the head and arms dipped to sell the weight, and that dip is optional if you want no loss of momentum. Re-sketch the dummy for the female build rather than recolouring it: the difference is EXPRESSION and weight, not anatomy, so she carries the weapon from her core with a lighter, more playful swing. Long hair animates on run and jump but not on run-and-shoot, where the run bounce should own the silhouette - and loose clothing and bulky fashion need their own sub-motion too, since none of them conform to the dummy.",
+        body: "A side-view shooter character is built as a STACK of shared parts, not as one animation per action. Draw the base dummy at 8x16 and settle walk and run first - they set the expression and the standard of fluidity everything else is cut from. Then cut LEGS and TORSO into separate layers so the legs keep cycling through walk, run and jump independently of the top half; build two 3-frame shooting overlays, one STANDING and one CROUCHING, and stamp the right one onto every frame of each animation that allows linear motion (walk, run, jump). Treat the overlay as a separate pass and keep each moving animation's own numbered base frames, so a reused pose never collapses the action list into one generic sequence, and let one jump-shot overlay serve both ascent and descent with only a few pixels of adjustment. The shoulder anchoring and bounce must follow the leg layer underneath or the two halves tear apart. HOLDING the gun is the cheap version: delete the arms from a finished frame and redraw them around the weapon, since the shoulder position and the bounce are already correct, and hang a long barrel muzzle-down from the centre of mass when idle. JUMP stays minimal for input response: one tucked pose is the floor, and an 'up' pose for the ascent plus a 'down' pose for the descent is the sweet spot - the apex swap doubles as a timing cue. NO anticipation crouch: it adds input delay, so the jump fires instantly, and if the game wants commitment make the LAND delay DYNAMIC - hold the recovery only when the fall exceeded a set distance, otherwise flash one bent-knee frame for a split second without stopping movement. LAND recycles the tuck/crouch pose plus one frame with the head and arms dipped to sell the weight, and that dip is optional if you want no loss of momentum. Re-sketch the dummy for the female build rather than recolouring it: the difference is EXPRESSION and weight, not anatomy, so she carries the weapon from her core with lighter, more graceful limb timing. Long hair animates on run and jump but not on run-and-shoot, where the run bounce should own the silhouette and only small shoot-frame tip flips are allowed - and loose clothing and bulky fashion need their own sub-motion too, since none of them conform to the dummy.",
     },
     KnowledgeEntry {
         id: "slide-roll",
@@ -1222,13 +1224,17 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "对比色",
             "冷暖",
             "互补色",
+            "暖光",
+            "冷阴影",
             "harmony",
             "hue scheme",
             "complementary",
             "analogous",
             "color scheme",
+            "warm light",
+            "cool shadow",
         ],
-        body: "Pick the hue relationship before the first pixel: analogous (a 30-60 degree band) reads calm and unified, complementary (opposite hues) reads punchy but needs one side clearly dominant, and a triad reads busy unless two thirds of the canvas is neutral. Warm hues advance and cool hues recede, so spend the warm accent on the focal point and keep the cool hues in the background. One hue family should own more than half the canvas. Hue carries its own apparent brightness: at the same numeric value yellow reads lightest while blue and violet read darkest, so a palette that is technically equal in value still looks uneven - compensate on purpose instead of fighting it. Keep the hue count low, because a piece that borrows a few hues reads calmer than one that spreads across the whole wheel.",
+        body: "Pick the hue relationship before the first pixel: analogous (a 30-60 degree band) reads calm and unified, complementary (opposite hues) reads punchy but needs one side clearly dominant, and a triad reads busy unless two thirds of the canvas is neutral. Warm hues advance and cool hues recede, so spend the warm accent on the focal point and keep the cool hues in the background. Unless the user specifies another light, default to WARM LIGHT and COOL SHADOWS: let the key-light side lean warm and the shade lean cool. A cool highlight pasted over a warm shadow usually reads wrong because the lighting logic has been flipped; reverse it only as a deliberate, explained stylisation. One hue family should own more than half the canvas. Hue carries its own apparent brightness: at the same numeric value yellow reads lightest while blue and violet read darkest, so a palette that is technically equal in value still looks uneven - compensate on purpose instead of fighting it. Keep the hue count low, because a piece that borrows a few hues reads calmer than one that spreads across the whole wheel.",
     },
     KnowledgeEntry {
         id: "temperature",
@@ -2466,6 +2472,7 @@ mod tests {
             // 横版跑射角色的上下半身分层与移动射击。
             ("横版射击游戏角色，边跑边开枪怎么分层", "run-and-gun"),
             ("跑射角色跳跃动作和落地动作怎么做", "run-and-gun"),
+            ("站立射击和蹲伏射击怎么复用到跑步和跳跃", "run-and-gun"),
             ("横版瓦片的角块和接缝怎么处理", "tile-edges"),
             // saint11 教程合集里单独成篇的几块：特效、俯视方向。
             ("爆炸特效的火光和烟雾怎么分帧", "vfx"),
@@ -2955,6 +2962,26 @@ mod tests {
         assert!(
             section.contains("LAND delay DYNAMIC"),
             "落地延迟动态化被预算挤掉了：{section}"
+        );
+        assert!(
+            section.contains("one STANDING and one CROUCHING")
+                && section.contains("shoot-frame tip flips"),
+            "Pixelblog 60 的射击覆盖层组织被预算挤掉了：{section}"
+        );
+    }
+
+    /// Pedro Medeiros 入门篇把冷暖色当成默认光影规则，而不是只当成配色偏好。
+    /// 用户没有指定光色时，模型必须能捞到「暖主光、冷阴影」的明确说法。
+    #[test]
+    fn the_default_warm_light_cool_shadow_rule_survives() {
+        let section = prompt_section(
+            "配色方案里的暖光和冷阴影默认怎么定",
+            DEFAULT_LIMIT,
+            DEFAULT_BUDGET,
+        );
+        assert!(
+            section.contains("WARM LIGHT and COOL SHADOWS"),
+            "默认冷暖光影规则没有进入提示词：{section}"
         );
     }
 }
