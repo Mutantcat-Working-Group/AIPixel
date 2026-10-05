@@ -50,6 +50,12 @@ pub const GLOSSARY: &[GlossaryEntry] = &[
         note: "曲线和背景交界处用一两个过渡色收边，去掉毛刺；小尺寸和勾线上别用，会糊。",
     },
     GlossaryEntry {
+        en: "half-tone",
+        zh: "过渡色",
+        aliases: &["fading color", "fading colour", "半调", "中间过渡色"],
+        note: "前景色与背景色之间、当前调色板里能拿出来的那一档过渡色；不一定非要是正中间那档。规则线条不一定需要抗锯齿，用一档过渡色柔化即可。",
+    },
+    GlossaryEntry {
         en: "jaggies",
         zh: "锯齿",
         aliases: &["阶梯感", "毛刺"],
@@ -597,6 +603,8 @@ mod tests {
     fn a_craft_word_pulls_its_entry_in() {
         // 用户嘴里的「过渡帧」要翻成模型认得的 breakdown。
         assert!(prompt_table_for("过渡帧要顺一点").contains("breakdown"));
+        // saint11 把 AA 之外的单档过渡色叫 half-tone；用户说「半调」也要能命中。
+        assert!(prompt_table_for("线条用半调柔化").contains("half-tone"));
         assert!(prompt_table_for("add some ambient occlusion").contains("ambient occlusion"));
     }
 
