@@ -877,8 +877,40 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
     KnowledgeEntry {
         id: "upscale",
         title: "Scaling and crisp edges",
-        keywords: &["放大", "缩放", "模糊", "倍率", "upscale", "scale", "nearest neighbor", "crisp", "pixel perfect"],
-        body: "Scale pixel art with nearest neighbour at integer factors or it blurs into mush. Integer doubling keeps every pixel a square block; non-integer factors make uneven pixel sizes - avoid them or accept the wobble. NEVER scale by a partial percentage: 107% breaks the pixels unevenly and the result is a mess, while 200% makes every pixel exactly 2x2 and stays sharp, so partial resizes are simply off the table. Scale for display only, with nearest neighbour, and keep an editable source file (.ase / .aip) alongside every export so a later edit reopens the original instead of a rescaled copy. The editor's zoom view scales up; the export does not bake in any smoothing.",
+        keywords: &[
+            "放大", "缩放", "模糊", "倍率", "已经放大过的图", "别人发来的图", "原图多大",
+            "upscale", "scale", "nearest neighbor", "crisp", "pixel perfect",
+            "already scaled", "find the original scale", "rescale",
+        ],
+        body: "Scale pixel art with nearest neighbour at integer factors or it blurs into mush. Integer doubling keeps every pixel a square block; non-integer factors make uneven pixel sizes - avoid them or accept the wobble. NEVER scale by a partial percentage: 107% breaks the pixels unevenly and the result is a mess, while 200% makes every pixel exactly 2x2 and stays sharp, so partial resizes are simply off the table. Scale for display only, with nearest neighbour, and keep an editable source file (.ase / .aip) alongside every export so a later edit reopens the original instead of a rescaled copy. The editor's zoom view scales up; the export does not bake in any smoothing. Someone hands you an ALREADY-SCALED image - say a 3x export - and you need it at 2x: do not resample one scaled grid onto another. Read the scale first by counting the pixels inside one big block (a block three pixels tall means 300%), divide the resolution by that factor to get back to native, and only then scale up by the new integer. Round-tripping through native is the only way to avoid a second, uneven grid. When a target size cannot be reached with whole numbers, go up or down with a smooth filter AFTER the integer step instead of letting the pixels wobble.",
+    },
+    // saint11 的《Scaling Pixel Art》和《Consistency》两篇合起来讲的是同一件事：
+    // 像素网格一被破坏，风格就散了。前一条管「放大」，这条管「转角度」——
+    // 旋转是网格最大的敌人，而 3D 打底稿是绕开它的正路。
+    KnowledgeEntry {
+        id: "pixel-rotation",
+        title: "Rotating pixel art, and 3D blocking as reference",
+        keywords: &[
+            "旋转", "转动", "转个角度", "斜着", "45度", "倾斜角度", "转头", "转圈",
+            "三维参照", "3D参照", "建模参照", "参考模型", "打底稿模型",
+            "rotate", "rotation", "rotated sprite", "rotating", "3d reference", "3d ref",
+            "blockout", "blender reference", "turnaround", "turntable",
+        ],
+        body: "Rotation is the pixel grid's worst enemy, so pick the cheapest approach that reads. 90 degrees nearly always works; 45 degrees sometimes survives; anything between is questionable and has to be a decision, not an accident. Best value: redraw the sprite in as many cardinal directions as you can afford and only rotate for the angles in between. Next: draw the rotation at SCREEN resolution - scale the sprite, not the whole canvas - and accept that its pixels become rotated squares, which reads as a different resolution. Last resort: rotate at native resolution, which only sells on a fast movement or a large sprite, never on something parked in the rotated state. When a shape has to turn through many angles, do not draw every pose from imagination: block a rough 3D model, screen-record it turning, export the frames, shrink and quantise them hard to the palette, then redraw on a layer above. The blockout only has to be right in PERSPECTIVE - it is about to be crushed in resolution and colour - so do not waste time making it pretty. Pick roughly 32 frames for a full turn and MIRROR one half onto the other so the two halves match exactly, then tune the timing by hand.",
+    },
+    // saint11 的《My Thoughts on Very Low Resolution》是对小尺寸作画的心态补充：
+    // small-sprite 讲「几像素怎么排」，这条讲「信息怎么取舍」——包括把观众
+    // 当共同作者、用方格的直角和 45 度尖角、以及让物体在画外继续存在。
+    KnowledgeEntry {
+        id: "low-res-puzzle",
+        title: "Very low resolution: focus, ambiguity and the square grid",
+        keywords: &[
+            "极低分辨率", "低分辨率", "太小了", "看不清", "放不下", "塞不下", "画不下",
+            "省略", "取舍", "留白", "看不清是什么", "信息太多",
+            "low resolution", "very low resolution", "low-res", "reads as noise",
+            "omit detail", "what to leave out", "implied", "off-screen",
+        ],
+        body: "At very low resolution you are not drawing an object, you are solving a puzzle where every pixel has to mean something. FOCUS: decide what to show and what to leave to the viewer, because there is no room to show everything - strip every piece of information that is not essential and keep the two or three features that carry the character. AMBIGUITY IS A FEATURE: half of the drawing is finished by the observer, so a deliberately ambiguous pixel is worth more than a literal one - but never place a RANDOM pixel, especially near the face, because it reads as an error instead of information. Use the grid rather than fighting it: pixels are squares, so corners want 90 degrees wherever the shape allows, and the same squareness makes a 45-degree point the sharpest possible sword or arrow tip. Keep the light simple - one direction, at most one backlight - but do not go fully unlit, because even an icon usually needs one step of light to read as volume. Keep the colour count low so every colour has a reason, and favour complementary or high-contrast combinations over one hue, which reads flat. Things can exist OFF-SCREEN: show an object once, then move the camera away and the viewer keeps it in mind - and the same trick lets you imply a whole action by showing only its result. When a subject genuinely will not fit, zoom in and draw only the part that reads instead of shrinking the whole thing into mush.",
     },
     KnowledgeEntry {
         id: "pixel-font",
@@ -2273,6 +2305,9 @@ mod tests {
             ("画一个双色黑白像素角色", "one-bit"),
             ("加一点故障风色差分离效果", "glitch-effect"),
             ("作画顺序应该先画背景还是先打光", "art-pipeline"),
+            ("角色要旋转好几帧，怎么画", "pixel-rotation"),
+            ("极低分辨率下面怎么取舍细节", "low-res-puzzle"),
+            ("别人发来的图已经被放大过了，想改成 2 倍", "upscale"),
         ] {
             let hits = retrieve(query, 4);
             assert!(
