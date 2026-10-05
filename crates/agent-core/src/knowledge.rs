@@ -94,6 +94,38 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         body: "A side-view shooter character is built as a STACK of shared parts, not as one animation per action. Draw the base dummy at 8x16 and settle walk and run first - they set the expression and the standard of fluidity everything else is cut from. Then cut LEGS and TORSO into separate layers so the legs keep cycling through walk, run and jump independently of the top half; the shooting pose is 3 frames reused as an UPPER-BODY overlay, stamped onto every frame of every animation that allows linear motion (walk, run, jump), and the shoulder anchoring and bounce must follow the leg layer underneath or the two halves tear apart. HOLDING the gun is the cheap version: delete the arms from a finished frame and redraw them around the weapon, since the shoulder position and the bounce are already correct, and hang a long barrel muzzle-down from the centre of mass when idle. JUMP stays minimal for input response: one tucked pose is the floor, and an 'up' pose for the ascent plus a 'down' pose for the descent is the sweet spot - the apex swap doubles as a timing cue. NO anticipation crouch: it adds input delay, so the jump fires instantly, and if the game wants commitment make the LAND delay DYNAMIC - hold the recovery only when the fall exceeded a set distance, otherwise flash one bent-knee frame for a split second without stopping movement. LAND recycles the tuck/crouch pose plus one frame with the head and arms dipped to sell the weight, and that dip is optional if you want no loss of momentum. Re-sketch the dummy for the female build rather than recolouring it: the difference is EXPRESSION and weight, not anatomy, so she carries the weapon from her core with a lighter, more playful swing. Long hair animates on run and jump but not on run-and-shoot, where the run bounce should own the silhouette - and loose clothing and bulky fashion need their own sub-motion too, since none of them conform to the dummy.",
     },
     KnowledgeEntry {
+        id: "slide-roll",
+        title: "Rolls, slides and dash recoveries",
+        keywords: &[
+            "翻滚", "滚翻", "前滚翻", "闪避翻滚", "滑铲", "滑行", "冲刺", "突进",
+            "翻滚动画", "滑铲动作", "起身动作",
+            "roll", "rolling", "dodge roll", "combat roll", "slide", "sliding",
+            "dash", "lunge", "recovery",
+        ],
+        body: "A roll is four readable beats, not a character spinning in place. Beat one puts the hands on the ground and commits the weight forward; beats two through five carry the tucked body through the turn, with one tiny per-frame shift in limb shape, heel position or silhouette so the rotation has noise instead of reading as a stamped loop; beat six overshoots the recovery - the body rises slightly too far or the feet plant wider than idle - and beat seven settles into the standing pose. An optional personality pose before contact can sell the character, but a player-controlled roll should not spend frames on anticipation. A slide is cheaper: one preparation frame, a short looping low pose, then two recovery frames rising back to the stance; keep the spine and lead leg on one long diagonal so the silhouette stays unmistakable. A lunge or dash is two or three looping frames with a clear wind-up, a stretched travel pose and a squashed contact. Dust trails, ground scuff marks and a short motion blur sell the speed, but keep the head or weapon crisp so the eye can still track the action.",
+    },
+    KnowledgeEntry {
+        id: "wall-slide-kick",
+        title: "Wall impacts, wall slides and wall kicks",
+        keywords: &[
+            "蹬墙", "蹬墙跳", "贴墙下滑", "墙滑", "撞墙", "壁面反弹", "墙面冲击",
+            "墙跳", "攀墙动作",
+            "wall slide", "wall kick", "wall jump", "wall impact", "wall bounce",
+            "wall run",
+        ],
+        body: "Treat the wall as a second animation surface, and make every contact readable through squash and stretch. On impact, squash the body against the wall in the direction of travel and stretch it vertically as it presses into the surface, so the collision reads instead of looking like a pose swap. During a slide, keep the motion very small: let the shoulder, knee, scarf, hair or tail carry the wind direction, and move only a pixel at a time down the wall. A wall kick bends the body forward as far as the anatomy allows, plants the foot at the contact point, and throws a small dust burst away from the wall; do not add anticipation for a player-triggered kick, because the input has to feel immediate. The release frame should stretch along the launch direction, then the regular fall pose takes over. If the wall is grabbable, give it a consistent contact band or a few scuff pixels on entry and exit so the player can predict the surface.",
+    },
+    KnowledgeEntry {
+        id: "wings-flying",
+        title: "Wings, flapping and hovering",
+        keywords: &[
+            "翅膀", "振翅", "扇翅", "飞行姿势", "悬停", "滑翔", "扇动", "羽翼",
+            "wing", "wings", "flap", "flapping", "flap cycle", "hovering",
+            "flying pose", "airborne",
+        ],
+        body: "Wing movement usually alternates against the body: as the body rises, the wings complete a downstroke; as the body falls, they recover upward. Make the upstroke much faster than the downstroke - a useful default is three pixels of rise on the fast beat, one slower pixel of continued rise, then the wings sweep down and almost touch below the body. Falling bodies move about one pixel per frame while the wings fight gravity and open upward. On the landing or recovery beat, drop one pixel, stabilise, and let the wings settle back to their open pose instead of snapping. Sub-pixel edits are especially useful for a hover, because the body can hold position while the feather edges and shadow move. Vertical motion is what sells flight; if the body only flaps without rising or falling, it reads as a static prop. Fast wings need fewer frames, and two or three offset wing layers can fake motion blur. Think of the wings as arms: shoulder, elbow and wrist still have to read through the feather mass.",
+    },
+    KnowledgeEntry {
         id: "shmup",
         title: "Shoot 'em up sprite and screen design",
         keywords: &[
@@ -146,6 +178,17 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "debris", "rubble", "destructible",
         ],
         body: "Breaking an object is one shared timeline for a whole group of particles, not a separate animation hand-built for every shard: do not place each piece by hand, behave like a physics engine and simulate them together. Block out the FIRST and the LAST frame first, because those two define the entire action, then fill the middle with a fast main beat and hang slower secondary motion off it so the sequence keeps the eye interested. The sequence runs through three beats. IMPACT: most of the object is still intact, only a crack or a chip has appeared. EXPLOSION: a regular explosion, with smoke, flash and the object's own material thrown outward. SIMULATE PIECES: the parts tumble, rotate and settle, and at least one recognisable piece keeps a fragment of the original shape so the eye can track what the object became. The material decides the character of the break, so mind the difference: glass shatters into long thin slivers, stone and pottery break into chunky blocks, wood splinters into wedges along the grain, and cloth or flesh tears instead of shattering. Let the layers overlap rather than staging them one after another - flash first, then smoke and dust, then the material-specific particles such as shards, splinters or leaves, each on its own slightly different timing. Vary the particle shapes, fade the outer pieces out as they travel, and end on a rest frame instead of freezing the debris in mid-air.",
+    },
+    KnowledgeEntry {
+        id: "death-and-hurt",
+        title: "Death, hurt and recovery animations",
+        keywords: &[
+            "死亡", "死亡动画", "阵亡", "倒地", "受伤", "受击", "挨打", "击飞",
+            "复活", "爬起", "重击反应", "小怪死亡",
+            "death", "death animation", "dying", "hurt", "hurt animation", "knockback",
+            "knocked down", "get up", "revive", "death reaction",
+        ],
+        body: "Start a death with its strongest pose, not with a neutral idle: the first frame should throw the body all the way into the direction of the hit, with the head and arms lagging behind the torso. Then stop the recovery midway, bend the knees, let the shoulder and head trail, and bring the body back to the ground in a slow, heavy settle. Let the arms almost reach the ground, overshoot the ground contact by a pixel, then bounce once and rest. Blood, dust or a status effect fades after the body has stopped moving, never before. Small enemies can squish instead of articulating every limb, because conserving mass reads as a cartoon impact, but keep the squash plausible for the creature's material. A black contrast frame for one beat can push a hit from soft to violent, and the final beat may be a small explosion if the enemy disappears. A hurt animation is a shorter version of the same law: react on one frame, hold the compressed or knocked-back pose long enough to read, then recover through the normal idle. A revival or get-up is the reverse order - ground contact, one lagging limb, then the torso catches up.",
     },
     KnowledgeEntry {
         id: "frame-timing",
@@ -735,6 +778,17 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         body: "Every material takes light differently and that difference is the whole read: metal takes a hard 1px specular band, an angular tail and a very dark core shadow; wood keeps its grain direction constant and takes a soft core shadow; cloth folds into wide mid tones with no specular at all and dithers its deepest creases; stone is matte with occlusion darkening every pit and one bright top edge per facet; leather takes a broad mid highlight and a worn edge; skin and fur are diffuse and glow warm at thin parts; glass is transmission plus a dark line at the liquid surface and a bright rim on the far side; foliage glows where thin leaves are backlit. Give each material ONE ramp, never let two material ramps cross halfway, and shade a form built from two materials as two separate passes.",
     },
     KnowledgeEntry {
+        id: "tech-machines",
+        title: "Technology, machines and industrial detail",
+        keywords: &[
+            "机械", "机器", "机甲", "设备", "工厂", "管道", "电缆", "电线", "天线",
+            "面板", "芯片", "机器人", "工业风", "科幻设备",
+            "machine", "machinery", "industrial", "robot", "mech", "wires", "cables",
+            "control panel", "antenna", "chipset", "technology",
+        ],
+        body: "Machines love repeated patterns, so build a module first and repeat it: a panel, a vent, a pipe joint or a screw row establishes the scale, then the same unit is copied across the body with small breaks in the rhythm. Add lots of divisions because they read as maintenance access, and place screws at the corners of removable plates rather than scattering them. Moving parts are the fun part - pistons, gears, vents, antennas and cables can carry secondary action. Antennas read best as connected vertical lines with a small tip, and yellow-black diagonal stripes should be reserved for dangerous edges. Use action and reaction: a cable jiggles after the machine moves, dust falls from a vent, a door opening pushes air into a loose cloth. Screens and warning lights give the eye something to read without adding mass. Steam, water and dripping oil keep the surfaces from looking sterile. Chips and circuit texture should stay on right angles because the manufactured grid is the point. Messy cables are the exception: draw them as segmented organic curves, not as straight wires. Finish with one anticipation, one overshoot and a clear rest pose so even a static machine feels powered.",
+    },
+    KnowledgeEntry {
         id: "form-shading",
         title: "Shading a form from its geometry",
         keywords: &[
@@ -768,6 +822,17 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         body: "Break the ground plane into two or three bands of the same ramp, then vary only the top edge - a straight boundary line reads as a cut-out. Add a darker contact band where anything sits on the ground, and keep pebble and clump shapes in one size family.",
     },
     KnowledgeEntry {
+        id: "ruins",
+        title: "Ruins, damage and environmental storytelling",
+        keywords: &[
+            "废墟", "遗迹", "残骸", "破损建筑", "塌陷", "断墙", "藤蔓", "苔藓",
+            "裂纹", "抓痕", "咬痕", "蜘蛛网", "荒废", "废弃",
+            "ruins", "ruined", "ruin", "abandoned", "collapse", "crack", "claw mark",
+            "bite mark", "cobweb", "vine", "overgrown",
+        ],
+        body: "A ruin tells a story through evidence, not through random damage. Give claw or bite marks a repeated pattern and make the stroke thicker in the middle, as if the tool or animal pressed hardest there. Cracks should follow a tree-like branch and must not be exaggerated: one clear trunk crack plus a few short branches reads older and heavier than a spiderweb of lines. Recent damage gets an active signal such as fire, smoke, fresh dust or exposed bright material; old damage gets vegetation, low contrast, rounded edges and a duller palette. Break symmetry so the structure looks acted upon rather than designed, and show the inside of any missing part instead of leaving a flat hole. Cobwebs belong in corners and should not be brighter than the wall behind them. Repeat the same object at different destruction levels - intact, cracked, collapsed - to imply time. Hanging wires, vines, broken beams and plants are the cheap signals that a space has been abandoned for a long while.",
+    },
+    KnowledgeEntry {
         id: "water",
         title: "Water, foam and reflections",
         keywords: &["水面", "湖水", "海面", "海浪", "波浪", "泡沫", "倒影", "water", "waves", "sea", "lake", "foam", "reflection", "ripple"],
@@ -784,6 +849,16 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         title: "Sky, clouds and space",
         keywords: &["天空", "星空", "晚霞", "云朵", "云层", "sky", "clouds", "cloud", "stars", "space", "sunset"],
         body: "A sky is a vertical ramp with no hard edges; put the light source's warmth into the horizon band and the cool end at the top. Clouds take cumulus lobes with a flat shaded base and a lit top; at night keep only two star brightnesses so the field stays even.",
+    },
+    KnowledgeEntry {
+        id: "ice-snow",
+        title: "Ice, snow and frozen surfaces",
+        keywords: &[
+            "冰", "冰块", "冰面", "冰晶", "雪", "雪地", "积雪", "冻土", "结冰",
+            "冰窟", "冰川", "冰雪",
+            "ice", "icy", "snow", "snowy", "frozen", "frost", "glacier", "icicle",
+        ],
+        body: "Build ice from its planes and reflections, not from a blue fill. A reliable ramp is snow-light, snow-shadow, ice-glow, ice-base, ice-shadow and ice-deep-shadow. Block the shape, place the shadow reflection, find the one area that catches the light, then add cracks and brighter broken planes. Snow collects on horizontal or upward-facing surfaces, so let it sit on the top edge and in the gaps rather than coating the whole object evenly. Draw snow as a slightly random zig-zag with a few rogue flakes that even point upward; a straight white line reads as paper. Ice reflections can cycle through several faceted planes, but keep the facets large enough that the eye reads a surface rather than noise. Dripping water may form spikes on the object and matching spikes on the ground, and the light and shadow can drip onto each other. A warm accent inside a cold mass makes the ice feel cold rather than merely blue.",
     },
     KnowledgeEntry {
         id: "human-anatomy",
@@ -820,6 +895,15 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         body: "On most sprites the eye white is a 2x3 to 4x6 block and the pupil a 2x2 core. The wet eye takes one sharp highlight dot because the material is reflective, and it sits on the side the light comes from - with no light named, put it on the upper side. Do not outline the eye against the face - a dark pupil on light fur reads better than a black socket.",
     },
     KnowledgeEntry {
+        id: "portrait",
+        title: "Pixel portraits and face construction",
+        keywords: &[
+            "头像", "肖像", "面部", "脸", "立绘头像", "人物头像", "脸部特写",
+            "portrait", "face portrait", "headshot", "profile picture", "avatar",
+        ],
+        body: "Build a portrait in four passes. First draw a rough line sketch with coloured lines rather than pure black, because the colour keeps the drawing loose and makes it easier to see proportions at a small size. Second fill the large areas with base colours and avoid interior details until the masses hold together. Third block in the light and correct the proportions and line placement; this is where the likeness and the expression are won. Fourth add highlights, eye detail and selective anti-aliasing, and optionally one dark border to push the face away from the background. Learn the standard head proportions so you can distort them deliberately, but do not treat them as a stamp: every face is different, and a portrait reads as alive only when the proportions are used to describe that particular person. Keep the eyes, nose and mouth as the only high-contrast features, and let the hair and clothing simplify around them.",
+    },
+    KnowledgeEntry {
         id: "motion",
         title: "Anticipation, follow-through and smear frames",
         keywords: &["预备", "跟随", "残影", "挤压", "拉伸", "动势", "anticipation", "follow-through", "smear frame", "squash", "stretch", "motion"],
@@ -830,6 +914,28 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         title: "Glow, neon and light effects",
         keywords: &["发光", "光晕", "霓虹", "激光", "辉光", "glow", "neon", "laser", "bloom", "light beam"],
         body: "Glow is built from the OUTSIDE in: tint the background two steps toward the light colour, then place the hot core last - never paint the core first and bleed it. Keep the halo colour-shifted toward the source hue, and let the darkest part of the scene sit right next to the light so contrast stays.",
+    },
+    KnowledgeEntry {
+        id: "hazards",
+        title: "Hazards, traps and danger telegraphs",
+        keywords: &[
+            "陷阱", "机关", "危险", "地刺", "尖刺", "警报", "警告", "危险区",
+            "触发陷阱", "陷阱关卡", "死亡陷阱",
+            "trap", "hazard", "spikes", "danger zone", "warning", "telegraph",
+            "alarm", "danger",
+        ],
+        body: "A hazard has to be readable before it hurts the player, even when it is partly hidden. Give it a tell - a light, a sound cue, a shadow moving across the floor, a small pre-action movement - and keep the rhythm predictable enough that the player can learn the timing. Danger zones read best in red or a bright acid green, while the inactive state stays darker and quieter. Avoid rotating pixel art to fake a spinning saw or blade; use a motion blur, a smear or two alternating silhouettes instead. Sharp shapes and spasmodic movement communicate danger, while soft, rounded forms communicate safe ground. Even a static object can carry a tiny idle animation, which makes it easier to detect without announcing the whole trap. If the object affects the scene, let it cast its own light or tint nearby surfaces. The impact frame is where the player learns how dangerous it is, so make it loud: flash, debris or sparks, then return to the telegraph. Think of the sound the object will make while drawing it, because the animation and the cue have to land together.",
+    },
+    KnowledgeEntry {
+        id: "holograms-ghosts",
+        title: "Holograms, ghosts and projected bodies",
+        keywords: &[
+            "全息", "全息投影", "幽灵", "鬼魂", "灵魂", "投影人", "投影体",
+            "半透明角色", "线框投影", "鬼火",
+            "hologram", "holographic", "ghost", "spirit", "apparition", "projection",
+            "wireframe", "translucent",
+        ],
+        body: "Holograms and ghosts usually live in cold colours; warm colours work only if they are desaturated or used as a single core accent. Keep the figure monochrome on one main hue so the transparency reads as a material rather than a palette failure. For fragmentation, choose one particle shape - a rectangle, a dash or a small polygon - and simulate the particles in a loop one by one; they get darker, smaller and more transparent as they leave, start fast and slow down as they fade. If true semi-transparency is unavailable, focus the detail on the outline and on the readable features inside it: eyes, mouth and nose. A wireframe body is made of lines that form polygons simulating the faces of a 3D mesh, so keep the polygon rhythm consistent instead of drawing random connections. Float the whole projection on a slow sine wave in Y so it never sits perfectly still. A ghost can flicker or lose a limb for one frame without losing its identity, but the silhouette has to return.",
     },
     KnowledgeEntry {
         id: "vfx",
@@ -1448,6 +1554,16 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "coin", "coins", "gem", "gems", "jewel", "diamond", "treasure", "gold",
         ],
         body: "A gem is a flat-topped shape with facets: a bright top facet, a mid tone on one side, and the darkest step on the opposite facet, all sharing one light. A coin is an ellipse with a raised rim and a symbol in the middle, and its value reads from the rim being one step brighter than the face. Give treasure one hot specular and let the darkest dark of the scene sit directly beside it so the sparkle has contrast to work against.",
+    },
+    KnowledgeEntry {
+        id: "gems",
+        title: "Faceted gems, cut stones and sparkle animation",
+        keywords: &[
+            "宝石", "钻石", "水晶", "切面", "多面体", "珠宝", "宝石闪光", "切割宝石",
+            "facet", "gemstone", "cut gem", "brilliant cut", "cushion cut", "cabochon",
+            "sparkle", "jewel",
+        ],
+        body: "Build a gem in three passes: rough block, pre-shape, then the cut. The rough pass establishes the mass and the direction of the light; the pre-shape settles the silhouette and the large planes; the cut pass marks the facets. Take the sketch as a way to study facet placement, then remove the construction lines before shading. Learn the common cuts - brilliant, cushion and cabochon - and keep their proportion rules, but choose one cut per object instead of mixing them. Use refraction carefully: a few bright planes that shift colour are enough, because random noise turns a jewel back into gravel. For the anatomy, a faceted gem has a table, crown, main facets, girdle, girdle facets and pavilion; the table is not always a rectangle, so break it into planes instead of drawing a flat top. A reliable colour ramp runs point highlight, highlight reflection, highlight, midtone, shadow, shadow refraction and deep shadow. Animate the shine by making one facet or one whole plane light up at a time; the middle frames can cover a much larger area than the resting highlight. A smooth or cabochon surface takes a round highlight that moves with the same easing as the object, while a hard faceted stone takes angular flashes. Never let two facets carry the same brightest value in the same frame, or the eye loses the form.",
     },
     KnowledgeEntry {
         id: "small-object",
@@ -2358,6 +2474,80 @@ mod tests {
         ] {
             assert_eq!(retrieve(query, 4)[0].id, preferred, "{query}");
         }
+    }
+
+    /// saint11 第二批逐帧读过的单页动图与题材页：死亡、翻滚滑铲、蹬墙、
+    /// 飞行、肖像、废墟、机械、宝石、陷阱、全息幽灵和冰雪。它们覆盖的是
+    /// 过去知识库最薄弱的两头——高冲击动作的过程，以及场景/道具的环境叙事。
+    /// 这些原话如果捞不到，教程就只是躺在源码里，模型还是按平均印象硬画。
+    #[test]
+    fn the_saint11_second_one_pager_batch_surfaces() {
+        for (query, id) in [
+            ("角色死亡动画第一帧怎么画", "death-and-hurt"),
+            ("翻滚闪避动作怎么拆成几帧", "slide-roll"),
+            ("贴墙下滑然后蹬墙跳怎么画", "wall-slide-kick"),
+            ("翅膀振翅悬停的循环怎么做", "wings-flying"),
+            ("画一个像素肖像头像", "portrait"),
+            ("废弃废墟的断墙和藤蔓怎么画", "ruins"),
+            ("画机械设备的管道和电缆", "tech-machines"),
+            ("宝石切面闪光动画怎么做", "gems"),
+            ("陷阱地刺怎么给玩家预警", "hazards"),
+            ("全息投影幽灵的半透明身体怎么画", "holograms-ghosts"),
+            ("雪地冰块和积雪表面怎么画", "ice-snow"),
+            (
+                "a death animation with the first frame as the strongest pose",
+                "death-and-hurt",
+            ),
+            ("a dodge roll recovery animation", "slide-roll"),
+            ("a wall slide into a wall kick", "wall-slide-kick"),
+            ("wing flap cycle for hovering", "wings-flying"),
+            ("draw a pixel portrait headshot", "portrait"),
+            ("ruins with cracked walls and vines", "ruins"),
+            (
+                "industrial machines with wires and screens",
+                "tech-machines",
+            ),
+            ("faceted gem sparkle animation", "gems"),
+            ("danger zone telegraph for a trap", "hazards"),
+            (
+                "holographic ghost with translucent body",
+                "holograms-ghosts",
+            ),
+            ("snow and ice surface details", "ice-snow"),
+        ] {
+            let hits = retrieve(query, 4);
+            assert!(
+                hits.iter().any(|e| e.id == id),
+                "'{query}' 没捞出 {id}：{:?}",
+                hits.iter().map(|e| e.id).collect::<Vec<_>>()
+            );
+        }
+
+        // 新条目不能抢老主场：纯奔跑、纯猫、纯高光和纯细化照旧各归各家。
+        let run_hits: Vec<&str> = retrieve("画5帧橘猫奔跑", 4).iter().map(|e| e.id).collect();
+        assert!(
+            run_hits.contains(&"cat") && run_hits.contains(&"locomotion"),
+            "{run_hits:?}"
+        );
+        for (query, preferred) in [
+            ("画一只坐着的小猫", "cat"),
+            ("金属高光再亮一点", "specular"),
+            ("优化一下细节", "refine"),
+        ] {
+            assert_eq!(retrieve(query, 4)[0].id, preferred, "{query}");
+        }
+
+        // 多条长正文一起命中时，预算仍然要兜得住。
+        let text = prompt_section(
+            "死亡 翻滚 蹬墙 振翅 肖像 废墟 机械 宝石 陷阱 全息 冰雪",
+            11,
+            DEFAULT_BUDGET,
+        );
+        assert!(
+            text.chars().count() <= DEFAULT_BUDGET,
+            "{}",
+            text.chars().count()
+        );
     }
 
     /// 跑射那一轮正文较长，DEFAULT_BUDGET 最先挤掉的恰恰是排在后面的条目。
