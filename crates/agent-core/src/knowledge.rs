@@ -171,14 +171,18 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         keywords: &[
             "导出动画", "导出序列帧", "导出gif", "导出精灵图", "序列帧导出", "图片序列",
             "帧时长导出", "动画交付", "图集导出", "循环动画导出", "导出apng", "导出webp",
+            "gif", "帧时长", "最后一帧", "循环导出", "动画标签", "标签导出", "导出成",
             "导入engine", "导入引擎动画", "导入unity", "导入godot", "unity动画导入",
-            "godot动画导入", "每帧时长", "帧时长清单",
+            "godot动画导入", "每帧时长", "帧时长清单", "序列帧命名", "切片导出",
+            "导出切片", "图集元数据", "导出缩放", "导出前缩放", "导出前", "导出倍数",
+            "像素画放大", "导出到unity", "unity导出", "放大导出", "预放大", "预缩放",
             "export animation", "png sequence", "numbered frames", "frame sequence export",
             "export gif", "animated gif", "export sprite sheet", "atlas export",
             "animation manifest", "frame duration manifest", "loop animation export",
             "aseprite export", "unity animation import", "godot animation import",
+            "sequence naming", "slice export", "sprite sheet metadata", "export scale",
         ],
-        body: "Deliver animation in the format the consumer actually plays, and keep the editable master. Still image: PNG. Web or social preview that has to move on its own: GIF, or APNG/WebP when the platform takes them - GIF holds only one-bit alpha, so a soft anti-aliased edge becomes a hard matte or a black fringe and an animated GIF wants the cleanest hard edges. Engines: export a NUMBERED PNG sequence (name_0001.png, name_0002.png ...) or one sprite sheet, and when you ship a sheet also ship a small manifest that records the frame size, the frame count, the origin or pivot and every frame's duration in milliseconds. A sheet by itself carries no per-frame timing, so an animation that looked right in the editor plays flat and mechanical once the engine imports it at a uniform rate - the timing has to travel with the frames. Never encode the timing into the pixels and never bake the sheet's grid into the artwork. Export at 100%, or at an integer multiple with nearest-neighbour resampling; a fractional resize destroys the pixel grid. When the source has layers and frames, that layered file stays the master and every PNG, GIF or sheet is regenerated from it - the export is a build artifact, not the file to edit next time.",
+        body: "Deliver animation in the format the consumer actually plays, and keep the editable master. Still image: PNG. Web or social preview that has to move on its own: GIF, or APNG/WebP when the platform takes them - GIF holds only one-bit alpha, so a soft anti-aliased edge becomes a hard matte or a black fringe and an animated GIF wants the cleanest hard edges. Save and Export are two different commands: Save writes the layered source with its metadata, Export flattens a build, and choosing .gif in the export dialog must not change the default save format. Export options worth setting on purpose: which layers travel, which frames travel, the animation direction, whether a non-square pixel ratio is flattened to square, and - for a loop that will be re-encoded to MP4 - halving the last frame's duration so the repeat is seamless. Preview scaling is whole numbers only: 200% or 300% is plenty online, never 130% or 250%, and when an exact size is mandatory, scale by the nearest SMALLER whole multiple and extend the canvas out to the target instead of resampling into fractional pixels. Engines: export a NUMBERED PNG sequence or one sprite sheet, never a video or any lossy format, and do not pre-scale for the engine - ship the art at its native resolution and let the engine do the scaling. Name a sequence so it sorts: put the counter at the END, start it at ZERO and pad it to two digits (alert00.png, alert01.png ...), and when one source file holds several animations, put the tag in the name (boss_{tag}{tagframe00}.png) so each clip lands in its own run. A sheet that has to satisfy an engine carries what that engine needs - padding between cells, a JSON descriptor, the origin or pivot, trimming of transparent margins, and for 3D tiles a one-pixel extrusion of the border colours so seams do not show - and the manifest records the frame size, the frame count, the origin or pivot and every frame's duration in milliseconds. A sheet by itself carries no per-frame timing, so an animation that looked right in the editor plays flat and mechanical once the engine imports it at a uniform rate - the timing has to travel with the frames. When no engine dictates the layout, use best-fit packing and let the packer pick the optimal grid. Slices are the other half of the same trick: draw several props side by side on one canvas as named, non-overlapping rectangular slices, then batch-export them with Aseprite -b '.\\myFile.aseprite' --save-as '{slice}.png'. Never encode the timing into the pixels and never bake the sheet's grid into the artwork. Export at 100%, or at an integer multiple with nearest-neighbour resampling; a fractional resize destroys the pixel grid. When the source has layers and frames, that layered file stays the master and every PNG, GIF or sheet is regenerated from it - the export is a build artifact, not the file to edit next time. When in doubt: PNG, native size, no scaling.",
     },
     KnowledgeEntry {
         id: "sheet-layouts",
@@ -432,6 +436,23 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "doubles", "double pixel", "line weight", "step rhythm", "line quality", "jaggies",
         ],
         body: "Two pixels forming an L at a corner make a DOUBLE, and that corner reads thicker, darker and harder than the rest of the line - for a uniform 1px outline, delete the extra corner pixel. JAGGIES come from uneven step lengths: a clean straight line runs 2-2-2-2 while a lumpy one runs 1-3-2-1-4. Read the border as a STAIRCASE and count the pixels in each step: on a correct curve the run lengths rise smoothly toward the horizontal and fall smoothly toward the vertical, usually in a geometric progression (5-3-2-1-1-2-3-5). The run lengths are allowed to change fast - what is not allowed is the direction of the change reversing in the middle of the curve, which is exactly what a jaggy is: a step that suddenly shrinks and then grows again. Fix it by PUSHING PIXELS to restore the steady rise or fall, never by adding colour - a 1-3-2-1 sequence is a misstep, not a shading problem. Doubles are not automatically a defect - running the entire outline in doubles is a bold style of its own, and one deliberately broken line can model a brow ridge.",
+    },
+    // Pedro Medeiros 第 7 篇《Working with lines》整条吸收。line-quality 管的是
+    // 「一条线画得干不干净」，这里管的是「这条线该不该存在、该用什么颜色」——
+    // 两者一起命中才是一条完整的线稿规则，合成一条会把「线太多」和「线有锯齿」
+    // 两个不同的问题混成一句，模型改一半就会顾此失彼。
+    KnowledgeEntry {
+        id: "line-work",
+        title: "Lines are a tool: minimise them, colour them, clean the corners",
+        keywords: &[
+            "线条太多", "线条太密", "线太多", "线太重", "减少线条", "不用勾线", "要不要勾线",
+            "多余拐角", "像素拐角", "方角", "方格拐角", "方形拐角", "方线", "描边颜色",
+            "彩色描边", "彩色线条", "有色线条", "外描边", "双外描边", "线稿颜色",
+            "too many lines", "unnecessary lines", "minimise lines", "minimize lines",
+            "colored lines", "coloured lines", "colored outline", "coloured outline",
+            "square lines", "unintentional corners", "square corners", "line sketching",
+        ],
+        body: "Lines are an invented tool, not an observed edge: nothing in the real world has them, and their job is to emphasise form, contrast and direction rather than to trace every boundary. On a small canvas each line is expensive, so the first question is whether to draw it at all - minimise the count, and at very low resolution consider using none. An unnecessary line is usually better replaced by a shadow or a high-contrast area; merging a line into a dark shadow makes the drawing read as one form instead of a colouring book. When you draw freely, unintentional CORNERS appear - three or four pixels forming a small square. Search for that pattern and ask whether it is really meant to be a corner; if it is not, delete one pixel to round it. This is a different defect from a jaggy, and fixing corners CREATES jaggies, so the cleanup is iterative: draw, fix corners, fix jaggies, look again. SQUARE LINES are the deliberate inverse style: instead of removing corners, square every diagonal connection, which simulates a thicker line and suits highly stylised work - then clean the jaggies it produces. COLOURED LINES soften a line that draws too much attention: repaint it as a darker version of a NEIGHBOURING colour, and remember that this enlarges that neighbour's region, so the line may have to move a pixel to keep the shape. When you are unsure which neighbour to take, take the darker one. Keep the exterior outline black - doubling it is a legitimate option at some resolutions - and keep a very dark or black line where two forms meet abruptly, such as a chin against a neck or a collar against hair, while a soft transition gets a lighter line, as on a nose.",
     },
     KnowledgeEntry {
         id: "smooth-curves",
@@ -840,6 +861,20 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "paint first", "colour first", "no lineart",
         ],
         body: "Instead of lines then fill, sketch straight in colour and refine in shrinking steps: 1 BIG CLUSTERS - a messy gestural version of the whole picture, choosing only the colours and the mood, no detail at all; a 2- or 3-pixel brush is fine here, or outline the cluster and bucket-fill it. 2 REFINE - go smaller one step at a time, working back to front (sky, then mountains, then the building, then the near silhouette) so the foundation is settled before things sit on top of it. 3 FIX JAGGIES AND ADD DETAIL - walk the cluster borders looking for step-length missteps, push pixels to repair them, and add contrast, light and small details as you go. Keep layers few - sky, mid, near is usually enough; more layers than that makes the picture messy rather than controllable. This technique suits organic and painterly subjects best: nature, plants, water, mountains, backgrounds; it is the wrong tool for a 16px sprite where the silhouette has to be deliberate. Keep the working size in the 64-128 range - under 64 there is no room for the blobs, over 128 it turns into ordinary digital painting.",
+    },
+    // Pedro Medeiros 第 7 篇的后半段。cluster-sketching 是「色块起稿」的旁路，
+    // 这里补的是它的对称面：线稿起稿。角色和单帧动画走这条流程更快，
+    // 因为它先解决形状和轮廓，把光和颜色推到最后。
+    KnowledgeEntry {
+        id: "line-sketching",
+        title: "Line sketching: the six-step character pass",
+        keywords: &[
+            "线稿起稿", "线稿流程", "线稿上色", "描线流程", "角色线稿", "线画画法",
+            "线稿怎么画", "线稿步骤", "先勾线再上色", "勾线流程",
+            "line sketching", "line sketch", "line-art workflow", "line art workflow",
+            "sketch cleanup", "colour the lines", "color the lines", "line art pass",
+        ],
+        body: "Line sketching is the character-and-animation alternative to cluster sketching: it is fast because it chases shape and silhouette first, and leaves light and colour for later. 1 SKETCH - forget the pixel rules for a moment and sketch as fluidly as you would on paper, then clean only the obvious guide lines. 2 CLEANUP - knock the sketch layer back to semi-transparent and draw the line art on a layer above it, putting the important lines first: the silhouette and the face. Leave colour and light alone here; it is fine to block the main shadows but the job is to get the big shapes right. 3 BASE COLOURS - fill the regions with the paint bucket, avoiding colours that are too saturated or too bright, and already keep the intended light in mind. 4 SHADING - add the brighter and darker passes for that imagined light, with references at hand, and start softening the black outline locally with darker colours almost like anti-aliasing - but stop well before it turns blurry. 5 COLOUR THE LINES - revisit each line and repaint it as a darker version of the nearest and darkest neighbouring colour; lines that separate very distinct forms can stay black, and soft transitions get the lightest treatment. 6 POLISH - put in only the anti-aliasing the steps actually earned, keep hard shadow transitions hard where they should be, and add the backlight, small speculars, reflections and last details without letting noise in. Because the focus is form, this is the right default for a character or a single animation frame; use cluster sketching for painterly scenes.",
     },
     KnowledgeEntry {
         id: "realism",
@@ -1844,6 +1879,15 @@ mod tests {
             ("色块起稿怎么画，不打线稿行不行", "cluster-sketching"),
             ("受限调色板要做色相替换，高光该借哪个色", "ramps"),
             ("小画布上的孤立像素该不该删掉", "pixel-clusters"),
+            // saint11 第 7 篇《Working with lines》：线条该不该画、拐角怎么清、
+            // 描边怎么改成邻色的深色版本。第 8 篇的导出细节由下面独立的
+            // export 用例覆盖，避免这条长清单继续膨胀。
+            ("线条太多能不能用阴影代替", "line-work"),
+            ("线稿上的多余拐角怎么修，和锯齿是一回事吗", "line-work"),
+            ("像素拐角把线条弄得很粗，方线风格怎么处理", "line-work"),
+            ("描边颜色改成旁边颜色的深色版本", "line-work"),
+            ("角色线稿起稿的六步流程", "line-sketching"),
+            ("先勾线再上色的步骤是什么", "line-sketching"),
             // 半成品不能按百分比缩放，只能整倍放大。
             ("把像素图放大 107% 可不可以", "upscale"),
             // 横版跑射角色的上下半身分层与移动射击。
@@ -1897,6 +1941,28 @@ mod tests {
             assert!(
                 hits.iter().any(|e| e.id == id),
                 "'{query}' 没捞出 {id}：{:?}",
+                hits.iter().map(|e| e.id).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// saint11 第 8 篇《Saving and Exporting》。用户问的是「引擎怎么收」
+    /// 「文件名从哪一帧起」「图集要带什么」，这些都得真捞得出来——
+    /// 交付环节错了，前面画得再对也是白画。
+    #[test]
+    fn the_export_pipeline_entries_surface() {
+        for query in [
+            "给 unity 导出时要不要先把像素画放大",
+            "导出序列帧的文件名从哪一帧开始，要不要补零",
+            "图集导出要带哪些元数据，切片怎么批处理",
+            "导出 gif 做循环，最后一帧时长要不要改",
+            "导出前能不能按 250% 缩放",
+            "多个动画标签怎么导出成各自的名字",
+        ] {
+            let hits = retrieve(query, 4);
+            assert!(
+                hits.iter().any(|e| e.id == "animation-export"),
+                "'{query}' 没捞出 animation-export：{:?}",
                 hits.iter().map(|e| e.id).collect::<Vec<_>>()
             );
         }
