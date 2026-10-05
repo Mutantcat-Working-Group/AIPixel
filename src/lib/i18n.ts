@@ -942,6 +942,7 @@ export const zh = {
   "knowledge.tree": "树木、树干与木纹",
   "knowledge.rock": "岩石、石块与晶体",
   "knowledge.building": "建筑、房屋与屋宇",
+  "knowledge.city-building": "俯视城镇与街区建筑",
   "knowledge.food": "食物、水果与食材",
   "knowledge.vehicle": "载具、船只与坐骑",
 
@@ -1910,6 +1911,7 @@ export const en: Record<TKey, string> = {
   "knowledge.tree": "Trees, trunks and wood",
   "knowledge.rock": "Rocks, stones and crystals",
   "knowledge.building": "Buildings, houses and architecture",
+  "knowledge.city-building": "Top-down city building and town blocks",
   "knowledge.food": "Food, fruit and consumables",
   "knowledge.vehicle": "Vehicles, ships and mounts",
 
