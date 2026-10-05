@@ -92,6 +92,17 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         body: "A side-view shooter character is built as a STACK of shared parts, not as one animation per action. Draw the base dummy at 8x16 and settle walk and run first - they set the expression and the standard of fluidity everything else is cut from. Then cut LEGS and TORSO into separate layers so the legs keep cycling through walk, run and jump independently of the top half; the shooting pose is 3 frames reused as an UPPER-BODY overlay, stamped onto every frame of every animation that allows linear motion (walk, run, jump), and the shoulder anchoring and bounce must follow the leg layer underneath or the two halves tear apart. HOLDING the gun is the cheap version: delete the arms from a finished frame and redraw them around the weapon, since the shoulder position and the bounce are already correct. JUMP stays minimal for input response: one tucked pose is the floor, and an 'up' pose for the ascent plus a 'down' pose for the descent is the sweet spot - the apex swap doubles as a timing cue. NO anticipation crouch: it adds input delay, so the jump fires instantly. LAND recycles the crouch pose plus one extra frame with the head and arms dipped to sell the weight, and that dip is optional if you want no loss of momentum. Provide both male and female builds by re-sketching the dummy rather than recolouring it, and let long hair animate on run and jump - but not on run-and-shoot, where the rhythmic run bounce should own the silhouette.",
     },
     KnowledgeEntry {
+        id: "shmup",
+        title: "Shoot 'em up sprite and screen design",
+        keywords: &[
+            "射击游戏", "横版射击游戏", "纵版射击", "弹幕", "飞机", "战机", "飞船", "敌机",
+            "僚机", "子弹", "弹幕游戏",
+            "shmup", "shoot 'em up", "shoot em up", "bullet hell", "danmaku",
+            "spaceship", "aircraft", "plane sprite", "star fighter",
+        ],
+        body: "In a shoot 'em up, readability beats realism. The player hitbox is a tiny circle kept at the same relative pixel across every animation frame; the player's own bullets and the enemy bodies get generous bounds so aiming always feels fair; enemy bullets get small centre hitboxes. The small player box plus the buffer is the whole feel of a tight dodge, and the player hitbox must never stick out past the sprite's own pixels. The player craft is usually about 48x32 and animated with the SAME trick for every movement option: one neutral level-flight frame plus two banked frames each way, driven by input press time - a tap shows the shallow roll briefly, a hold shows the full bank and stays there, and the release rolls back through the shallow position. Illustrate ROLL for vertical movement and keep the nose level: pitching distorts the pixel clusters and breaks the always-straight-forward firing line, which level design assumes. NEVER put inertia on player movement in a shmup - tap should move a smidge and settle, hold should move flat and fast, because inertia adds a handicap the level design has to fight. Give ground units cheap motion (moving treads, wobbling wheels, a one-pixel bob) and only spend extra frames on an air unit that actually changes altitude on screen. Detachable options, pods or escorts around the ship are not just firepower - they add screen presence, which is how the player keeps track of position while reading bullet patterns.",
+    },
+    KnowledgeEntry {
         id: "frame-timing",
         title: "Frame timing and animation rhythm",
         keywords: &["帧率", "时长", "动画", "动效", "补间", "frame duration", "timing", "fps", "tween", "animation"],
@@ -152,7 +163,7 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "top down", "top-down", "topdown", "bird's eye", "birds eye", "overhead",
             "4-direction", "four direction", "8-direction", "eight direction", "overworld",
         ],
-        body: "Draw the character ONCE facing down and derive the other three directions from it - never sketch each direction from nothing, or the head size and shoulder width drift. UP never shows a face: it is the back of the head plus hair, and any weapon or pack rides on the back and must not swap shoulders. LEFT and RIGHT are mirrors, so draw one, flip it, then re-draw any asymmetric detail (a strap, a scar, a held item) instead of leaving it flipped. The head turns and the shoulders turn with it, and the body stays the same height in every direction or the sprite bobs as the player walks. There is no foreshortening from overhead: depth is the sprite's vertical POSITION on the canvas, not its scale, so a character standing further away is drawn higher up, not smaller.",
+        body: "Draw the character ONCE facing down and derive the other three directions from it - never sketch each direction from nothing, or the head size and shoulder width drift. UP never shows a face: it is the back of the head plus hair, and any weapon or pack rides on the back and must not swap shoulders. LEFT and RIGHT are mirrors, so draw one, flip it, then re-draw any asymmetric detail (a strap, a scar, a held item) instead of leaving it flipped. The head turns and the shoulders turn with it, and the body stays the same height in every direction or the sprite bobs as the player walks. There is no foreshortening from overhead: depth is the sprite's vertical POSITION on the canvas, not its scale, so a character standing further away is drawn higher up, not smaller. An EIGHT-direction set is 36 unique frames for one action, so build it from a DUMMY first - animate the bare anatomy until the motion is right, then paint the costume on top - and respect asymmetric details across every direction instead of mirroring them. Cut the armour and equipment into their own layers over the base body so a weapon or shield can be swapped without redrawing the character, and dial the arm swing down once a heavy item is added: the equipment has weight, and the run taking that weight is what sells it. A sword swing is six frames timed 100, 50, 50, 50, 100, 50 ms - a slow wind-up and a slow recovery around four fast swing frames - and the shoulders lead the blade. Judge the loop at full play speed, not frame by frame: sub-pixel flicker and clusters that merge into noise only show up in motion, and the fix is usually to drop a colour or simplify the cluster rather than to redraw the silhouette.",
     },
     KnowledgeEntry {
         id: "paperdoll-base",
@@ -179,6 +190,16 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         title: "Tilesets and tilemaps",
         keywords: &["瓦片", "地图", "地块", "瓷砖", "平铺", "程序化", "值噪声", "配比", "tilemap", "tile map", "tileset", "tile set", "tiles", "无缝平铺"],
         body: "Procedural beats hand-drawn: lay the base value with value noise, smooth it with cosine interpolation, then quantise hard into the ramp - anything freehand reads as decoration. Drive the noise at TWO scales, or one octave alone comes out either blotchy or flat: place the large nodes every 8-16 px so the big regions read as terrain, and run a second, finer pass every 3-6 px for the subtle variation inside them. Colour it by probability: about 70% of cells the base value, 15% one step lighter, 10% one step darker, and at most 5% sparse features (pebble, crack, tuft) with no single feature over 1% of the tile. Make every edge weld: fill two pixels in from each border with the wrap rule and hold edge contrast to within one ramp step so the seam disappears. Keep the tile strictly quantised - one stray value announces the grid. Never draw a black outline on a tile. Then verify: repeat the tile 2x2, 4x4 and 6x6 and read the result, and confirm the rotations and mirrors read as different tiles. Work on a cell grid of 8, 16 or 32, keep ONE light direction and ONE ramp per material across the whole set, and author it at exactly 1x.",
+    },
+    KnowledgeEntry {
+        id: "tiny-tiles",
+        title: "Tiny 8x8 tiles and minimal-palette readability",
+        keywords: &[
+            "8x8", "8x8瓦片", "8像素瓦片", "微型像素", "极小尺寸", "小瓦片", "微型科幻",
+            "nes配色", "红白机配色", "描边可读性", "8位瓦片",
+            "tiny pixels", "tiny tiles", "8px tile", "minimal palette", "nes palette",
+        ],
+        body: "An 8x8 tile framework - 'tiny pixels' - keeps production fast while still reading. Design characters as a bare 8px-tall figure and let the outline grow it one or two pixels larger, so the whole cast shares the grid; a hero gets a full 6-frame run, most other characters do fine with 4, and a dash or rocket boost is 4 frames at 50ms. Build the environment mainly by reusing the RULES, not the tiles: a building is a body tile plus roof pieces whose width, height and depth can be added or removed, and a handful of balanced textures lays out a whole city. When the palette is as tight as the NES set, turn OUTLINES ON - usually the opposite of the advice for larger art - because the outline is what separates the sprite from a busy background. Faces stop being faces: keep one forward-facing idle for every direction and just flip the run, since the character turns to camera when it stops, and accept that sprites sitting slightly large against small buildings is a convention that keeps level design compact. All the tiny assets are usually separate layers - a gun, a muzzle flare, a dust puff - so a weapon or an effect can be swapped without redrawing the body.",
     },
     KnowledgeEntry {
         id: "fake-patterns",
@@ -446,13 +467,35 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         id: "isometric",
         title: "Isometric and 2.5D grids",
         keywords: &["等轴", "等距", "立体地图", "斜视", "isometric", "iso", "axonometric", "dimetric"],
-        body: "Keep ONE grid angle for the whole sheet: true isometric is 2:1 pixels, dimetric sits near 30 degrees. Give the three visible faces three distinct steps of the same ramp so a cube reads without an outline. Never mix angles, and keep verticals exactly vertical.",
+        body: "Keep ONE grid angle for the whole sheet: true isometric is 2:1 pixels, dimetric sits near 30 degrees. Give the three visible faces three distinct steps of the same ramp so a cube reads without an outline. Never mix angles, and keep verticals exactly vertical. Build units from simple geometric solids - a cube for a torso, a sphere for a shoulder, a cylinder for a limb - then push and pull them into the silhouette, and at 32x32 be willing to OMIT parts that will not read: two pixels is a whole hand, so the skill is abstraction, not detail. Work from the body outward, give the torso a tank-like jut and shoulders that sit higher than the head for weight, and keep the optics to one or two bright pixels. In an isometric mech, the upper leg is barely visible and the groin piece is often dropped, but the FEET are prominent: make them ski-like or talon-like for a stable footprint rather than copying a humanoid foot. On the environment side, a cube tile's diamond top has 2px corners, so adjacent tiles must overlap the top row for a flush fit (or squash the diamond by 1px to trade the look for a 1px corner); water sits about half a cube lower to read as a pit, and a single texture minus its highlights can carry a seamless 16-frame loop.",
     },
     KnowledgeEntry {
         id: "perspective",
         title: "Depth, planes and parallax",
-        keywords: &["透视", "灭点", "纵深", "视差", "景深", "空气透视", "远景", "近景", "perspective", "vanishing", "depth", "parallax", "planes", "atmospheric"],
+        keywords: &["透视", "灭点", "纵深", "景深", "空气透视", "远景", "近景", "perspective", "vanishing", "depth", "planes", "atmospheric"],
         body: "Split the scene into far, mid and near planes, then push distance with value and saturation: lift shadows and desaturate far, saturate and darken near. Atmospheric perspective is the same lever per pixel - anything further away loses contrast, drifts toward the sky colour and loses detail, and the nearest plane keeps the darkest dark and the sharpest edge. Keep one horizon and one ground angle. Parallax layers should overlap at least a third of their height so the gap does not read as a seam.",
+    },
+    KnowledgeEntry {
+        id: "parallax",
+        title: "Layered parallax scrolling backgrounds",
+        keywords: &[
+            "视差", "视差滚动", "多层视差", "背景滚动", "滚动背景", "分层滚动", "滚动", "卷轴",
+            "横版背景", "滚动速度", "视差层", "每层速度",
+            "parallax", "parallax scrolling", "scrolling background", "layer scroll", "scroll speed",
+            "pixels per frame", "infinite scroll",
+        ],
+        body: "Build a scrolling background as four to six separate layers at increasing depth, each moving at its own constant speed in pixels per frame (ppf). Keep each layer's distance identical for every step of that layer no matter the playback rate - convert to a per-second rate only at the very end - or the layers slide out of sync. A working spread for a 470x240 native scene that scales 4x to 1920x1080: grass 4 ppf, near tree band 3, far tree band 2, mountains plus low clouds 1, high clouds 0.5, sky 0. Push depth with the same atmospheric lever used in a still: going back one layer, drop saturation, drop contrast and lift brightness (about S -20, C -15, B +15 in a typical editor), and leave the near layer untouched so contrast still reads. Loop each layer seamlessly and match feature LENGTH to how obvious the repeat is - a mountain range or landmark has to be wide because a repeated silhouette shows, while grass and trees survive high repetition. After one or two screen-lengths of the same tile, drop in a landmark or a variation to break the repeat, and let optional vertical camera movement reveal a little more of the layer.",
+    },
+    KnowledgeEntry {
+        id: "landscape-bg",
+        title: "Landscape backgrounds and atmospheric depth",
+        keywords: &[
+            "风景", "风景画", "场景背景", "背景绘制", "背景图", "自然风景", "远景背景", "地平线",
+            "山谷", "沙漠", "森林背景", "草原",
+            "landscape", "scenery", "background art", "background scene", "horizon",
+            "valley", "desert background", "forest background", "sky gradient",
+        ],
+        body: "Paint a landscape background as horizontal COLOUR BANDS first, then detail - the illusion of depth comes from the colour choice far more than from the shapes. Set the horizon, then split ground and sky into receding bands and run atmospheric perspective on them: the nearest plane is the most saturated and has the strongest light/shadow contrast, and every plane further back drops saturation, rises in lightness (in daylight) and shifts its hue toward the sky colour - so under a blue sky the near grass is the warmest and each receding plane goes bluer. Keep the budget tight: a whole 4:3 scene at 192x144 with sky, two mountain layers, ground, clouds and a few props fits in about 15 colours by REUSING them across layers, including reusing the far sky tone as the haze on the distant mountains. Match texture scale to distance: the near plane gets 1px-wide short vertical blade clusters, the next plane only one or two pixel tufts, and the far plane stops depicting individual blades at all. Cliff notes for the common variants - valley: warm near grass shifting blue; desert: thick haze pales the sky, near orange sand to light yellow to light blue at the horizon with violet distant shadows; forest: the vantage point sits under the canopy so the light/distance ramp is compressed and even the far trees keep a few branch pixels.",
     },
     KnowledgeEntry {
         id: "seamless",
@@ -1678,6 +1721,16 @@ mod tests {
             ("打中敌人的时候要有一帧闪光", "vfx"),
             ("俯视四方向的地图角色怎么保证不跑形", "topdown"),
             ("上下左右的行走图朝向要各画一遍吗", "topdown"),
+            // Slynyrd Pixelblog 58/61/62/63 吸进来的规则。
+            ("横版射击的背景要分层滚动，每层速度不一样", "parallax"),
+            ("卷轴背景每一层滚动速度怎么定", "parallax"),
+            ("画一个山谷风景背景，要有纵深", "landscape-bg"),
+            ("沙漠场景背景的颜色怎么分带", "landscape-bg"),
+            ("画一个弹幕射击游戏的飞机", "shmup"),
+            ("8x8 瓦片怎么做微型像素城市", "tiny-tiles"),
+            // 俯视八方向角色与等轴机甲的姿势/分层规则。
+            ("八方向角色跑步，剑和盾要保持左右手一致", "topdown"),
+            ("32x32 等轴机甲怎么起形", "isometric"),
         ] {
             let hits = retrieve(query, 4);
             assert!(

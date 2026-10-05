@@ -233,6 +233,11 @@ cargo test --workspace
 - [saint11《Pixel Art Articles》入门合集](https://saint11.art/pixel_articles/)：入门系列的选题清单（绝对新手入门、色簇起稿、基础动画、基础明暗、抗锯齿与 banding、基础色彩理论、线与导出）作为覆盖度检查表核对过，其中前两篇的正文与上面 Pedro Medeiros 那两篇同源，已逐条吸收。
 - [Pedro Medeiros《How to start making pixel art》#1 与 #2（Pixel Grimoire）](https://saint11.art/pixel_articles/)：16x16 配 4 色的起步练习、像素完美线与「铅笔恒为 1 像素」，受限调色板下靠借用相邻色相上光投影（冷色作暗、暖色作亮），孤立像素的三种正当用途，只按整数倍缩放，以及色簇起稿（大色块起稿 → 由远及近逐步细化 → 推像素修锯齿）这套流程，都是从这两篇整理进来的。
 - [Slynyrd / Raymond Schlitter《Pixelblog 60 - Side View Run 'N Gun》](https://www.slynyrd.com/blog/2026/1/26/side-view-run-n-gun)：8x16 白膜尺寸、contact/down/pass/up 四姿势的八帧行走、由行走派生的奔跑（前倾、加大步幅与弹跳、加快播放），上下半身分层加三帧射击覆盖层，跳跃与落地的经济做法，120ms / 60ms 的节奏锚点，以及 8x8 横版瓦片 3x3 加 4x4 的 12 块最小套，都从这篇吸收进对应条目。
+- [Slynyrd《Pixelblog 58 - Top Down Character Animation Part 3》](https://www.slynyrd.com/blog/2025/10/2/pixelblog-58-top-down-character-animation-part-3)：八方向动作的 36 帧规划、先动画白膜再上服装、装备独立成层、持重物时收小手臂摆幅这类俯视角色规则出自它。
+- [Slynyrd《Pixelblog 59 - Tiny Sci-Fi Pixels》](https://www.slynyrd.com/blog/2025/11/28/pixelblog-59-tiny-sci-fi-pixels)：8x8 瓦片与 NES 配色、受限调色板下反而要靠描边保可读性、建筑按规则复用而非逐块手绘，对应知识库里的微型瓦片条目。
+- [Slynyrd《Pixelblog 61 - Isometric Mecha Tactics》](https://www.slynyrd.com/blog/2026/4/1/pixelblog-61-isometric-mecha-tactics)：32x32 等轴机甲用几何体起形、主动省略读不出的部件、脚部做得夸张以求稳定落点、等轴瓦片顶行重叠保证无缝，都补进了等轴条目。
+- [Slynyrd《Pixelblog 62 - Landscape Backgrounds》](https://www.slynyrd.com/blog/2026/5/27/pixelblog-62-landscape-backgrounds)：先铺地平线色带再用空气透视、预算内跨层复用颜色、纹理尺度随距离收敛，以及山谷 / 沙漠 / 森林三种常见变体的配色走向，构成风景背景条目。
+- [Slynyrd《Pixelblog 63 - Horizontal Shmup》](https://www.slynyrd.com/blog/2026/7/26/pixelblog-63-horizontal-shmup)：玩家小判定框、机体滚动用平飞加两档倾斜、禁止玩家惯性、敌弹小判定与僚机增强画面存在感，整理成了弹幕射击条目。
 - [Lospec 像素画教程库](https://lospec.com/pixel-art-tutorials)：教程索引入口，调和与风格类条目的术语对照过它收录的篇目，教程按 walkthrough / animation / shading / tiles 等标签的分类方式也参照了它。
 - [Concept Art Empire《How To Make Pixel Art: 40+ Free Video Tutorials》](https://conceptartempire.com/pixel-art-tutorials/)：题材覆盖度按它 40 余个教程的目录核对过一遍，角色、瓦片、等轴、岩石、树木、水面、云、抖动与走路循环都在两边的条目里能对上。
 - [IPaperDoll](https://github.com/Mutantcat-Working-Group/IPaperDoll)：异猫工作群的纸娃娃行走图合成器，「先铺白膜、按部件分区、绕锚点换色」这套做法与角色网格规格的参照对象。
