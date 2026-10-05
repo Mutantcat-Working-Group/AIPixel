@@ -1716,6 +1716,177 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         ],
         body: "A pixel sheet also works as a grid of INDEX numbers instead of colours, and that buys three things: recolouring the whole image is one conditional-format rule per colour, the per-colour pixel count comes from a single COUNTIF (which is also the bead and embroidery bill), and a mirror is `=H1` dragged sideways. Four ways to fill the grid: by hand, with a number palette plus rules, by pasting an image, or by importing a pattern CSV. Keep one cell per pixel, one row of cells per canvas row, and always deliver a numbered grid with a legend - a legend-free number sheet is unreadable.",
     },
+    KnowledgeEntry {
+        id: "fire-flames",
+        title: "Flames, fire and burning animation",
+        keywords: &[
+            "火焰", "火苗", "火把", "篝火", "燃烧", "火舌", "火浪", "火焰动画", "余烬",
+            "fire", "flames", "flame", "fire animation", "campfire", "torch", "burning",
+            "embers",
+        ],
+        body: "Draw fire wave by wave, tracking one shape's movement per frame instead of the whole fire at once. Each wave starts brighter at the bottom and travels upward while narrowing to a point: the base keeps its volume but changes shape, and particles detach from it as embers that flicker and drift only a pixel or two. Start a new wave every two or three frames and let the closing frames carry the first wave's shape so the loop seals. Flame speed is highest in the middle of the flame, so avoid breaking the silhouette into many shapes too early - one wavy shape plus a few detached embers reads better than seven competing ones. Bright colour lives at the bottom and the top fades out. Do not be afraid to redraw the same shape slightly off each frame to fake turbulence, and do not be afraid to change hue between waves.",
+    },
+    KnowledgeEntry {
+        id: "electricity-vfx",
+        title: "Lightning, arcs and electric effects",
+        keywords: &[
+            "闪电", "电流", "雷电", "电弧", "电击", "高压电", "电火花",
+            "electricity", "electric", "lightning", "bolt", "electric arc", "tesla", "shock",
+        ],
+        body: "Electricity has to be fast, so animate it on alternating frames and insert blank frames rather than sustaining it - the eye fills the gap in and the strike flickers instead of glowing. An arc is a moving, dissipating channel: keep the particle count low and let the blank frame do the work. A bolt reads from sharp angles plus a first frame that is white or much brighter than the rest, then the bright shape fades back toward that first silhouette over a single held frame. Mix arcs, bolts and a puff of smoke to sell scale, and remember that sparks can resolve in as few as three frames. Never soften the corners, because a bolt built from curved segments stops reading as electricity.",
+    },
+    KnowledgeEntry {
+        id: "smoke-particles",
+        title: "Smoke and particle systems",
+        keywords: &[
+            "烟雾", "浓烟", "烟尘", "冒烟", "烟柱", "爆炸烟",
+            "smoke", "smoke puff", "smoke plume", "particle system", "particles",
+        ],
+        body: "Smoke is a particle system, but each individual particle is simple, so animate ONE particle to completion, then go back and add the next one until the plume is done - never try to move the whole cloud at once. Open with a high-contrast frame, because the darker first frame makes the following one read as brighter. A small blast resolves in two frames; a bigger plume needs the particles staggered so the later puffs are still travelling while the earliest fade. When animating any complex system, focus on one element at a time and finish it before starting the next.",
+    },
+    KnowledgeEntry {
+        id: "wind-vfx",
+        title: "Wind, whirlwinds and air currents",
+        keywords: &[
+            "风", "风效", "旋风", "龙卷风", "疾风", "风场", "气流",
+            "wind", "wind vfx", "whirlwind", "tornado", "gust", "air current",
+        ],
+        body: "Air is invisible, so wind has to be told through dust, leaves and other particles. Build the effect from zigzag shapes and a stack of spinning disks, all rotating in the SAME direction, with the rings emitted from the bottom and fading as they rise - use a ring shape as the guide for the loop so the rotation does not wobble. Animate fast and mix a steady moving pattern with a random one, because a lot of spinning motion with almost no travel is what sells turbulence. Two colours are enough to give the spiral depth. When the wind hits the floor it can shed dust waves, and a head-on gust can read as a shell.",
+    },
+    KnowledgeEntry {
+        id: "goo-slime",
+        title: "Slime, goo and jelly deformation",
+        keywords: &[
+            "粘液", "黏液", "史莱姆", "泥浆", "胶质", "软体", "软泥",
+            "slime", "goo", "ooze", "blob", "jelly", "gelatin", "fluid blob",
+        ],
+        body: "Slime starts asymmetrically: begin wide and short, then let the shape grow taller and thinner over the following frames as it hangs from its base. The thicker the fluid the longer it clings before falling - thin slime drips immediately, while thick slime stretches into a rubbery strand that may even bounce instead of breaking. Keep every shape smooth and avoid sharp corners, and leave open holes so the mass reads as hollow rather than solid. Slime resists breaking apart, so strand and stretch it well past the point where a liquid would have separated, and remember that bubbles are heavy, so they rise and pop slowly. Animate each trailing droplet individually, and read the form from highlight, base colour, reflection, shadow in that order.",
+    },
+    KnowledgeEntry {
+        id: "blood-gore",
+        title: "Blood, splatter and wounds",
+        keywords: &[
+            "血", "血迹", "血腥", "血液", "喷血", "割伤", "伤口", "血花", "流血",
+            "blood", "gore", "blood splatter", "blood spray", "cut", "wound", "blood drops",
+        ],
+        body: "A splash starts as a very pointy shape and then spreads while the particles stay connected to each other for as long as possible - orphan pixels only appear on the last frame of a particle's life, and only at very low resolution. A jet begins with sharp edges and then bends as air resistance takes over; let the droplets fall before they fade so gravity reads. Keep the drops round where you can and do not over-do the count, or the whole thing just looks messy. Use plenty of hue variation across the red so the splash does not flatten into one colour. A cut is drawn as a set of tubes plus a couple of water-balloon shapes plus small shiny specular spots to show that it is wet.",
+    },
+    KnowledgeEntry {
+        id: "metal-surfaces",
+        title: "Metal surfaces and reflections",
+        keywords: &[
+            "金属", "金属材质", "钢铁", "钢板", "装甲", "铜", "铁", "铝",
+            "metal", "metallic", "metal surface", "metal shading", "steel", "iron", "chrome",
+            "armour plate", "plating", "brass",
+        ],
+        body: "Metal is drawn in five passes: base light, base shadow, highlight and specular, then the reflection and interference that make it read as metal rather than stone. Keep the light ramp colder and less saturated and the shadow ramp warmer and more saturated; plastic is the opposite and is worth keeping beside it as a reference. Metal is very reflective, so expect a strong back light rather than a soft gradient. Scratches, dents and scuffs tell a story about the object, and a surface can be glossy or matte depending on use and upkeep. The material itself is stiff, so it never stretches, but its parts can move individually and every highlight and reflection has to be re-animated as the surface angle changes. For an easy believable reflection, draw multiple lines of light and shadow instead of one big gradient.",
+    },
+    KnowledgeEntry {
+        id: "wood-and-bark",
+        title: "Wood, grain and bark",
+        keywords: &[
+            "木头", "木纹", "树皮", "木桶", "木板", "树干材质", "木质", "木桩",
+            "木材", "木料", "橡木", "原木",
+            "wood", "wooden", "wood grain", "bark", "plank", "timber", "log",
+        ],
+        body: "Start wood from a medium-toned silhouette built out of a few very basic shapes, then add shadow while avoiding pillow shading. Keep the shadow hue-shifted, and let long grain lines follow the form instead of running parallel to the edge. Bark is built like overlapping scales: light the scales individually but read them as one shape, or the trunk turns to noise. Add knots, nails, cracks, moss and grass as separate elements on top of the finished form rather than as texture baked into the base. Keep the transitions slow and do not over-do the highlight, because wood is a low-contrast material; a tree stump's rings fade out with distance instead of staying equally strong all the way in.",
+    },
+    KnowledgeEntry {
+        id: "sword-design",
+        title: "Sword anatomy and design",
+        keywords: &[
+            "剑", "剑刃", "剑柄", "佩剑", "大剑", "剑的设计", "武器外形", "剑身",
+            "sword", "swords", "blade design", "hilt", "crossguard", "pommel", "greatsword",
+            "sword anatomy",
+        ],
+        body: "Build a sword from its named parts, because a reader recognises the silhouette through them: point, edge, fuller, cross-guard, grip and pommel. The fuller is a shallow groove running down the blade centre, and it is what stops a wide blade from reading as a flat plank; the point is where the taper finally closes. Sword types differ mostly in proportion and in the shape of the guard and pommel, so vary those two before adding decoration, and keep the taper consistent from guard to point. Decide the stance as well as the weapon: a resting stance points the blade down and away from the body, while an attack frame drives the point along the swing arc instead of posing it. Keep the edge highlight on the light side only, and never let the guard's decoration out-detail the blade.",
+    },
+    KnowledgeEntry {
+        id: "firearm-design",
+        title: "Firearm anatomy and design",
+        keywords: &[
+            "枪", "手枪", "步枪", "枪械", "射击武器", "枪的造型", "枪械结构", "枪管",
+            "gun", "firearm", "pistol", "rifle", "handgun", "weapon design", "muzzle",
+            "magazine",
+        ],
+        body: "Learn pistols first, because rifles and larger weapons are usually a pistol stretched and given extra furniture. A readable gun carries the same six landmarks: rear sight, fore sight, slide, trigger, grip and magazine - place them on the silhouette before any styling. To invent a weapon, either exaggerate (make the slide huge and the grip tiny, or multiply the fittings with lasers and scopes) or work functionally: start from a random shape and give it a muzzle where the bullet leaves, a magazine where ammunition is stored and a grip where the hand holds it. Then research and mix real mechanisms, because every firearm family has moved those landmarks around; cushioning on the grip and stock is a final detail. Never let the muzzle and the magazine read as the same mass.",
+    },
+    KnowledgeEntry {
+        id: "spaceship-design",
+        title: "Spaceships, starships and hull design",
+        keywords: &[
+            "飞船", "星舰", "太空船", "战舰设计", "飞行器设计", "宇宙飞船", "飞船设计",
+            "spaceship", "starship", "spacecraft", "ship design", "star fighter", "hull design",
+        ],
+        body: "The silhouette comes before everything. Design from an unexpected reference (a controller, a rotated building, a popsicle, a squid), block the shape until it reads in solid black, and only then render. Function dictates the parts inside each setting's own rules: aerodynamics and wings are meaningless in vacuum, so a space-only craft can be a smooth lozenge with thrusters while an atmospheric one needs surfaces. Keep one or two high-contrast accents so the eye has an anchor, and remember that ships read as a repeating module language, so greebles, vents, antennae, windows and engine bells must repeat at a consistent scale. Add the detail pass as a silhouette change rather than as texture on top: panels that stick out, a cockpit that bulges, an exhaust that extends. A thruster flame is a short loop with its own beats - bright small explosion, stretched tall thin flame, mass shifting back and being thrown off, then wider and shorter and darker, then smaller again.",
+    },
+    KnowledgeEntry {
+        id: "skulls-bones",
+        title: "Skulls, bones and skeletons",
+        keywords: &[
+            "骷髅", "头骨", "骨头", "骸骨", "白骨", "骨骸", "骷髅头",
+            "skull", "skulls", "bones", "skeleton", "bone pile", "cranium", "ribcage",
+        ],
+        body: "A low-resolution skull cannot hold every detail, so prioritise in this order and drop whatever does not fit: eyes, maxilla, zygomatic bone, teeth, nasal bone, mandible, temporal fossa. The simplest readable skull is a rounded cranium plus two eye sockets plus a nose notch; everything past that is refinement. Draw bones as ribbons, and use fewer pixels on the diagonal ones so they stop looking like sticks. Bone piles want noisy, irregular shapes rather than tidy stacks - overlap, scatter and vary the size. Skeletal undead should delay each joint's movement so the limb arrives a frame after the body. If the skull sits on a border, make it brighter and more detailed than the interior bones.",
+    },
+    KnowledgeEntry {
+        id: "topdown-locomotion",
+        title: "Top-down walk and run cycles",
+        keywords: &[
+            "俯视行走", "俯视跑步", "俯视角角色", "四方向行走", "俯视步态", "俯视角色移动",
+            "top down walk", "top down run", "top-down walk cycle", "top down sprite",
+            "4 direction walk", "overhead character",
+        ],
+        body: "Treat a top-down character as three stacked shapes - head, body and feet - and animate the feet last, because they hide behind the body from above. A minimal four-frame run is enough: the second half is the first half flipped horizontally, except for anything asymmetric such as hair or a held weapon. Vertical motion is sold with three stretched-leg jump frames plus two low recovery frames where the legs swap, and the side and back views reuse the same 3-plus-2 split. Exaggerate the arm swing, because it is the most readable cue from a high camera angle. Walking is the same structure with softer vertical motion on the torso and head, and the side-facing walk borrows the platformer cycle while putting strong contrast on the hands and feet.",
+    },
+    KnowledgeEntry {
+        id: "topdown-attack",
+        title: "Top-down attacks and slashes",
+        keywords: &[
+            "俯视攻击", "俯视挥砍", "俯视战斗", "俯视出招", "俯视攻击动画",
+            "top down attack", "top-down attack", "overhead attack", "top down combat",
+            "overhead slash",
+        ],
+        body: "Build a top-down attack as a stack of layers that lunge forward, and never forget the opposing arm and leg - if the weapon arm drives forward, the opposite leg has to follow or the pose looks pasted on. Keep one foot planted as the anchor and rotate the head only slightly. Skip the anticipation for player characters, because the wind-up is felt as input lag and a top-down camera makes it unreadable anyway. The slash's first frame should already carry the full motion with a blur, then the following frames stabilise while the blur is reduced. Recover along a different arc from the attack, and overshoot on the last frame before settling back to idle.",
+    },
+    KnowledgeEntry {
+        id: "city-background",
+        title: "City and urban backgrounds",
+        keywords: &[
+            "城市背景", "街区背景", "城市远景", "楼房背景", "城市夜景背景", "街区远景",
+            "city background", "urban background", "cityscape", "skyline", "rooftop background",
+        ],
+        body: "Build a city background from basic brick and box masses first, choose one light source, and mark the highlights before any windows or signs. Then chip erosion into the forms with a darker version of the base colour so the walls read as aged instead of freshly painted. Keep the layer budget explicit and low: about four colours for the sky, three for the base masses, three for the far background and a tiny count for foreground silhouettes. Reduce contrast on anything far away and let the sky sit at low saturation with few clouds. Watch for repeated windows and identical rooftop shapes and break them with asymmetry, then add vegetation over the junctions. A few small deep-dark accents buy depth without adding colour count.",
+    },
+    KnowledgeEntry {
+        id: "vegetation-shading",
+        title: "Vegetation, bushes and canopy shading",
+        keywords: &[
+            "植被", "树丛明暗", "灌木", "草丛", "树叶层次", "植物上色", "草丛明暗",
+            "vegetation", "bushes", "shrubbery", "leaf clusters", "canopy shading",
+            "plant shading",
+        ],
+        body: "Vegetation is drawn in three passes: shape, then light, then detail. Block the correct silhouette and the cluster level first, light the cluster as a single mass before touching individual leaves, and only add leaf texture last. Because light on foliage is warm, almost half of the ramp can legitimately live in light green - do not spend the whole ramp on shadow. Keep the light direction consistent between adjacent bushes or the grouping reads as separate plants, and increase contrast where two clusters intersect so the forms separate. Grow leaves in clusters rather than one pixel at a time.",
+    },
+    KnowledgeEntry {
+        id: "water-animation",
+        title: "Animated water, ripples and waterfalls",
+        keywords: &[
+            "水面动画", "水流动画", "瀑布", "水花", "水波循环", "水面循环",
+            "water animation", "animated water", "waterfall", "water surface loop",
+            "flowing water", "water ripple animation",
+        ],
+        body: "Animate water on two layers. The top layer is made of imagined circles that change size - keep the changes small and never move a pixel more than one step per frame. The bottom layer is the same pattern offset to one side at a constant speed, which fakes the flow underneath the surface. Scatter small bright shim patches to break the regularity and give the surface life. A waterfall is the same idea driven downward: several falling particle columns plus a foam mass at the base, with the foam animated like smoke. Animate each ripple as its own element and never split one ripple across two frames, or the surface starts to boil instead of flow.",
+    },
+    KnowledgeEntry {
+        id: "clouds",
+        title: "Cloud shapes and shading",
+        keywords: &[
+            "云", "云朵", "云层", "云的画法", "云彩", "积云",
+            "cloud", "clouds", "cloud shading", "cumulus", "cloud layer",
+        ],
+        body: "Think of a cloud as groups of spheres sharing one flat base, then light those spheres as a single mass instead of individually. Keep the base as flat colour, shift the shadows slightly for shape, and stay low-contrast - a high-contrast cloud reads as rock. When the sun sits behind the cloud the rim takes a bright outline and the shadow lives in the flat underside, and that backlight is usually more convincing than a top-down light. Avoid clusters that are only one or two pixels, and remember that different cloud types follow different rules, so decide the weather and the altitude before you shade.",
+    },
 ];
 
 /// 检出这一轮用得上的知识条目。明文命中加权：词越长越算数，
@@ -2541,6 +2712,79 @@ mod tests {
         let text = prompt_section(
             "死亡 翻滚 蹬墙 振翅 肖像 废墟 机械 宝石 陷阱 全息 冰雪",
             11,
+            DEFAULT_BUDGET,
+        );
+        assert!(
+            text.chars().count() <= DEFAULT_BUDGET,
+            "{}",
+            text.chars().count()
+        );
+    }
+
+    /// 第三批 saint11 单页把特效、材质、题材三组补齐。每条都要能中英双语捞到，
+    /// 同时老主场不能被抢：纯金属高光仍归 specular，纯猫仍归 cat，纯优化仍归 refine。
+    #[test]
+    fn the_saint11_third_one_pager_batch_surfaces() {
+        for (query, id) in [
+            ("画一团跳动的火焰", "fire-flames"),
+            ("闪电特效怎么做", "electricity-vfx"),
+            ("浓烟滚滚怎么画", "smoke-particles"),
+            ("画一阵旋风和气流", "wind-vfx"),
+            ("史莱姆粘液怎么画", "goo-slime"),
+            ("画血迹喷溅和伤口", "blood-gore"),
+            ("金属材质和反射怎么画", "metal-surfaces"),
+            ("木头和树皮怎么画", "wood-and-bark"),
+            ("剑的设计和结构", "sword-design"),
+            ("枪械结构怎么设计", "firearm-design"),
+            ("宇宙飞船设计", "spaceship-design"),
+            ("怎么画骷髅头骨", "skulls-bones"),
+            ("俯视行走循环怎么画", "topdown-locomotion"),
+            ("俯视攻击动画怎么画", "topdown-attack"),
+            ("城市背景怎么画", "city-background"),
+            ("植被的明暗怎么画", "vegetation-shading"),
+            ("水面循环动画怎么做", "water-animation"),
+            ("画云朵的明暗", "clouds"),
+            ("animate a campfire flame", "fire-flames"),
+            ("lightning bolt effect", "electricity-vfx"),
+            ("smoke plume animation", "smoke-particles"),
+            ("whirlwind and air current effect", "wind-vfx"),
+            ("slime blob deformation", "goo-slime"),
+            ("blood splatter and wounds", "blood-gore"),
+            ("metal surface reflections", "metal-surfaces"),
+            ("wood grain and bark", "wood-and-bark"),
+            ("sword anatomy and hilt", "sword-design"),
+            ("firearm design with a muzzle", "firearm-design"),
+            ("spaceship hull design", "spaceship-design"),
+            ("how to draw a skull", "skulls-bones"),
+            ("top down walk cycle", "topdown-locomotion"),
+            ("top-down attack slash", "topdown-attack"),
+            ("city background skyline", "city-background"),
+            ("bushes and canopy shading", "vegetation-shading"),
+            ("animated water and waterfall", "water-animation"),
+            ("cloud shading and cumulus", "clouds"),
+        ] {
+            let hits = retrieve(query, 4);
+            assert!(
+                hits.iter().any(|e| e.id == id),
+                "'{query}' 没捞出 {id}：{:?}",
+                hits.iter().map(|e| e.id).collect::<Vec<_>>()
+            );
+        }
+
+        // 新条目不能抢老主场：纯猫、纯高光、纯优化、纯行走图照旧各归各家。
+        for (query, preferred) in [
+            ("画一只坐着的小猫", "cat"),
+            ("金属高光再亮一点", "specular"),
+            ("优化一下细节", "refine"),
+            ("画一个八帧的行走图", "walk-cycle"),
+        ] {
+            assert_eq!(retrieve(query, 4)[0].id, preferred, "{query}");
+        }
+
+        // 一整轮特效问题会同时够到 vfx 加几条新条目，预算仍要兜得住。
+        let text = prompt_section(
+            "做一套战斗特效：火焰、浓烟、闪电、血迹和旋风",
+            DEFAULT_LIMIT,
             DEFAULT_BUDGET,
         );
         assert!(
