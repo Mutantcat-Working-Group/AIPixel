@@ -177,20 +177,39 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
     KnowledgeEntry {
         id: "dithering",
         title: "Dithering and ordered patterns",
-        keywords: &["抖动", "网点", "棋盘", "递色", "dither", "dithering", "ordered", "bayer", "checkerboard"],
-        body: "Alternate two ramp steps in a regular pattern instead of adding an in-between color. Ordered (Bayer 4x4) keeps texture and direction and fits marble, skin and sky; noise dithering reads organic but dirties up close. Dither at most a third to a half of an area, and never across an outline.",
+        keywords: &[
+            "抖动", "网点", "棋盘", "递色", "交织抖动", "风格化抖动", "随机抖动", "网点太多",
+            "dither", "dithering", "ordered", "bayer", "checkerboard", "interlaced dither",
+            "random dither", "stylized dither",
+        ],
+        body: "Alternate two ramp steps in a regular pattern instead of adding an in-between color. A dither eases the transition between two colors and, when the pattern is coarse enough, doubles as texture - but a checkerboard's job is to taper the ENDS and EDGES of an opaque field, so a dithered area that covers half the sprite has stopped buffering and become a texture field, and a new palette step would serve better. The common forms: 50/50 (checkerboard, the base pattern), ordered Bayer 4x4 (keeps texture and direction, fits marble, skin and sky), interlaced (two dither regions weave together at their border and build a gradient), stylized (little shapes embedded in the pattern, reads as decoration), and random/noise (adds single-pixel noise and is usually avoided outside very small doses - the reason a 25% dither is dangerous is the lone pixels it scatters). The lower the contrast between the two colors, the gentler the dither, so dither 50/50 between close neighbours and something sparser between far ones, never across an outline, and never so much that the pattern reveals the grid.",
     },
     KnowledgeEntry {
         id: "ramps",
         title: "Value ramps and hue shifting",
-        keywords: &["色阶", "过渡", "渐变", "明暗", "暗部", "亮部", "ramp", "ramps", "shading", "value steps", "gradient", "hue shift"],
-        body: "Build 3-5 steps from core shadow to highlight, hue-shifted (cool violet-blue shadows, warm highlights) rather than just adding white and black. Place the darkest step just past the terminator, not on the object's edge. Generate steps with hsv()/mix() so the rhythm stays even, and give each material its own ramp.",
+        keywords: &[
+            "色阶", "过渡", "渐变", "明暗", "暗部", "亮部", "直线色阶", "共用色阶",
+            "ramp", "ramps", "shading", "value steps", "gradient", "hue shift", "straight ramp",
+        ],
+        body: "Build 3-5 steps from core shadow to highlight, hue-shifted (cool violet-blue shadows, warm highlights) rather than just adding white and black. A STRAIGHT ramp changes value only and reads boring; bend the highlights toward one hue and the shadows toward another so the ramp carries subtle color contrast on top of the value change. Ramps may SHARE steps: the darkest and the lightest usually belong to every ramp in the palette, and a near-neutral mid-tone can bridge two ramps in place of two separate colors. Place the darkest step just past the terminator, not on the object's edge. Generate steps with hsv()/mix() so the rhythm stays even, give each material its own ramp, and remember value changes apparent thickness - a mid-grey line reads thinner than a black one of the same width.",
+    },
+    KnowledgeEntry {
+        id: "palette-control",
+        title: "Palette control: saturation, value range, eyeburn",
+        keywords: &[
+            "过饱和", "太艳", "太鲜艳", "刺眼", "辣眼睛", "晃眼", "颜色跳出来", "融不进画面",
+            "色阶跨度不够", "灰蒙蒙", "对比不够", "共用颜色", "共用暗部", "共用亮部",
+            "中性色过渡", "桥梁色",
+            "saturation", "oversaturated", "too saturated", "eyeburn", "off-ramp",
+            "value range", "neutral bridge", "shared ramp color",
+        ],
+        body: "A small palette is kept for two reasons: COHESION, because fewer colors reappear across the whole piece and tie it together, and CONTROL, because changing one color moves a whole ramp instead of 200 micro-relationships. Spend the steps deliberately and run three checks. SATURATION stays low - colors emitted as light burn the eye far faster than pigment does, and the usual beginner failure is a palette where every step is fully saturated so the picture is uncomfortable to look at. VALUE spreads across the whole range - a palette that only holds mid-tones cannot make contrast no matter how many hues it has, and a low-contrast palette is the second most common failure. Every color sits ON its ramp - a step whose saturation jumps or whose hue clashes with its neighbours punches through the picture and looks pasted on top; that is EYEBURN, and it is a value/hue relationship problem, not a matter of taste. Ramps are allowed to share their extremes, and a near-neutral mid-tone is the usual bridge that lets one color serve two ramps.",
     },
     KnowledgeEntry {
         id: "outlines",
         title: "Outline strategy",
         keywords: &["勾线", "描边", "轮廓线", "线稿", "outline", "outlines", "line art", "hard edge"],
-        body: "Pick ONE strategy for the whole drawing and keep it consistent, and the default is a solid outline on every shape: users read an outlined sprite as finished and an un-outlined one as an unfinished fill. Hue-shift the outline toward the surface color instead of using pure black on a saturated body, or it eats the silhouette - take the local hue a few steps darker rather than inventing a black. Keep outlines 1px at 32px and above; below 16px skip them entirely, or drop them everywhere only when the user asked for no outline, fog or backlight. The eight styles worth naming, drawn from one mushroom: single-pixel black (the animation-safe default), double-pixel, a dark shade of the surface colour, the region's own colour, an outline lit by the light direction, sel-out (AA only on the shadow side), broken or dashed, and none at all. Pick one per drawing and hold it on every frame.",
+        body: "Pick ONE strategy for the whole drawing and keep it consistent, and the default is a solid outline on every shape: users read an outlined sprite as finished and an un-outlined one as an unfinished fill. Hue-shift the outline toward the surface color instead of using pure black on a saturated body, or it eats the silhouette - take the local hue a few steps darker rather than inventing a black. Keep outlines 1px at 32px and above; below 16px skip them entirely, or drop them everywhere only when the user asked for no outline, fog or backlight. The eight styles worth naming, drawn from one mushroom: single-pixel black (the animation-safe default), double-pixel, a dark shade of the surface colour, the region's own colour, an outline lit by the light direction, sel-out (outline AA toward a known background colour), broken or dashed, and none at all. Pick one per drawing and hold it on every frame.",
     },
     KnowledgeEntry {
         id: "pixel-discipline",
@@ -260,8 +279,12 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
     KnowledgeEntry {
         id: "pixel-clusters",
         title: "Pixel clusters and curve rhythm",
-        keywords: &["像素簇", "孤立像素", "锯齿", "毛刺", "阶梯", "pixel cluster", "single pixel", "jaggies", "curve rhythm"],
-        body: "Details read as 2x2-plus clusters; one stray pixel reads as dirt. The fix is a regular step rhythm, not an extra color: 45 degrees = one pixel per row, about 22.6 = 2-pixel runs, about 30 = evenly spaced. When a curve looks lumpy, re-space the runs instead of smoothing them.",
+        keywords: &[
+            "像素簇", "孤立像素", "噪点", "杂点", "锯齿", "毛刺", "阶梯",
+            "pixel cluster", "pixel clusters", "single pixel", "lone pixel", "noise pixel",
+            "jaggies", "curve rhythm",
+        ],
+        body: "Details read as 2x2-plus clusters; one stray pixel reads as dirt. The cluster, not the pixel, is the unit the drawing is built from - the border of one cluster shapes the cluster beside it, so rearranging a cluster changes the picture more than recoloring it does. LONE PIXELS are the exception, justified for exactly two jobs: a specular highlight dot, and a small but essential detail on a very small sprite (an eye, a beak, a star, a bubble). A lone pixel of a DIFFERENT color that directly buffers an edge is not noise either - it is anti-aliasing, and counts as part of the cluster it touches. Everything else is noise: fix a lumpy curve by re-spacing its runs into a regular step rhythm (45 degrees = one pixel per row, about 22.6 = 2-pixel runs, about 30 = evenly spaced) instead of smoothing it with extra color, and remember that single pixels expose the grid by revealing the resolution.",
     },
     KnowledgeEntry {
         id: "line-quality",
@@ -286,10 +309,22 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         id: "aa",
         title: "Anti-aliasing discipline",
         keywords: &[
-            "抗锯齿", "柔化", "外部抗锯齿", "内部抗锯齿", "过渡像素", "中间色像素", "阶梯柔化", "加多了",
-            "anti-aliasing", "antialiasing", "aa pixel", "external aa", "internal aa", "soft pixel",
+            "抗锯齿", "柔化", "外部抗锯齿", "内部抗锯齿", "过渡像素", "中间色像素", "阶梯柔化",
+            "加多了", "抗锯齿过多", "抗锯齿太少", "抗锯齿带", "糊了", "边缘模糊",
+            "anti-aliasing", "antialiasing", "aa pixel", "external aa", "internal aa",
+            "soft pixel", "aa banding", "over-anti-aliasing",
         ],
-        body: "AA puts a pixel whose value sits between a shape and its neighbour on every step of an edge. Three rules carry it: add it SELECTIVELY - one or two pixels where a curve meets a contrasting background; NEVER let it change the shape, because extra pixels in the corners quietly redraw the outline; and judge it at real size, never at 8x zoom. Inner AA lives inside the shape, outer AA lives on the background and dies the moment that background changes. Value is the only thing that has to be right, so an AA pixel's hue is free to pick. Most sprites need no AA at all, and where it is used as a style choice the beard and the hair are the places that earn it.",
+        body: "AA puts a pixel whose value sits between a shape and its neighbour on every step of an edge. Three rules carry it: add it SELECTIVELY - one or two pixels where a curve meets a contrasting background; NEVER let it change the shape, because extra pixels in the corners quietly redraw the outline; and judge it at real size, never at 8x zoom. Length has to match the step it buffers: too little AA (one lone pixel on a long step) only blunts the corner without smoothing it, and too much turns the crisp edge into a blur - a 4-pixel step wants a roughly 4-pixel taper, not a single dot and not a smeared fringe. AA BANDING is the specific failure where the AA segments line up with the edge they are buffering, so the buffer becomes a second parallel outline and exposes the grid; stagger the starts of the AA runs instead of stacking them evenly. Inner AA lives inside the shape, outer AA lives on the background and dies the moment that background changes, so prefer inner AA on anything that may be moved onto a different background. Value is the only thing that has to be right, so an AA pixel's hue is free to pick. Most sprites need no AA at all, and where it is used as a style choice the beard and the hair are the places that earn it.",
+    },
+    KnowledgeEntry {
+        id: "sel-out",
+        title: "Sel-out needs a known background",
+        keywords: &[
+            "选择性描边", "选择性勾勒", "断线描边", "断线轮廓", "破轮廓", "破碎轮廓",
+            "描边断开", "描边蹭背景", "背景色抗锯齿", "蹭背景",
+            "sel-out", "selout", "selective outlining", "broken outline", "broken outlines",
+        ],
+        body: "Sel-out (selective outlining, also called broken outlines) is anti-aliasing an outline toward a background color - it is really a kind of EXTERNAL AA, which is why it only works when the background is known and stays that color, such as a game scene that is consistently dark or a fixed HUD panel. It is NOT shading an outline by the light source: a full outline with light variation is normal shading and keeps its solid line. Breaking a solid outline into dashed runs exposes jaggies worse than the solid outline does, because the gaps become new steps along the silhouette, so sel-out buys background blending at the cost of edge quality. Default to a solid outline; reach for sel-out only when the user asked for it or the deliverable pins a known backdrop, and then replace the outline pixels with a step toward that backdrop color (never black), kept to the side that faces the background.",
     },
     KnowledgeEntry {
         id: "circles",
@@ -343,13 +378,34 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
     },
     KnowledgeEntry {
         id: "pillow-shading",
-        title: "Pillow shading and banding",
+        title: "Pillow shading",
         keywords: &[
             "枕形阴影", "枕头阴影", "枕头", "一圈圈加暗", "一圈圈", "往里加", "向内加",
-            "贴着轮廓", "由外向内", "平行条纹", "明暗层", "条纹感", "色带感", "显平", "显噪",
-            "pillow shading", "pillow", "banding", "rings of dark", "parallel bands",
+            "由外向内", "像个抱枕", "显平", "显鼓", "中间亮一圈",
+            "pillow shading", "pillow", "rings of dark",
         ],
-        body: "Pillow shading darkens inward from the outline in concentric rings, ignoring both form and light: the result reads flat and puffed, like a cushion. Same four colours, completely different object - the fix is to light from the real direction instead: highlight on the lit side, shadow past the turn, core shadow where the form turns away, and step widths that follow the surface rather than the border. BANDING is its cousin: a shade layer or AA band of constant width hugging the whole outline so every step lines up, which flattens the picture or makes it noisy. Break banding by varying band length and offsetting the steps from one another.",
+        body: "Pillow shading darkens inward from the outline in concentric rings: the result reads flat and puffed, like a cushion. The reason it is wrong is NOT that the light comes from the viewer - a frontal light is legal - it is that the bands follow the flat 2D outline instead of the 3D form, so the object is lit as a silhouette rather than as a body. The fix is to light from the real direction and let the bands follow the surface: highlight on the lit side, shadow past the turn, core shadow where the form turns away, and step widths that change as the surface changes. One deliberate exception: a form facing the viewer straight on can legitimately have its brightest area in the middle, so long as the bands still describe the form rather than tracing the border.",
+    },
+    KnowledgeEntry {
+        id: "banding",
+        title: "Banding: hugging, fat pixels, skip-one, 45-degree",
+        keywords: &[
+            "色带", "条带", "带状", "等宽阴影带", "贴着轮廓", "平行条纹", "明暗层",
+            "条纹感", "色带感", "网格显形", "肥像素", "肥线", "隔空对齐", "45度带",
+            "banding", "hugging", "fat pixel", "fat pixels", "skip-one banding",
+            "staircase banding", "parallel bands",
+        ],
+        body: "Banding is when pixels LINE UP: two runs that start or end on the same grid coordinate expose the grid, and the apparent resolution of the image drops even though every pixel is individually fine. Four named shapes cover most of it. HUGGING: a shade or AA run of constant width tracing an outline, so the band and the border expose each other. FAT PIXELS: 2x2 blocks or a thicker line forming a band, including the staircase. SKIP-ONE: two bands separated by a one-pixel gap still band, because the eye fills the gap in. 45-DEGREE: even a run only one pixel wide bands when every step lands on the same row/column rhythm as its neighbour. The fixes are all about breaking alignment rather than changing colors: vary the run length along the band, offset each band by a step or two from its neighbour, cut the band where the form turns away, and let the terminator follow the surface instead of the border. Banding is an alignment problem, so recoloring the band will not remove it.",
+    },
+    KnowledgeEntry {
+        id: "form-first",
+        title: "Draw the volume, not the flat shape",
+        keywords: &[
+            "立体感", "体积感", "球体感", "圆柱感", "不要平", "扁平", "机械感",
+            "网格线", "块状像素", "厚像素", "一像素粗", "像划痕",
+            "volume", "three-dimensional form", "3d form", "flat shading", "chunky pixels",
+        ],
+        body: "Shade the form you actually mean: an arm is a cylinder, a chest is a pair of spheres, a wing is one stretched membrane - light the 3D body, not the 2D outline it happens to draw. Two failures come directly from ignoring this: pillow shading (bands hugging the outline) and evenly spaced vertical bands pretending to be form shading. THE CHUNKY PIXELS RULE: a feature only one pixel thick cannot carry its own shading, so decide before drawing whether a stripe, a limb or a horn is a LINE (no volume, and that is fine) or a FORM (give it at least two pixels so it can take a lit side and a dark side) - a one-pixel-thick limb that receives shading reads as a scratch. Build the big masses first, exaggerate the defining features (ears, snout, weapon) rather than describing them at true scale, and design for readability: a smaller number of distinct, chunky shapes beats many near-identical thin ones.",
     },
     KnowledgeEntry {
         id: "silhouette",
@@ -553,6 +609,17 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "richer",
         ],
         body: "A refinement request means add to what is already on the canvas, never redraw it from scratch. Read the current grid first, keep the approved silhouette and pose, and never open a refinement script with clear(). Add information inside the existing structures: sub-divide a ramp step with a dither band, add a rim light on the shadow side, deepen contact shadows, tighten the cluster rhythm. Keep the palette the same unless the user asks for more colors, and end by reading the canvas back - a script that changes nothing is skipped as a replay, so change the script or finish.",
+    },
+    KnowledgeEntry {
+        id: "final-checks",
+        title: "Before calling it done: 1x read, flip, desaturate",
+        keywords: &[
+            "最终检查", "收尾检查", "交付自查", "最后一眼", "过一眼", "1x 检查", "原尺寸看",
+            "缩小看", "翻转看", "镜像检查", "去色检查", "灰度检查", "明度检查",
+            "final check", "final pass", "flip check", "mirror check", "grayscale check",
+            "desaturate", "read at 1x",
+        ],
+        body: "Three cheap self-checks catch most misses, and each is a READ, not a redraw. 1X READ: judge the result at actual pixel size, never at extreme zoom - if the subject, the silhouette and the eye line do not read there, added detail will not save them, and the fix is a bigger shape rather than more pixels. MIRROR: flip the image horizontally in your head (or draw it, if a mirror helper is available); asymmetry, a heavy corner and a limb colliding with the body show up instantly when flipped and are almost invisible when not. VALUE / DESATURATE: drop the color and look at the greys - if the value steps bunch into one tone the drawing has no contrast no matter how many hues it uses, and if two materials collapse into the same grey, separate their VALUES instead of adding another hue. Then stop: a piece that reads at 1x is done, and a second polish round on a readable drawing adds noise.",
     },
     KnowledgeEntry {
         id: "drawing-process",
@@ -1537,6 +1604,12 @@ mod tests {
             ("万圣节暗黑配色，五个颜色", "style-recipes"),
             ("第一次画像素画，练手画点什么好", "starter-subjects"),
             ("在电子表格里用编号填格子", "spreadsheet-index"),
+            // Cure《The Pixel Art Tutorial》里几块过去没单独成条的规则。
+            ("描边想断开来蹭背景色", "sel-out"),
+            ("阴影等宽贴着轮廓，网格都显出来了", "banding"),
+            ("分不清该画成线还是画成体块，块状像素怎么处理", "form-first"),
+            ("颜色太艳了有点刺眼，灰阶跨度也不够", "palette-control"),
+            ("交付前把它翻转看看，再去色核对明暗", "final-checks"),
         ] {
             let hits = retrieve(query, 4);
             assert!(

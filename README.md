@@ -227,6 +227,10 @@ cargo test --workspace
 - [MakeBead 电子表格像素画](https://makebead.com/zh-Hans/spreadsheet-pixel-art/)：把像素画当编号表格填的整套方法与注意点，对应知识库里的电子表格条目。
 - [pixel-asset-master-skills](https://github.com/424431185/pixel-asset-master-skills)：像素美术执行技能，规格锁、交付自检、每件重读规格这套「先别画错，再画得好」的行为准则来自它。
 - Lospec：调色板库的命名、色数与推荐场景（DB32 / Endesga / Resurrect 等）的对照依据。
+- [Cure《The Pixel Art Tutorial》（Pixel Joint）](https://pixeljoint.com/forum/forum_posts.asp?TID=11299)：抗锯齿的过量、不足与 AA 色带，抖动的图案分类（50%、交织、风格化、随机），banding 的四种形态（贴边、肥像素、隔空、45 度带），sel-out 只在背景已知时才成立，以及调色板的过饱和与明度跨度这两组规则，都从这篇整理进来。它本身是 Pixelation「Ramblethread」的通俗版。
+- [Derek Yu：像素画基础](http://derekyu.com/makegames/pixelart.html)与其「常见错误」一章：粗轮廓 → 清理 → 铺色 → 明暗 → AA → sel-out → 收尾的起手顺序，「厚像素」规则（只有一像素粗的部件画不了明暗），以及镜像翻转、去色看明暗这两道终检出在这里；局部色写实、枕形阴影、等距色带三条忌讳也对照进了相应条目。
+- [saint11 像素画教程系列](https://saint11.art/blog/pixel-art-tutorials/)：知识库的题材覆盖度（动作、特效、等轴、瓦片、植被、布料等）按它的目录核对。
+- [Lospec 像素画教程库](https://lospec.com/pixel-art-tutorials)：教程索引入口，调和与风格类条目的术语对照过它收录的篇目。
 - [IPaperDoll](https://github.com/Mutantcat-Working-Group/IPaperDoll)：异猫工作群的纸娃娃行走图合成器，「先铺白膜、按部件分区、绕锚点换色」这套做法与角色网格规格的参照对象。
 - Aseprite 与 PixTXT：`.aseprite` 图层与帧语义、以及索引网格加调色板的中间文件思路的参照对象。
 
