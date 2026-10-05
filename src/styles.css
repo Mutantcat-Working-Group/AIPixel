@@ -236,7 +236,14 @@ body {
 .app-body {
   display: grid;
   grid-template-columns: 232px minmax(0, 1fr) 330px;
+  /* 行高必须由容器钉死。留成隐式 auto 行时，右栏画布一高，这一行就被内容
+     顶到比容器还高，多出来的部分从 .app-body 溢出去，挂在 body 的滚动区上：
+     用户往下一滚，顶栏和左边的对话就一起被推走。minmax(0, 1fr) 把行高锁成
+     容器高，三栏各自内部滚动，谁也顶不动谁。 */
+  grid-template-rows: minmax(0, 1fr);
   min-height: 0;
+  /* 兜底：万一还有哪一栏溢出，也在这一层裁掉，绝不外泄成页面滚动。 */
+  overflow: hidden;
 }
 
 .panel {
@@ -990,9 +997,19 @@ body {
   border-bottom: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  flex: none;
+  /* 别写 flex: none：画布比预览区高时它不肯让位，多出来的部分会顶穿面板。
+     留出收缩余地，让位的那一截交给 .checker 内部滚动。 */
+  flex: 0 1 auto;
+  min-height: 0;
   gap: 8px;
   align-items: center;
+}
+
+/* 工具栏和读数行是「手边的东西」，永不被压：要腾地方就压画布框。 */
+.doc-preview > .canvas-tools,
+.doc-preview > .tool-mods,
+.doc-preview > .doc-meta {
+  flex: none;
 }
 
 .checker {
@@ -1012,14 +1029,22 @@ body {
   /* 3x3 瓦片比预览区还大时：滚动看全，别把格子压扁。 */
   overflow: auto;
   width: 100%;
+  /* 画布框是预览区里唯一能伸缩的一块：画布比可用高度大时它自己封顶、内部
+     滚动，不再把工具栏和下方的图层 / 配色面板顶出去。 */
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: min(30vh, 260px);
+  /* 竖向滚动条按固定槽位预留。没有它，滚动条一冒出来内容宽度就少 8px，
+     ResizeObserver 拿到的预算跟着变、倍率跟着抖，画布会自己来回缩。 */
+  scrollbar-gutter: stable;
 }
 
 .checker img {
   image-rendering: pixelated;
-  max-width: 100%;
-  max-height: 240px;
   display: block;
-  /* 尺寸由 JS 按整数倍算好，别让 flex 再把它压变形。 */
+  /* 尺寸由 JS 的整数倍算好，这里不许再压一道：早先那张 240px 上限只截高度、
+     不管宽度，权威 PNG 会变成扁的，和同尺寸的帧层 / 笔迹层错开——画布越大
+     歪得越明显。flex: none 同理，别让 flex 把格子压变形。 */
   flex: none;
 }
 
