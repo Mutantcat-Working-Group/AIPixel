@@ -229,8 +229,12 @@ cargo test --workspace
 - Lospec：调色板库的命名、色数与推荐场景（DB32 / Endesga / Resurrect 等）的对照依据。
 - [Cure《The Pixel Art Tutorial》（Pixel Joint）](https://pixeljoint.com/forum/forum_posts.asp?TID=11299)：抗锯齿的过量、不足与 AA 色带，抖动的图案分类（50%、交织、风格化、随机），banding 的四种形态（贴边、肥像素、隔空、45 度带），sel-out 只在背景已知时才成立，以及调色板的过饱和与明度跨度这两组规则，都从这篇整理进来。它本身是 Pixelation「Ramblethread」的通俗版。
 - [Derek Yu：像素画基础](http://derekyu.com/makegames/pixelart.html)与其「常见错误」一章：粗轮廓 → 清理 → 铺色 → 明暗 → AA → sel-out → 收尾的起手顺序，「厚像素」规则（只有一像素粗的部件画不了明暗），以及镜像翻转、去色看明暗这两道终检出在这里；局部色写实、枕形阴影、等距色带三条忌讳也对照进了相应条目。
-- [saint11 像素画教程系列](https://saint11.art/blog/pixel-art-tutorials/)：知识库的题材覆盖度（动作、特效、等轴、瓦片、植被、布料等）按它的目录核对。
-- [Lospec 像素画教程库](https://lospec.com/pixel-art-tutorials)：教程索引入口，调和与风格类条目的术语对照过它收录的篇目。
+- [saint11 像素画教程系列](https://saint11.art/blog/pixel-art-tutorials/)：知识库的题材覆盖度按它那套 512x512 单页教程的目录逐项核对，动作、特效、等轴、瓦片、植被、布料等都对得上；打击、爆炸、烟尘与拖尾这一组特效规则，以及俯视四方向角色的朝向约定，就是从它的特效篇和俯视篇整理进来的。
+- [saint11《Pixel Art Articles》入门合集](https://saint11.art/pixel_articles/)：入门系列的选题清单（绝对新手入门、色簇起稿、基础动画、基础明暗、抗锯齿与 banding、基础色彩理论、线与导出）作为覆盖度检查表核对过，其中前两篇的正文与上面 Pedro Medeiros 那两篇同源，已逐条吸收。
+- [Pedro Medeiros《How to start making pixel art》#1 与 #2（Pixel Grimoire）](https://saint11.art/pixel_articles/)：16x16 配 4 色的起步练习、像素完美线与「铅笔恒为 1 像素」，受限调色板下靠借用相邻色相上光投影（冷色作暗、暖色作亮），孤立像素的三种正当用途，只按整数倍缩放，以及色簇起稿（大色块起稿 → 由远及近逐步细化 → 推像素修锯齿）这套流程，都是从这两篇整理进来的。
+- [Slynyrd / Raymond Schlitter《Pixelblog 60 - Side View Run 'N Gun》](https://www.slynyrd.com/blog/2026/1/26/side-view-run-n-gun)：8x16 白膜尺寸、contact/down/pass/up 四姿势的八帧行走、由行走派生的奔跑（前倾、加大步幅与弹跳、加快播放），上下半身分层加三帧射击覆盖层，跳跃与落地的经济做法，120ms / 60ms 的节奏锚点，以及 8x8 横版瓦片 3x3 加 4x4 的 12 块最小套，都从这篇吸收进对应条目。
+- [Lospec 像素画教程库](https://lospec.com/pixel-art-tutorials)：教程索引入口，调和与风格类条目的术语对照过它收录的篇目，教程按 walkthrough / animation / shading / tiles 等标签的分类方式也参照了它。
+- [Concept Art Empire《How To Make Pixel Art: 40+ Free Video Tutorials》](https://conceptartempire.com/pixel-art-tutorials/)：题材覆盖度按它 40 余个教程的目录核对过一遍，角色、瓦片、等轴、岩石、树木、水面、云、抖动与走路循环都在两边的条目里能对上。
 - [IPaperDoll](https://github.com/Mutantcat-Working-Group/IPaperDoll)：异猫工作群的纸娃娃行走图合成器，「先铺白膜、按部件分区、绕锚点换色」这套做法与角色网格规格的参照对象。
 - Aseprite 与 PixTXT：`.aseprite` 图层与帧语义、以及索引网格加调色板的中间文件思路的参照对象。
 

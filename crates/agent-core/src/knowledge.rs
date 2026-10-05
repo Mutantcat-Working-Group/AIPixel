@@ -25,8 +25,13 @@ pub struct KnowledgeEntry {
 /// 默认检出条数。再多就挤压通用规则的预算了。
 pub const DEFAULT_LIMIT: usize = 4;
 
-/// 检查预算：条目正文注入系统提示词的字符上限，防某一轮把上下文吃干。
-pub const DEFAULT_BUDGET: usize = 2600;
+/// 检索预算：条目正文注入系统提示词的字符上限，防某一轮把上下文吃干。
+///
+/// 上限要压得住闲聊轮，又不能小到把「奔跑」「瓦片」这种真·技法连坐丢掉。
+/// 一条「画 5 帧橘猫奔跑」会同时够到 `cat` + `walk-cycle` + `locomotion` +
+/// `quadruped`，四条正文合计约三千字符，所以给到 3400——刚好够一整轮
+/// 把姿态相位表、四足解剖和落地的行为准则一并带上，再多就该收手了。
+pub const DEFAULT_BUDGET: usize = 3400;
 
 /// 行为准则三条：规格锁、收工自检、别画成程序化假图案。
 ///
@@ -51,7 +56,7 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         // `rpmaker-sheet` 也认这三个字。两边都命中时按词长加权打平，
         // 由库内顺序兜底——本条目在前，所以纯步态提问仍归步态。
         keywords: &["行走", "行走图", "走路", "步态", "奔跑", "跑动", "walk", "walking", "walk cycle", "run cycle", "gait"],
-        body: "Drive every limb from ONE phase variable. A 4-beat walk spreads the four legs over 0 / 0.25 / 0.5 / 0.75; a trot uses two diagonal pairs a half cycle apart. Lift a foot only while it swings forward - lift = max(0, sin(2pi*phase)) - and keep it planted while it travels back. The body bobs at twice the step frequency and the head counter-bobs a little. Close the loop: the last frame has to flow back into the first.",
+        body: "Drive every limb from ONE phase variable. A 4-beat walk spreads the four legs over 0 / 0.25 / 0.5 / 0.75; a trot uses two diagonal pairs a half cycle apart. Lift a foot only while it swings forward - lift = max(0, sin(2pi*phase)) - and keep it planted while it travels back. The body bobs at twice the step frequency and the head counter-bobs a little. Close the loop: the last frame has to flow back into the first. An EIGHT-frame walk is the generous default because it can hold all four classic cartoon poses - contact, down, pass, up - twice per cycle; short-limbed chibi sprites and tiny canvases do fine with four to six, while long full-length limbs need the eight or the motion reads as a shuffle.",
     },
     KnowledgeEntry {
         id: "anim-catalog",
@@ -73,13 +78,24 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "sprint", "dash", "fly", "flight", "flying", "glide", "hover",
             "leap", "jump", "hop",
         ],
-        body: "Name the gait first, then drive every limb from that gait's phase table. WALK: legs at 0 / 0.25 / 0.5 / 0.75 with three feet down at any moment. TROT: two diagonal pairs half a cycle apart plus a one-frame suspension between strides. CANTER: near hind, then the diagonal pair, then the leading foreleg (0 / 0.2 / 0.4 / 0.6). GALLOP: the near pair lands, the far pair a beat later, then a long pose with all four legs gathered - contact 0, gather 0.35, extend 0.6, suspension 0.75. A gallop reads as running only because that gathered suspension frame exists: skip it and the motion reads as a sped-up walk. Gait rules for all four: plant the foot while it sweeps back and lift it only on the forward swing (lift = max(0, sin(2*pi*phase))), and mirror the amplitude between the near and far pair or the far legs skate. FLIGHT: wing down at 0, catching the air 0.2-0.4, top of the upstroke 0.6, folded 0.8. HOPS and LEAPS squash the body to three quarters height at 0, stretch toward the target at 0.5, land and squash again at 1.",
+        body: "Name the gait first, then drive every limb from that gait's phase table. WALK: legs at 0 / 0.25 / 0.5 / 0.75 with three feet down at any moment. TROT: two diagonal pairs half a cycle apart plus a one-frame suspension between strides. CANTER: near hind, then the diagonal pair, then the leading foreleg (0 / 0.2 / 0.4 / 0.6). GALLOP: the near pair lands, the far pair a beat later, then a long pose with all four legs gathered - contact 0, gather 0.35, extend 0.6, suspension 0.75. A gallop reads as running only because that gathered suspension frame exists: skip it and the motion reads as a sped-up walk. Gait rules for all four: plant the foot while it sweeps back and lift it only on the forward swing (lift = max(0, sin(2*pi*phase))), and mirror the amplitude between the near and far pair or the far legs skate. FLIGHT: wing down at 0, catching the air 0.2-0.4, top of the upstroke 0.6, folded 0.8. HOPS and LEAPS squash the body to three quarters height at 0, stretch toward the target at 0.5, land and squash again at 1. An upright CHARACTER RUN is a walk with four edits, so derive it from the finished walk instead of animating it from scratch: lean the head and torso forward with the head slightly down, crank the stride and the bounce, and speed the playback up - the lean plus the down-tilt is what actually sells it.",
+    },
+    KnowledgeEntry {
+        id: "run-and-gun",
+        title: "Side-view run 'n gun: layering, jump and shoot-on-move",
+        keywords: &[
+            "跑射", "横版射击", "射击游戏角色", "持枪", "举枪", "开枪", "边跑边射", "移动射击",
+            "跳跃动作", "落地动作", "受击", "掩体",
+            "run and gun", "run 'n gun", "run-and-gun", "shooter", "contra", "gun sprite",
+            "shoot while moving", "aiming", "jump animation", "landing", "gun arm",
+        ],
+        body: "A side-view shooter character is built as a STACK of shared parts, not as one animation per action. Draw the base dummy at 8x16 and settle walk and run first - they set the expression and the standard of fluidity everything else is cut from. Then cut LEGS and TORSO into separate layers so the legs keep cycling through walk, run and jump independently of the top half; the shooting pose is 3 frames reused as an UPPER-BODY overlay, stamped onto every frame of every animation that allows linear motion (walk, run, jump), and the shoulder anchoring and bounce must follow the leg layer underneath or the two halves tear apart. HOLDING the gun is the cheap version: delete the arms from a finished frame and redraw them around the weapon, since the shoulder position and the bounce are already correct. JUMP stays minimal for input response: one tucked pose is the floor, and an 'up' pose for the ascent plus a 'down' pose for the descent is the sweet spot - the apex swap doubles as a timing cue. NO anticipation crouch: it adds input delay, so the jump fires instantly. LAND recycles the crouch pose plus one extra frame with the head and arms dipped to sell the weight, and that dip is optional if you want no loss of momentum. Provide both male and female builds by re-sketching the dummy rather than recolouring it, and let long hair animate on run and jump - but not on run-and-shoot, where the rhythmic run bounce should own the silhouette.",
     },
     KnowledgeEntry {
         id: "frame-timing",
         title: "Frame timing and animation rhythm",
         keywords: &["帧率", "时长", "动画", "动效", "补间", "frame duration", "timing", "fps", "tween", "animation"],
-        body: "8-12 fps is the pixel-art norm. Hold key and contact poses longer and pass through in-betweens quickly; set each frame's duration instead of relying on a uniform rate, and keep the total loop divisible so the repeat is invisible. On small canvases, fewer frames with longer holds read better than many 60ms frames.",
+        body: "8-12 fps is the pixel-art norm. Hold key and contact poses longer and pass through in-betweens quickly; set each frame's duration instead of relying on a uniform rate, and keep the total loop divisible so the repeat is invisible. On small canvases, fewer frames with longer holds read better than many 60ms frames. Two anchor numbers worth starting from: 120 ms for idle and walk, 60 ms for run, shoot, land and dust - that is the classic 8-bit action split, and slowing the walk while the run stays fast is what makes the speed difference read.",
     },
     KnowledgeEntry {
         id: "sprite-sheet",
@@ -128,6 +144,17 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
     // 这一整套做法：底稿的部件分区就是将来换色的边界，边界不定下来，
     // 后面每一次上色都在赌轮廓会不会跑。
     KnowledgeEntry {
+        id: "topdown",
+        title: "Top-down and four-direction sprites",
+        keywords: &[
+            "俯视", "俯视角", "上帝视角", "顶视", "四方向", "4方向", "八方向", "8方向",
+            "上下左右四个方向", "多方向", "朝向", "地图角色",
+            "top down", "top-down", "topdown", "bird's eye", "birds eye", "overhead",
+            "4-direction", "four direction", "8-direction", "eight direction", "overworld",
+        ],
+        body: "Draw the character ONCE facing down and derive the other three directions from it - never sketch each direction from nothing, or the head size and shoulder width drift. UP never shows a face: it is the back of the head plus hair, and any weapon or pack rides on the back and must not swap shoulders. LEFT and RIGHT are mirrors, so draw one, flip it, then re-draw any asymmetric detail (a strap, a scar, a held item) instead of leaving it flipped. The head turns and the shoulders turn with it, and the body stays the same height in every direction or the sprite bobs as the player walks. There is no foreshortening from overhead: depth is the sprite's vertical POSITION on the canvas, not its scale, so a character standing further away is drawn higher up, not smaller.",
+    },
+    KnowledgeEntry {
         id: "paperdoll-base",
         title: "Paper-doll base (blank base) and swappable parts",
         keywords: &[
@@ -172,7 +199,7 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "瓦片边缘", "瓦片衔接", "接缝", "过渡瓦片", "地块过渡", "角块", "边缘块",
             "tile edge", "edges", "corner", "corners", "transition", "bitmask", "autotile", "welding",
         ],
-        body: "Ship the minimum nine-piece set - centre, four straight edges, four corners - welded so the centre band repeats and the corners close the loop, instead of one big picture. Drive grime and terrain transitions with a bitmask over the eight neighbours (four orthogonals plus four diagonals; byte 47, autotile 5x3) rather than a manual table of every combination. Cell size follows the engine: 16 for NES / SNES and RPG Maker 2000, 32 as the general middle, 48 for RPG Maker MV/MZ, 64 for HD sets. The whole set shares one light direction, one ramp per material and one outline rule, and is authored at exactly 1x - drawing big and downscaling smears the edges.",
+        body: "Ship the minimum nine-piece set - centre, four straight edges, four corners - welded so the centre band repeats and the corners close the loop, instead of one big picture. Drive grime and terrain transitions with a bitmask over the eight neighbours (four orthogonals plus four diagonals; byte 47, autotile 5x3) rather than a manual table of every combination. Cell size follows the engine: 16 for NES / SNES and RPG Maker 2000, 32 as the general middle, 48 for RPG Maker MV/MZ, 64 for HD sets. SIDE-VIEW is a different minimum: 8x8 cells, a 3x3 structure for floors, ceilings and walls, plus a 4x4 diamond shape holding the INNER corners that close L-shaped formations - twelve tiles cover a whole stage that has no slopes, and the inner-corner pieces are the ones people forget. Target the native resolution the tiles were drawn for rather than the monitor: 320x180 is 16:9, scales pixel-perfect into 1080p at 6x, and keeps characters and 8x8 tiles in a readable ratio. The whole set shares one light direction, one ramp per material and one outline rule, and is authored at exactly 1x - drawing big and downscaling smears the edges.",
     },
     KnowledgeEntry {
         id: "dithering",
@@ -189,9 +216,11 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         title: "Value ramps and hue shifting",
         keywords: &[
             "色阶", "过渡", "渐变", "明暗", "暗部", "亮部", "直线色阶", "共用色阶",
+            "借色", "借色相", "色相替换", "颜色不够用", "没有浅色",
             "ramp", "ramps", "shading", "value steps", "gradient", "hue shift", "straight ramp",
+            "hue substitution", "borrow a hue", "run out of colours",
         ],
-        body: "Build 3-5 steps from core shadow to highlight, hue-shifted (cool violet-blue shadows, warm highlights) rather than just adding white and black. A STRAIGHT ramp changes value only and reads boring; bend the highlights toward one hue and the shadows toward another so the ramp carries subtle color contrast on top of the value change. Ramps may SHARE steps: the darkest and the lightest usually belong to every ramp in the palette, and a near-neutral mid-tone can bridge two ramps in place of two separate colors. Place the darkest step just past the terminator, not on the object's edge. Generate steps with hsv()/mix() so the rhythm stays even, give each material its own ramp, and remember value changes apparent thickness - a mid-grey line reads thinner than a black one of the same width.",
+        body: "Build 3-5 steps from core shadow to highlight, hue-shifted (cool violet-blue shadows, warm highlights) rather than just adding white and black. A STRAIGHT ramp changes value only and reads boring; bend the highlights toward one hue and the shadows toward another so the ramp carries subtle color contrast on top of the value change. Ramps may SHARE steps: the darkest and the lightest usually belong to every ramp in the palette, and a near-neutral mid-tone can bridge two ramps in place of two separate colors. Place the darkest step just past the terminator, not on the object's edge. Generate steps with hsv()/mix() so the rhythm stays even, give each material its own ramp, and remember value changes apparent thickness - a mid-grey line reads thinner than a black one of the same width. A tight palette forces HUE SUBSTITUTION: when the ramp has no lighter step of the local hue, borrow the nearest available hue for the highlight (green lit by a yellow step) and the nearest dark cool hue for the shadow (green shadowed by a blue step). Keep the direction - warm hues up, cool hues down - because flipping it (a brighter cool highlight and a darker warm shadow) reads plainly wrong even though both are technically inside the palette.",
     },
     KnowledgeEntry {
         id: "palette-control",
@@ -284,7 +313,7 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "pixel cluster", "pixel clusters", "single pixel", "lone pixel", "noise pixel",
             "jaggies", "curve rhythm",
         ],
-        body: "Details read as 2x2-plus clusters; one stray pixel reads as dirt. The cluster, not the pixel, is the unit the drawing is built from - the border of one cluster shapes the cluster beside it, so rearranging a cluster changes the picture more than recoloring it does. LONE PIXELS are the exception, justified for exactly two jobs: a specular highlight dot, and a small but essential detail on a very small sprite (an eye, a beak, a star, a bubble). A lone pixel of a DIFFERENT color that directly buffers an edge is not noise either - it is anti-aliasing, and counts as part of the cluster it touches. Everything else is noise: fix a lumpy curve by re-spacing its runs into a regular step rhythm (45 degrees = one pixel per row, about 22.6 = 2-pixel runs, about 30 = evenly spaced) instead of smoothing it with extra color, and remember that single pixels expose the grid by revealing the resolution.",
+        body: "A cluster is a continuous run of pixels of the exact same colour, and it is the unit the drawing is built from - the border of one cluster shapes the cluster beside it, so rearranging a cluster changes the picture more than recolouring it does. The aim is as FEW clusters as possible and no one-pixel clusters at all. Pixels that touch only diagonally are a WEAK connection: they technically join, but treat them as a seam to avoid unless the shape demands it. Details read as 2x2-plus clusters; one stray pixel reads as dirt. LONE PIXELS are the exception, justified for exactly three jobs: a specular highlight dot, texture, and a small but essential detail on a very small sprite (an eye, a beak, a star, a bubble). A lone pixel of a DIFFERENT color that directly buffers an edge is not noise either - it is anti-aliasing, and counts as part of the cluster it touches. When a lone pixel is carrying a real detail, the fix is to absorb it into a small shape (a 2x2, an L, a T) rather than to delete it; when it is not, delete it and merge the neighbours. Everything else is noise: fix a lumpy curve by re-spacing its runs into a regular step rhythm (45 degrees = one pixel per row, about 22.6 = 2-pixel runs, about 30 = evenly spaced) instead of smoothing it with extra color, and remember that single pixels expose the grid by revealing the resolution.",
     },
     KnowledgeEntry {
         id: "line-quality",
@@ -293,7 +322,7 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "双像素", "像素拐角", "线条粗细", "台阶长度", "线条不干净", "断线", "锯齿", "阶梯",
             "doubles", "double pixel", "line weight", "step rhythm", "line quality", "jaggies",
         ],
-        body: "Two pixels forming an L at a corner make a DOUBLE, and that corner reads thicker, darker and harder than the rest of the line - for a uniform 1px outline, delete the extra corner pixel. JAGGIES come from uneven step lengths: a clean straight line runs 2-2-2-2 while a lumpy one runs 1-3-2-1-4. Fix a curve by making its runs grow and shrink in a rhythm (5-3-2-1-1-2-3-5) rather than by adding colour. Doubles are not automatically a defect - running the entire outline in doubles is a bold style of its own, and one deliberately broken line can model a brow ridge.",
+        body: "Two pixels forming an L at a corner make a DOUBLE, and that corner reads thicker, darker and harder than the rest of the line - for a uniform 1px outline, delete the extra corner pixel. JAGGIES come from uneven step lengths: a clean straight line runs 2-2-2-2 while a lumpy one runs 1-3-2-1-4. Read the border as a STAIRCASE and count the pixels in each step: on a correct curve the run lengths rise smoothly toward the horizontal and fall smoothly toward the vertical, usually in a geometric progression (5-3-2-1-1-2-3-5). The run lengths are allowed to change fast - what is not allowed is the direction of the change reversing in the middle of the curve, which is exactly what a jaggy is: a step that suddenly shrinks and then grows again. Fix it by PUSHING PIXELS to restore the steady rise or fall, never by adding colour - a 1-3-2-1 sequence is a misstep, not a shading problem. Doubles are not automatically a defect - running the entire outline in doubles is a bold style of its own, and one deliberately broken line can model a brow ridge.",
     },
     KnowledgeEntry {
         id: "smooth-curves",
@@ -513,6 +542,20 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         body: "Glow is built from the OUTSIDE in: tint the background two steps toward the light colour, then place the hot core last - never paint the core first and bleed it. Keep the halo colour-shifted toward the source hue, and let the darkest part of the scene sit right next to the light so contrast stays.",
     },
     KnowledgeEntry {
+        id: "vfx",
+        title: "Impact, explosion and particle effects",
+        keywords: &[
+            "爆炸", "爆炸特效", "烟雾", "浓烟", "尘土", "扬尘", "火星", "火花", "碎片",
+            "撞击", "命中", "打中", "受击", "打击", "打击感", "闪光", "闪白", "拖尾", "尾迹",
+            "弹道", "子弹", "枪口火光",
+            "血迹", "粘液", "闪电", "电流", "特效", "粒子",
+            "explosion", "explode", "smoke", "dust", "impact", "hit flash", "muzzle flash",
+            "vfx", "fx", "particle", "projectile", "bullet", "trail", "debris",
+            "splatter", "blood", "goo", "lightning", "electricity", "spark", "sparks",
+        ],
+        body: "An effect is a short PHASE LIST, not one puff: an explosion runs charge, a one-to-two-frame flash that blows the silhouette out to white, a fast bloom of hot core to mid to dark smoke, then debris and a settling dust ring - keep the hot core to a single colour and let the outer rings carry the ramp. The frames just before a hit stay empty, and the dust lands AFTER the foot or the body does; the ground briefly loses its outline where the impact is. Bullets and rockets are 2-4 pixel streaks plus a trail that fades over about three frames, never a round dot sliding across the canvas. Blood, goo and sparks must not eat the victim's silhouette - splatter outward from the wound and keep one bright specular so the fluid is not a flat stain.",
+    },
+    KnowledgeEntry {
         id: "rim-light",
         title: "Rim light and backlight",
         keywords: &["轮廓光", "边缘光", "逆光", "rim light", "backlight", "edge light", "silhouette light"],
@@ -534,13 +577,13 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
         id: "small-sprite",
         title: "Drawing at 8-16 pixels",
         keywords: &["小图", "小尺寸", "迷你", "16x16", "16像素", "32x32", "tiny", "small sprite", "small canvas"],
-        body: "Below 16px every pixel is load-bearing: one silhouette, two to four interior shades, no outline, and the detail budget goes to the eyes or the single iconic feature. Halve the canvas in your head and design the shape at that size before placing pixels.",
+        body: "Below 16px every pixel is load-bearing: one silhouette, two to four interior shades, no outline, and the detail budget goes to the eyes or the single iconic feature. Halve the canvas in your head and design the shape at that size before placing pixels. The classic first exercise is 16x16 with a 4-colour palette (a mug, then a skull, a sword, a face): the small canvas and the tiny palette are the point, because every placement becomes a deliberate choice instead of an accident. Keep the pencil at exactly 1 pixel wide - anything wider destroys the discipline the size is teaching - and when something will not fit, abstract it down to a single pixel and try again rather than enlarging the canvas.",
     },
     KnowledgeEntry {
         id: "upscale",
         title: "Scaling and crisp edges",
         keywords: &["放大", "缩放", "模糊", "倍率", "upscale", "scale", "nearest neighbor", "crisp", "pixel perfect"],
-        body: "Scale pixel art with nearest neighbour at integer factors or it blurs into mush. Integer doubling keeps every pixel a square block; non-integer factors make uneven pixel sizes - avoid them or accept the wobble. The editor's zoom view scales up; the export does not bake in any smoothing.",
+        body: "Scale pixel art with nearest neighbour at integer factors or it blurs into mush. Integer doubling keeps every pixel a square block; non-integer factors make uneven pixel sizes - avoid them or accept the wobble. NEVER scale by a partial percentage: 107% breaks the pixels unevenly and the result is a mess, while 200% makes every pixel exactly 2x2 and stays sharp, so partial resizes are simply off the table. Scale for display only, with nearest neighbour, and keep an editable source file (.ase / .aip) alongside every export so a later edit reopens the original instead of a rescaled copy. The editor's zoom view scales up; the export does not bake in any smoothing.",
     },
     KnowledgeEntry {
         id: "pixel-font",
@@ -630,7 +673,17 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "drawing process", "four pass", "passes", "block in", "blocking in",
             "where do i start", "how do i start",
         ],
-        body: "Work in four passes and finish each before the next starts. 1 SILHOUETTE: one flat colour, nothing but the outer shape - if it does not read as one blob, stop and restate the proportions rather than shading it. 2 LINE ART: cut that shape into its major regions (brim, face, beard, staff) at one consistent weight. 3 FLAT COLOUR: one local colour per region, ignoring light entirely. 4 REFINE: shading, highlight and the small details last. The silhouette barely changes between pass one and pass four, and that stability is the whole point of drawing it first. Other starts are legitimate too - construction lines for proportion, rough colour blocks for atmosphere, drawing big and shrinking for detail - but whatever you pick, the first pass stays about the big shape only, and there is no single correct order.",
+        body: "Work in four passes and finish each before the next starts. 1 SILHOUETTE: one flat colour, nothing but the outer shape - if it does not read as one blob, stop and restate the proportions rather than shading it. 2 LINE ART: cut that shape into its major regions (brim, face, beard, staff) at one consistent weight. 3 FLAT COLOUR: one local colour per region, ignoring light entirely. 4 REFINE: shading, highlight and the small details last. The silhouette barely changes between pass one and pass four, and that stability is the whole point of drawing it first. Other starts are legitimate too - construction lines for proportion, rough colour blocks for atmosphere, drawing big and shrinking for detail - but whatever you pick, the first pass stays about the big shape only, and there is no single correct order. For a SCENE, work BACK TO FRONT and keep the layer count low: lay the far plane (sky, mountains) first, then the mid ground, then the near silhouette, because the foundation has to exist before anything sits on it - that is what makes the colours and the relative scale of the objects easy to judge.",
+    },
+    KnowledgeEntry {
+        id: "cluster-sketching",
+        title: "Cluster sketching: start from blobs, not from lines",
+        keywords: &[
+            "色块起稿", "色簇起稿", "色块铺底", "簇起稿", "直接上色", "块面起稿", "不打线稿",
+            "cluster sketch", "cluster sketching", "block in colour", "blob sketch", "mass sketch",
+            "paint first", "colour first", "no lineart",
+        ],
+        body: "Instead of lines then fill, sketch straight in colour and refine in shrinking steps: 1 BIG CLUSTERS - a messy gestural version of the whole picture, choosing only the colours and the mood, no detail at all; a 2- or 3-pixel brush is fine here, or outline the cluster and bucket-fill it. 2 REFINE - go smaller one step at a time, working back to front (sky, then mountains, then the building, then the near silhouette) so the foundation is settled before things sit on top of it. 3 FIX JAGGIES AND ADD DETAIL - walk the cluster borders looking for step-length missteps, push pixels to repair them, and add contrast, light and small details as you go. Keep layers few - sky, mid, near is usually enough; more layers than that makes the picture messy rather than controllable. This technique suits organic and painterly subjects best: nature, plants, water, mountains, backgrounds; it is the wrong tool for a 16px sprite where the silhouette has to be deliberate. Keep the working size in the 64-128 range - under 64 there is no room for the blobs, over 128 it turns into ordinary digital painting.",
     },
     KnowledgeEntry {
         id: "realism",
@@ -686,7 +739,7 @@ pub const ENTRIES: &[KnowledgeEntry] = &[
             "grid size",
             "how big",
         ],
-        body: "Read width and height from the canvas context and derive EVERY coordinate from them - a script with literal constants tuned for 64px blasts off the edge of a 24px canvas. Under 16 pixels the silhouette is the whole picture and outlines hurt; at 32-64 spend it on two or three signature details plus a 3-step ramp; at 96 and above loops and math pay for themselves and you can carry 4-5 ramp steps per material. Use canvas.scale(k) for a 64px-design constant, canvas.grid(cols, rows) for a cell grid, and canvas.cx / canvas.cy instead of a hand-computed centre. Colour budget follows the canvas: 4 at 8x8, 8 at 16x16, 16 at 24 and 32, 24 at 48x48, 32 at 64x64, 48 at 128x128, 64 at 256, 96 at 512, 128 at 1024, 256 at 2048 - more colours on a small canvas buys noise, not detail. Standard sizes worth knowing by use: 8x8 for icons and small props, 16x16 for classic-game props and small characters, 32x32 for a character whose face has to read, 64x64 for portraits and detail-heavy characters, 29x29 for one large square bead board, 128 and up for scenes. One project keeps ONE ratio: mixing sizes looks like assets pasted together from different games.",
+        body: "Read width and height from the canvas context and derive EVERY coordinate from them - a script with literal constants tuned for 64px blasts off the edge of a 24px canvas. Under 16 pixels the silhouette is the whole picture and outlines hurt; at 32-64 spend it on two or three signature details plus a 3-step ramp; at 96 and above loops and math pay for themselves and you can carry 4-5 ramp steps per material. Use canvas.scale(k) for a 64px-design constant, canvas.grid(cols, rows) for a cell grid, and canvas.cx / canvas.cy instead of a hand-computed centre. Colour budget follows the canvas: 4 at 8x8, 8 at 16x16, 16 at 24 and 32, 24 at 48x48, 32 at 64x64, 48 at 128x128, 64 at 256, 96 at 512, 128 at 1024, 256 at 2048 - more colours on a small canvas buys noise, not detail. Standard sizes worth knowing by use: 8x8 for icons and small props, 16x16 for classic-game props and small characters, 32x32 for a character whose face has to read, 64x64 for portraits and detail-heavy characters, 29x29 for one large square bead board, 128 and up for scenes. One project keeps ONE ratio: mixing sizes looks like assets pasted together from different games. Climb the ladder rather than jumping: 16x16 with 4 colours, then 32x32 with 12 colours and pixel-perfect 1px lines plus a first outline, then 48x48 with 16 colours, and only then scenes around 100x64. Stay on a rung until the pixels stop feeling like a puzzle, and skip animation entirely until static pieces are comfortable.",
     },
     KnowledgeEntry {
         id: "starter-subjects",
@@ -1610,6 +1663,21 @@ mod tests {
             ("分不清该画成线还是画成体块，块状像素怎么处理", "form-first"),
             ("颜色太艳了有点刺眼，灰阶跨度也不够", "palette-control"),
             ("交付前把它翻转看看，再去色核对明暗", "final-checks"),
+            // Pedro Medeiros 两篇与 Slynyrd Pixelblog 60 吸进来的规则。
+            ("色块起稿怎么画，不打线稿行不行", "cluster-sketching"),
+            ("受限调色板要做色相替换，高光该借哪个色", "ramps"),
+            ("小画布上的孤立像素该不该删掉", "pixel-clusters"),
+            // 半成品不能按百分比缩放，只能整倍放大。
+            ("把像素图放大 107% 可不可以", "upscale"),
+            // 横版跑射角色的上下半身分层与移动射击。
+            ("横版射击游戏角色，边跑边开枪怎么分层", "run-and-gun"),
+            ("跑射角色跳跃动作和落地动作怎么做", "run-and-gun"),
+            ("横版瓦片的角块和接缝怎么处理", "tile-edges"),
+            // saint11 教程合集里单独成篇的几块：特效、俯视方向。
+            ("爆炸特效的火光和烟雾怎么分帧", "vfx"),
+            ("打中敌人的时候要有一帧闪光", "vfx"),
+            ("俯视四方向的地图角色怎么保证不跑形", "topdown"),
+            ("上下左右的行走图朝向要各画一遍吗", "topdown"),
         ] {
             let hits = retrieve(query, 4);
             assert!(
