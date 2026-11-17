@@ -23,10 +23,19 @@ use std::time::Duration;
 /// 那一段；响应头那一段由 runner 的 `timeout` 收口。
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// TCP keepalive 的探测间隔。
+///
+/// 合盖、关屏、换 Wi-Fi 之后，手里那几条连接在操作系统眼里还「活着」，而另一
+/// 头早就没了。没有 keepalive，读流会一直挂在那个死连接上，直到应用层的静默
+/// 看门狗（三百秒）才认账；有 keepalive，内核二三十秒内就把连接判死，读流立刻
+/// 报错走重发那条路，用户看到的是一次自动重试，而不是「发完就没动静了」。
+const KEEPALIVE: Duration = Duration::from_secs(30);
+
 /// 所有 provider 共用的 HTTP 客户端。
 pub(crate) fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
+        .tcp_keepalive(KEEPALIVE)
         .build()
         .unwrap_or_else(|_| reqwest::Client::new())
 }

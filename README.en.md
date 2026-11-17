@@ -84,7 +84,6 @@ Grab the latest installer from [Releases](https://github.com/Mutantcat-Working-G
 | Windows arm64 | `AIPixel_<version>_arm64-setup.exe` |
 | macOS (Intel) | `AIPixel_<version>_x64.dmg` |
 | macOS (Apple Silicon) | `AIPixel_<version>_aarch64.dmg` |
-| macOS (universal) | `AIPixel_<version>_universal.dmg` |
 | Linux x86_64 | `AIPixel_<version>_amd64.AppImage` |
 | Linux aarch64 | `AIPixel_<version>_aarch64.AppImage` |
 
@@ -108,6 +107,8 @@ Grab the latest installer from [Releases](https://github.com/Mutantcat-Working-G
 AIPixel is both an MCP client (attaching other people's MCP servers) and an MCP server that external AI can drive. The server exposes the full canvas loop - **create → draw → export to a path** - so one external agent plus a game engine is enough for the AI to draw assets, write them to disk and have the engine load them directly.
 
 The switch lives in **Settings → MCP** and is off by default. It binds to the loopback address only (`127.0.0.1`) and never opens to the network. The default port is `7815`; set it to `0` to let the kernel pick a free one.
+
+Loopback binding alone does not mean "anyone may call it": the port can write files to caller-supplied paths, so every request passes an origin gate first. Browser requests must carry an `Origin` belonging to this app's own webview or a `localhost` / `127.0.0.1` dev server; any other web page gets a 403. Non-browser clients (Claude Desktop, curl, engines) send no `Origin` and are accepted when the `Host` header names this machine. Each connection also carries a 5-second read timeout, so half-sent requests cannot squat on a task.
 
 It exposes 18 tools in four groups:
 

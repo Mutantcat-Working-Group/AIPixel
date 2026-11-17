@@ -1109,6 +1109,62 @@ describe("静默提醒（模型半天不吭声）", () => {
     expect(useStore.getState().stalled).toBe(false);
   });
 
+  it("睡了一觉再醒来补跑的定时器不算卡死：安静重打表，不亮红字", async () => {
+    vi.useFakeTimers();
+    useStore.setState({
+      activeId: "doc-01",
+      lang: "zh",
+      entries: [],
+      lastQuery: null,
+      attachments: [],
+      notice: null,
+      running: false,
+      models: { active_id: "", entries: [] },
+    });
+
+    // 发一句：占位节点 + 静默表同时打上；从这里开始才是「多久没动静」的计时。
+    await useStore.getState().send("画一只八帧橘猫行走图");
+    expect(useStore.getState().stalled).toBe(false);
+
+    // 屏幕关了八小时：JS 定时器冻着，墙钟照走。醒来那一刻过期定时器补跑，
+    // 到点的读数看起来「远超门槛」，但那不是模型不回话。
+    vi.setSystemTime(Date.now() + 8 * 60 * 60 * 1000);
+    vi.advanceTimersByTime(STALL_SECONDS * 1000 + 1);
+
+    expect(useStore.getState().stalled).toBe(false);
+    expect(useStore.getState().running).toBe(true);
+    // 这一回合到此为止：下一条用例不该接手一个还挂着的 running。
+    useStore.setState({ running: false, runStartedAt: null });
+  });
+
+  it("睡过去之后醒来补跑：回合计时器不该显示成跑了几个小时", async () => {
+    vi.useFakeTimers();
+    useStore.setState({
+      activeId: "doc-01",
+      lang: "zh",
+      entries: [],
+      lastQuery: null,
+      attachments: [],
+      notice: null,
+      running: false,
+      models: { active_id: "", entries: [] },
+    });
+
+    await useStore.getState().send("画一只八帧橘猫行走图");
+    const startedAt = useStore.getState().runStartedAt ?? Date.now();
+
+    // 屏幕关了八小时：过期定时器醒来补跑，墙钟比打表那一刻多出一大截。
+    vi.setSystemTime(startedAt + 8 * 60 * 60 * 1000);
+    vi.advanceTimersByTime(STALL_SECONDS * 1000 + 1);
+
+    const state = useStore.getState();
+    expect(state.stalled).toBe(false);
+    expect(state.running).toBe(true);
+    // 睡过去的那段被抹掉：读数远小于八小时，而不是把睡觉算成模型在干活。
+    expect(Date.now() - (state.runStartedAt ?? startedAt)).toBeLessThan(2 * 60 * 60 * 1000);
+    useStore.setState({ running: false, runStartedAt: null });
+  });
+
   /** 退让出微任务队列，直到条件成立或让够了次数。用来等一条异步链走到某一步。 */
   async function flushUntil(ready: () => boolean, hops = 200): Promise<void> {
     for (let i = 0; i < hops && !ready(); i++) await Promise.resolve();

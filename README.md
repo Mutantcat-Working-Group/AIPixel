@@ -84,7 +84,6 @@
 | Windows arm64 | `AIPixel_<版本>_arm64-setup.exe` |
 | macOS（Intel） | `AIPixel_<版本>_x64.dmg` |
 | macOS（Apple Silicon） | `AIPixel_<版本>_aarch64.dmg` |
-| macOS（universal） | `AIPixel_<版本>_universal.dmg` |
 | Linux x86_64 | `AIPixel_<版本>_amd64.AppImage` |
 | Linux aarch64 | `AIPixel_<版本>_aarch64.AppImage` |
 
@@ -108,6 +107,8 @@
 本程序既可以是 MCP 客户端（挂别人的 MCP 服务器），也可以作为 MCP 服务端被外部 AI 驱动。服务端对外暴露完整的画布闭环——**创建 → 绘制 → 导出到指定路径**，用一个外部 Agent 加一个游戏引擎，就能让 AI 自己画素材、自己落盘、引擎直接加载。
 
 开关在 **设置 → MCP**，默认关闭；监听地址固定为本机回环，只响应 `127.0.0.1`，不对外网开放；端口默认 `7815`，填 `0` 表示让内核挑一个空闲端口。
+
+绑回环不等于「谁都能调」：这个端口能按调用方给的路径写文件，所以请求进来先过来源闸。浏览器带来的 `Origin` 只放行本程序自己的 webview 与 `localhost` / `127.0.0.1` 的开发源，其它网页一律 403；非浏览器客户端（Claude Desktop、curl、游戏引擎）不带 `Origin`，按 `Host` 认出是本机就放行。连接另外带 5 秒读超时，半截请求不会一直占着。
 
 对外一共 18 个工具，分四类：
 

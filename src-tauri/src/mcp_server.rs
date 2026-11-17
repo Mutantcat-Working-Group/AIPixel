@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use agent_core::AgentSession;
 use pixel_core::decode;
-use pixel_core::document::Document;
+use pixel_core::document::{Document, MAX_DIMENSION};
 use pixel_core::ops::{self, PixelOperation};
 use pixel_core::pixelize::{self, FitMode, PixelizeOptions};
 use pixel_core::Rgba;
@@ -427,6 +427,11 @@ struct HttpRequest {
     method: String,
     path: String,
     body: Option<Vec<u8>>,
+    /// `Origin` 头（浏览器请求才有）。空 = 非浏览器客户端。
+    origin: Option<String>,
+    /// `Host` 头。用来挡 DNS rebinding：把 evil.com 解析到 127.0.0.1 之后，
+    /// 请求里 Host 仍是 evil.com，而 Origin 可能为空（非 fetch 路径）。
+    host: Option<String>,
 }
 
 /// 从一段已收到的字节里切出一个完整请求。body 没收全就回 None，
@@ -440,10 +445,18 @@ fn parse_http_request(buf: &[u8]) -> Option<HttpRequest> {
     let method = parts.next()?.to_ascii_uppercase();
     let path = parts.next()?.to_string();
     let mut content_length: Option<usize> = None;
+    let mut origin: Option<String> = None;
+    let mut host: Option<String> = None;
     for line in lines {
         if let Some((name, value)) = line.split_once(':') {
-            if name.trim().eq_ignore_ascii_case("content-length") {
-                content_length = value.trim().parse::<usize>().ok();
+            let name = name.trim();
+            let value = value.trim();
+            if name.eq_ignore_ascii_case("content-length") {
+                content_length = value.parse::<usize>().ok();
+            } else if name.eq_ignore_ascii_case("origin") {
+                origin = Some(value.to_string());
+            } else if name.eq_ignore_ascii_case("host") {
+                host = Some(value.to_string());
             }
         }
     }
@@ -465,7 +478,13 @@ fn parse_http_request(buf: &[u8]) -> Option<HttpRequest> {
         }
         None => None,
     };
-    Some(HttpRequest { method, path, body })
+    Some(HttpRequest {
+        method,
+        path,
+        body,
+        origin,
+        host,
+    })
 }
 
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -474,11 +493,64 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
+/// 回环端口的来源闸。
+///
+/// 这个端口能按调用方给的路径写文件，而「只绑 127.0.0.1」挡不住浏览器：任何
+/// 网页都能向本机回环端口发 `fetch`，服务端只看 TCP 来源会一律当成「本机」。
+/// 所以按首部判来源：
+/// - 浏览器请求一定带 `Origin`。只放行本程序自己的 webview（`tauri://`、
+///   `http://tauri.localhost` 之类）与常见本机开发源（`http://localhost:…`、
+///   `http://127.0.0.1:…`）。网页域名一律 403。
+/// - 非浏览器客户端（Claude Desktop、curl、游戏引擎）不带 `Origin`，放行，
+///   但仍要求 `Host` 指向本机，挡掉 DNS rebinding 那种「域名解析到 127.0.0.1」。
+/// - 预检（OPTIONS）一律放行：浏览器带 `Access-Control-Request-*` 来问，
+///   真正的来源校验落在随后的 POST 上，预检回 204 不会泄露任何东西。
+fn origin_allowed(request: &HttpRequest) -> bool {
+    let Some(origin) = request.origin.as_deref() else {
+        // 没有 Origin：只认 Host 是本机（含端口）。Host 也缺的多半是畸形请求。
+        let Some(host) = request.host.as_deref() else {
+            return true;
+        };
+        let host = host.trim();
+        return host == "127.0.0.1"
+            || host.starts_with("127.0.0.1:")
+            || host == "localhost"
+            || host.starts_with("localhost:");
+    };
+    let origin = origin.trim().to_ascii_lowercase();
+    // 本程序自己的 webview。macOS/Linux 是 tauri://localhost，Windows 是
+    // https://tauri.localhost；开发模式则是 devUrl（localhost:1420）。
+    if origin.starts_with("tauri://")
+        || origin.starts_with("http://tauri.localhost")
+        || origin.starts_with("https://tauri.localhost")
+    {
+        return true;
+    }
+    // 本机开发源：网页里的引擎从本地 dev server 直连这个端口。
+    for prefix in [
+        "http://localhost",
+        "https://localhost",
+        "http://127.0.0.1",
+        "https://127.0.0.1",
+    ] {
+        if let Some(rest) = origin.strip_prefix(prefix) {
+            // 必须边界干净：`localhost.evil.com` 不算本机。
+            if rest.is_empty() || rest.starts_with(':') {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn build_http_response(status: u16, reason: &str, content_type: &str, body: &[u8]) -> Vec<u8> {
     let mut out = format!("HTTP/1.1 {status} {reason}\r\n");
     out.push_str(&format!("Content-Type: {content_type}\r\n"));
     out.push_str(&format!("Content-Length: {}\r\n", body.len()));
-    // CORS：网页里的游戏引擎直接 fetch 这个端口，浏览器要先拿到这句放行。
+    // CORS：网页里的游戏引擎从本地 dev server 直接 fetch 这个端口，浏览器要
+    // 先拿到这句放行。安全边界不在这行：真正的来源校验是 `origin_allowed`，
+    // 域名来源在进 respond 之前就被 403 挡掉了，所以放行 `*` 不会把别人的网页
+    // 也放进来（这里没有 cookie / 凭证，`*` 不构成越权）。
     out.push_str("Access-Control-Allow-Origin: *\r\n");
     out.push_str("Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n");
     out.push_str(
@@ -518,6 +590,10 @@ async fn accept_loop(
     counters.running.store(false, Ordering::SeqCst);
 }
 
+/// 等对方把一个请求发完的上限。半截请求（只发 `Content-Length` 不送 body）会在
+/// 这里被掐掉：不加这道闸，一条连接就能永久占一个任务，本机也能被拖出堆积。
+const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
+
 async fn handle_connection(
     mut stream: TcpStream,
     state: Arc<AppState>,
@@ -536,7 +612,14 @@ async fn handle_connection(
                 b"request body too large",
             );
         }
-        match stream.read(&mut chunk).await {
+        // 两次 socket 读之间挂一个上限：对方半个包停在那里时，不超时就一直等。
+        let read = match tokio::time::timeout(READ_IDLE_TIMEOUT, stream.read(&mut chunk)).await {
+            Ok(read) => read,
+            // 超时：没什么可答的，收摊。回 408 反而会让一条已经断气的连接多占
+            // 一次写操作的预算，而正常客户端这时候早已超时退出。
+            Err(_) => return,
+        };
+        match read {
             // 对手方先撤了：这一轮没什么可答的。
             Ok(0) => return,
             Ok(n) => buf.extend_from_slice(&chunk[..n]),
@@ -557,6 +640,16 @@ async fn respond(
     app: Option<&AppHandle>,
     counters: &ServerCounters,
 ) -> Vec<u8> {
+    // 预检放行、其余先过来源闸：这个端口能写文件，不能把「谁在调」交给 TCP
+    // 地址去回答。见 `origin_allowed`。
+    if request.method != "OPTIONS" && !origin_allowed(&request) {
+        return build_http_response(
+            403,
+            "Forbidden",
+            "text/plain; charset=utf-8",
+            b"this origin is not allowed to drive the AIPixel MCP server",
+        );
+    }
     match request.method.as_str() {
         // 预检：浏览器里的引擎会先发一个 OPTIONS，空答配 CORS 头就算过。
         "OPTIONS" => build_http_response(204, "No Content", "", &[]),
@@ -799,8 +892,11 @@ fn spec(name: &str, description: &str, properties: Value, required: &[&str]) -> 
 /// 清单内容整个进程生命期内不变，所以算一次就够，命中时只是一次 clone。
 static TOOL_SPECS: std::sync::LazyLock<Vec<Value>> = std::sync::LazyLock::new(tool_specs);
 
-/// 16 个工具。名字一律动词开头，字段一律 snake_case 的英文：
+/// 工具清单。名字一律动词开头，字段一律 snake_case 的英文：
 /// 读这份清单的是外部模型，字段名越接近日常英语，它填错的概率越低。
+///
+/// 条数以 `tool_specs().len()` 为准（单测钉住 18）：手写数字迟早和清单漂移，
+/// 而这个数同时出现在 README 的对外文档里。
 fn tool_specs() -> Vec<Value> {
     vec![
         spec(
@@ -813,8 +909,10 @@ fn tool_specs() -> Vec<Value> {
             "create_canvas",
             "按指定宽高新建一个画布会话，返回新会话的 id。一个会话就是一份独立工程。",
             json!({
-                "width": { "type": "integer", "description": "画布宽度（像素），1..4096" },
-                "height": { "type": "integer", "description": "画布高度（像素），1..4096" },
+                // 上限跟着内核的 MAX_DIMENSION 走：写死一个更大的数，外部模型
+                // 填 2048 会被 create 直接拒掉，白跑一趟。
+                "width": { "type": "integer", "description": format!("画布宽度（像素），1..{MAX_DIMENSION}") },
+                "height": { "type": "integer", "description": format!("画布高度（像素），1..{MAX_DIMENSION}") },
                 "name": { "type": "string", "description": "会话名（可选）" },
             }),
             &["width", "height"],
@@ -2114,6 +2212,59 @@ mod tests {
         assert!(parse_http_request(raw.as_bytes()).is_none());
     }
 
+    /// 来源闸：浏览器带上来的 Origin 只认本程序自己的 webview 与本机开发源，
+    /// 其余网页一律挡住；非浏览器客户端靠 Host 认出「就是本机」。
+    #[test]
+    fn origin_gate_only_lets_the_app_and_loopback_through() {
+        fn req(origin: Option<&str>, host: Option<&str>) -> HttpRequest {
+            HttpRequest {
+                method: "POST".into(),
+                path: "/mcp".into(),
+                body: Some(Vec::new()),
+                origin: origin.map(str::to_string),
+                host: host.map(str::to_string),
+            }
+        }
+        // 本程序自己的 webview。
+        for origin in [
+            "tauri://localhost",
+            "http://tauri.localhost",
+            "https://tauri.localhost",
+        ] {
+            assert!(origin_allowed(&req(Some(origin), Some("127.0.0.1:7815"))));
+        }
+        // 本机开发源（网页里的引擎直连回环端口）。
+        assert!(origin_allowed(&req(Some("http://localhost:3000"), None)));
+        assert!(origin_allowed(&req(Some("http://127.0.0.1:1420"), None)));
+        // 域名来源一律挡住；长得像 localhost 的恶意域也不算。
+        assert!(!origin_allowed(&req(Some("https://evil.example"), None)));
+        assert!(!origin_allowed(&req(
+            Some("http://localhost.evil.example"),
+            None
+        )));
+        // 非浏览器客户端不带 Origin：Host 指向本机才放行。
+        assert!(origin_allowed(&req(None, Some("127.0.0.1:7815"))));
+        assert!(origin_allowed(&req(None, Some("localhost:7815"))));
+        // DNS rebinding：域名被解析到 127.0.0.1，Host 仍是那个域名。
+        assert!(!origin_allowed(&req(None, Some("evil.example:7815"))));
+    }
+
+    /// 来源闸要在进 respond 之前生效：域名来源拿到 403 的措辞，且不含任何工具回执。
+    #[test]
+    fn a_foreign_origin_gets_a_403_that_says_why() {
+        let raw = "POST /mcp HTTP/1.1\r\nHost: evil.example:7815\r\nOrigin: https://evil.example\r\nContent-Length: 2\r\n\r\n{}";
+        let request = parse_http_request(raw.as_bytes()).expect("complete request");
+        assert!(!origin_allowed(&request));
+        let text = text_of(&build_http_response(
+            403,
+            "Forbidden",
+            "text/plain; charset=utf-8",
+            b"this origin is not allowed to drive the AIPixel MCP server",
+        ));
+        assert!(text.starts_with("HTTP/1.1 403"), "{text}");
+        assert!(text.contains("not allowed"));
+    }
+
     /// 响应头是客户端能不能接上的关键：少一个 CORS 头，浏览器里的引擎就过不去。
     #[test]
     fn build_http_response_declares_what_clients_need() {
@@ -2938,6 +3089,18 @@ mod tests {
         let text = text_of(&body);
         assert!(text.starts_with("HTTP/1.1 204"));
         assert!(text.contains("Access-Control-Allow-Origin: *"));
+
+        // 来源闸在真 socket 上也一样生效：网页 Origin 与伪造 Host 都是 403。
+        let web_origin =
+            b"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:7815\r\nOrigin: https://evil.example\r\nContent-Length: 2\r\n\r\n{}";
+        let body = round_trip(&addr, web_origin).await;
+        assert!(text_of(&body).starts_with("HTTP/1.1 403"), "网页来源应被挡");
+        let rebound = b"GET /mcp HTTP/1.1\r\nHost: evil.example:7815\r\n\r\n";
+        let body = round_trip(&addr, rebound).await;
+        assert!(
+            text_of(&body).starts_with("HTTP/1.1 403"),
+            "DNS rebinding 应被挡"
+        );
 
         // POST initialize：整条 JSON-RPC 往返真 socket。
         let payload = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"}).to_string();

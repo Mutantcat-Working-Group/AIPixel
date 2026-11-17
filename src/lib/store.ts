@@ -726,7 +726,48 @@ function wait(ms: number): Promise<void> {
  */
 const WAKE_ABSENCE_MS = 60_000;
 
+/**
+ * 唤醒心跳的间隔。必须小于 `WAKE_ABSENCE_MS`：心跳靠「这一次与上一次隔了多久」
+ * 判断有没有被冻住，间隔本身要是贴着阈值，正常节拍就会被误判成睡了一觉。
+ * 取四分之一阈值，留出两拍容错。
+ */
+const WAKE_HEARTBEAT_MS = 15_000;
+
+/**
+ * 静默表的定时器到点后，墙钟允许比门槛多走多少还认「这就是真的没动静」。
+ *
+ * 浏览器把冻结期间的定时器堆到醒来一口气补跑，到点那一刻的墙钟已经越过了
+ * 门槛；正常到点只会有毫秒级的抖动。留一分钟的余量，够盖住调度延迟，又能
+ * 把「睡了一夜」和「真卡了三十分钟」分开。
+ */
+const WAKE_JUMP_SLACK_MS = 60_000;
+
+/**
+ * 多长的离开才算「睡过去」而不是「切出去看了眼别的窗口」。
+ *
+ * 回合计时器（`chat.elapsed`）按墙钟算；睡一夜回来，界面会显示「本轮已经跑了
+ * 8 小时」。三分钟以内当正常切窗口，超过就把它从这一回合的账上抹掉——模型
+ * 真正干活的那段时间仍然照记。
+ */
+const SLEEP_GAP_MS = 3 * 60_000;
+
 let stallTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * 墙钟上「上一次确认进程还醒着」的时刻。
+ *
+ * 所有唤醒探测器（心跳、焦点、可见性、静默表补跑）共用这一个读数：谁先醒谁把
+ * 那段睡过去的时间结算掉，后来者看到的就是零。没有这层共用，心跳和静默表会
+ * 各算一遍同一段睡眠，回合计时被抹两次，直接抹成负数。
+ */
+let lastAliveAt = Date.now();
+
+/** 记下「现在进程还醒着」，返回距上一次确认过去了多久。 */
+function noteAwake(now = Date.now()): number {
+  const gap = now - lastAliveAt;
+  lastAliveAt = now;
+  return gap > 0 ? gap : 0;
+}
 /**
  * 第几趟 loadDocument 了。同一时刻只认最后一次。
  *
@@ -863,13 +904,35 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
     }
   }
 
-  /** 每有一条事件活着进来就重打表。还在吐字就不算卡，一个事件都不来才会响。 */
+  /**
+   * 每有一条事件活着进来就重打表。还在吐字就不算卡，一个事件都不来才会响。
+   *
+   * 打表时同时记下墙钟读数。系统睡过去期间 webview 的定时器全冻着，醒来那一
+   * 刻过期的那一个会立刻补跑：只看「定时器到点了」就会把一整夜没机会来事件
+   * 的回合误判成假死。所以定时器响时先对一下墙钟——实际过去了远超一个门槛，
+   * 说明这是睡醒补跑，不是真的没动静，安静地重打一次表就好。
+   */
   function touchStallWatch() {
     clearStallWatch();
+    // 有事件活着进来，就说明进程此刻醒着，顺便把睡眠账本对齐到此刻。打表时不
+    // 记这一笔，「睡没睡过」就只能拿别处更早的读数去猜。
+    noteAwake();
+    const armedAt = Date.now();
     stallTimer = setTimeout(() => {
       stallTimer = null;
       const state = getState();
       if (!state.running) return;
+      // 墙钟比定时器多走了一大截 = 中间睡过/被冻结过。这一次不是卡死，
+      // 是醒来补跑：先把睡过去的那段从回合计时里抹掉，再重打表。不亮横幅，
+      // 也不拿一个陈旧读数去对账。
+      if (Date.now() - armedAt > STALL_MS + WAKE_JUMP_SLACK_MS) {
+        // 从「上次确认醒着」算起，而不是从打表那一刻：心焦等着的探测可能已经
+        // 结算过同一段睡眠，只认还没人动过的那一段，避免重复扣时间。
+        rebaseRunClock(noteAwake());
+        if (state.stalled) setState({ stalled: false });
+        touchStallWatch();
+        return;
+      }
       // 先按原逻辑亮提醒，用户不必等一次 IPC 往返；随后再问 Rust 这轮到底
       // 还在不在跑。后者是僵尸 running 的对账口：task 已被 abort、事件丢了，
       // 界面就得自己收口，不能把停止和重试继续押在不会来的事件上。
@@ -1019,36 +1082,88 @@ export const useStore = create<StoreState & StoreActions>()((setState, getState)
   }
 
   /**
+   * 把「睡过去的那一段」从这一回合的账上抹掉。
+   *
+   * 界面上的回合计时按墙钟算；睡一夜回来，用户看到的是「本轮已经跑了 8 小时」。
+   * 起点往前挪 absence 毫秒，模型真正干活的那段时间仍然照记。
+   */
+  function rebaseRunClock(absence: number) {
+    const state = getState();
+    const now = Date.now();
+    const next: Partial<StoreState> = {};
+    if (state.running && state.runStartedAt !== null) {
+      // 不能挪过「现在」：这段时长是从上一次确认醒着的读数算来的，那读数最多比
+      // 真正的睡着早一拍（心跳间隔），刚起头的一回合会被挪成负数读数。
+      next.runStartedAt = Math.min(state.runStartedAt + absence, now);
+    }
+    let touched = false;
+    const shadows: Record<string, SessionShadow> = {};
+    for (const [id, shadow] of Object.entries(state.sessionShadows)) {
+      if (shadow.running) {
+        shadows[id] = {
+          ...shadow,
+          // 起点和最后一条事件都往前挪：切回来时「静默了多久」和「跑了多久」
+          // 才都不会把睡过去的那段算进去。
+          runStartedAt:
+            shadow.runStartedAt === null ? null : Math.min(shadow.runStartedAt + absence, now),
+          lastEventAt:
+            shadow.lastEventAt === null ? null : Math.min(shadow.lastEventAt + absence, now),
+        };
+        if (shadow.runStartedAt !== null) touched = true;
+      } else {
+        shadows[id] = shadow;
+      }
+    }
+    if (touched) next.sessionShadows = shadows;
+    if (next.runStartedAt !== undefined || touched) setState(next);
+  }
+
+  /**
    * 休眠唤醒 / 长时间离开再回来的对齐。
    *
    * 系统睡过去期间 JS 定时器全冻着，醒来那一瞬间：过期的静默表、攒了一路的
    * 会话簿事件、停在睡前读数的计时器一起扑上来，界面看到的就是「刚醒来卡
    * 半秒，然后什么都跳一遍」。焦点一回来就把各路的表对齐——攒着的事件立刻
    * 结算，静默表重新打表；睡过去的时长不算在「模型不回话」的账上。
+   *
+   * 光靠 blur / focus / visibilitychange 不够：关屏时窗口只是被判定成
+   * occluded（macOS 上 WebKit 会把 web 进程整体掐停），焦点和 visibility
+   * 都不一定变，醒来也就没有事件可听。所以另挂一个 15 秒心跳；心跳、焦点、
+   * 可见性三条路都走同一个 `settleWake`，由 `noteAwake` 记账，同一段睡眠只会
+   * 被结算一次。
    */
   function armWakeSync() {
     if (wakeSyncArmed || typeof window === "undefined") return;
     wakeSyncArmed = true;
-    let awayAt: number | null = null;
-    const thaw = () => {
-      // 离开过再回来才算「醒」：一直在前台的回合不碰这些表，
-      // 免得用户眨个眼回来看到自己没等过的红字。
-      const absence = awayAt === null ? 0 : Date.now() - awayAt;
-      awayAt = null;
+    /**
+     * 结算一次「进程刚从冻结里回来」。
+     *
+     * 只认 `noteAwake` 交出来的、还没被任何人动过的那一段；短于唤醒阈值就
+     * 什么都不做——一直在前台的回合不该因为这些表被碰。
+     */
+    const settleWake = () => {
+      const absence = noteAwake();
       if (absence < WAKE_ABSENCE_MS) return;
       sessionCoalescer?.flush();
+      if (absence >= SLEEP_GAP_MS) rebaseRunClock(absence);
       if (!getState().running) return;
       clearStallWatch();
       if (getState().stalled) setState({ stalled: false });
       touchStallWatch();
+      // 睡过去这段时间里收尾事件可能没送到：问一次 Rust 的权威读数，
+      // 它说这轮早就不在跑，就在本地补一个收口，别把停止和重试押在
+      // 一个不会来的事件上。
+      const id = getState().activeId;
+      if (id) void reconcileReleasedTurn(id, turnVanishedEvent(), 0);
     };
-    window.addEventListener("blur", () => {
-      awayAt = Date.now();
-    });
-    window.addEventListener("focus", thaw);
+    window.addEventListener("focus", settleWake);
     document.addEventListener("visibilitychange", () => {
-      if (!document.hidden) thaw();
+      if (!document.hidden) settleWake();
     });
+    // 心跳：每 15 秒确认一次「进程还醒着」。被冻住的那段时间里它一次都跑不了，
+    // 回来补跑时 noteAwake 会交出一大截——这就是关屏再打开、没有焦点事件可听
+    // 时的唯一线索。
+    window.setInterval(settleWake, WAKE_HEARTBEAT_MS);
   }
 
   /** 等这一回合把占用交回来。
